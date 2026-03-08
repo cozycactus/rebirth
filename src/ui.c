@@ -14,8 +14,10 @@ uint64_t get_absolute_time(void) { return 0; }
 
 #include <string.h>
 #include "sequencer.h"
+#include "ssd1309.h"
 #include "encoder.h"
 #include "mcp23017.h"
+#include "flash_storage.h"
 
 // ─── Tempo LED ─────────────────────────────────────────────────
 #define TEMPO_LED_PIN   25
@@ -57,6 +59,10 @@ typedef struct {
     // Tempo LED
     uint32_t last_blink_ms;
     bool     led_on;
+
+    // Flash notification: shown for ~1 second, then cleared
+    char     notify_msg[17];    // up to 16 chars
+    uint8_t  notify_ticks;      // counts down at ~30 fps
 } ui_state_t;
 
 static ui_state_t ui;
@@ -268,6 +274,28 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
             }
         }
     }
+
+    // Step button 9 (index 8): save to flash
+    if (steps->pressed & (1u << 8)) {
+        if (flash_storage_save()) {
+            memcpy(ui.notify_msg, "  SAVED  OK   ", 15);
+        } else {
+            memcpy(ui.notify_msg, "  SAVE FAILED ", 15);
+        }
+        ui.notify_msg[15] = '\0';
+        ui.notify_ticks = 30;   // ~1 second at 30 fps
+    }
+
+    // Step button 10 (index 9): load from flash
+    if (steps->pressed & (1u << 9)) {
+        if (flash_storage_load()) {
+            memcpy(ui.notify_msg, "  LOADED OK   ", 15);
+        } else {
+            memcpy(ui.notify_msg, "  LOAD FAILED ", 15);
+        }
+        ui.notify_msg[15] = '\0';
+        ui.notify_ticks = 30;
+    }
 }
 
 // ─── Track Config Handler ──────────────────────────────────────
@@ -429,6 +457,17 @@ static void handle_song_edit(int8_t e1d, int8_t e2d,
     }
 }
 
+// ─── Notification overlay ──────────────────────────────────────
+
+static void render_notify(void) {
+    if (ui.notify_ticks == 0) return;
+    // Draw a centred box over the middle of the screen
+    ssd1309_fill_rect(8, 24, 112, 16, false);   // Clear background
+    ssd1309_draw_rect(8, 24, 112, 16, true);     // Border
+    ssd1309_draw_string(14, 28, ui.notify_msg, false);
+    ui.notify_ticks--;
+}
+
 // ─── UI Render (dispatches to display functions) ───────────────
 
 void ui_render(void) {
@@ -468,6 +507,9 @@ void ui_render(void) {
             display_draw_song_view(&g_seq.song, ui.song_cursor);
             break;
     }
+
+    // Overlay flash notification if active
+    render_notify();
 }
 
 // ─── Initialization ────────────────────────────────────────────

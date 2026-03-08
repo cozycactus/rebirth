@@ -22,6 +22,7 @@ add_executable(rp2040_sequencer
     src/ssd1309.c
     src/encoder.c
     src/mcp23017.c
+    src/flash_storage.c
 )
 
 target_include_directories(rp2040_sequencer PRIVATE
@@ -37,6 +38,7 @@ target_link_libraries(rp2040_sequencer
     hardware_sync
     hardware_i2c        # For MCP23017 button expander
     hardware_gpio
+    hardware_flash
     # tinyusb_device    # Uncomment for USB MIDI
     # tinyusb_board
 )

@@ -1,4 +1,5 @@
 #include "pico/stdlib.h"
+#include "pico/multicore.h"
 #include "hardware/timer.h"
 #include "hardware/sync.h"
 #include "hardware/irq.h"
@@ -286,6 +287,9 @@ void sequencer_core1_entry(void) {
     // Arm the first alarm
     uint64_t now = timer_hw->timerawl;
     timer_hw->alarm[timer_alarm_num] = (uint32_t)(now + pulse_interval_us);
+
+    // Allow Core 0 to pause us during flash writes
+    multicore_lockout_victim_init();
 
     // Core 1 idle loop — the real work happens in the ISR
     while (true) {

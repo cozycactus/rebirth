@@ -100,10 +100,10 @@ test/
 - [x] Pattern queue
 - [x] Track mutes
 - [x] 61 unit tests passing
-- [ ] OLED display driver
-- [ ] UI state machine (pattern edit, song edit, settings)
+- [x] OLED display driver (SSD1309, SPI, full framebuffer)
+- [x] UI state machine (pattern edit, song edit, track config, pattern select)
+- [x] Flash storage — save/load all patterns + song (step 9/10 in pattern select)
 - [ ] USB MIDI
-- [ ] Flash storage for patterns/songs
 - [ ] MIDI clock sync (external)
 
 ## License
