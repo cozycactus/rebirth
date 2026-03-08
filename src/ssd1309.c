@@ -20,6 +20,7 @@ void sleep_ms(uint32_t ms) { (void)ms; }
 #define GPIO_OUT 1
 #endif
 
+#include <string.h>
 #include "ssd1309.h"
 #include "font5x7.h"
 

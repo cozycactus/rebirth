@@ -12,6 +12,7 @@ uint64_t get_absolute_time(void) { return 0; }
 #define GPIO_OUT 1
 #endif
 
+#include <string.h>
 #include "sequencer.h"
 #include "encoder.h"
 #include "mcp23017.h"

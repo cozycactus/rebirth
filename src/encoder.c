@@ -15,6 +15,7 @@ uint64_t get_absolute_time(void) { return 0; }
 #define GPIO_IN 0
 #endif
 
+#include <string.h>
 #include "encoder.h"
 
 // ─── Pin Table ─────────────────────────────────────────────────

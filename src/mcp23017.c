@@ -26,6 +26,7 @@ uint64_t get_absolute_time(void) { return 0; }
 #define GPIO_FUNC_I2C 0
 #endif
 
+#include <string.h>
 #include "mcp23017.h"
 
 // ─── I2C instance ──────────────────────────────────────────────
