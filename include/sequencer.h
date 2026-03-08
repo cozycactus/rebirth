@@ -211,12 +211,19 @@ void display_init(void);
 void display_clear(void);
 void display_update(void);
 void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step);
+void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step);
+void display_draw_pattern_select(uint8_t pattern, uint8_t variation,
+                                  uint8_t queued_pat, uint8_t queued_var,
+                                  uint8_t mutes);
+void display_draw_track_config(const track_config_t *tc, uint8_t track,
+                                uint8_t param_cursor);
 void display_draw_song_view(const song_t *s, uint16_t pos);
 void display_draw_bpm(float bpm);
 void display_draw_text(uint8_t x, uint8_t y, const char *text);
 
 // ui.c — Core 0
 void ui_init(void);
-void ui_update(void);  // Called in main loop
+void ui_update(void);   // Poll inputs, run state machine
+void ui_render(void);   // Dispatch display rendering based on UI mode
 
 #endif // SEQUENCER_H

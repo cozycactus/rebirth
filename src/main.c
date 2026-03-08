@@ -93,12 +93,7 @@ int main(void) {
         if (now - last_display_ms >= 33) {
             last_display_ms = now;
             display_clear();
-            display_draw_pattern_view(
-                seq_active_pattern(),
-                0,  // TODO: selected track from UI
-                g_seq.transport.current_step
-            );
-            display_draw_bpm(g_seq.transport.bpm);
+            ui_render();
             display_update();
         }
     }
