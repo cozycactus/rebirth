@@ -19,6 +19,9 @@ add_executable(rp2040_sequencer
     src/song.c
     src/display.c
     src/ui.c
+    src/ssd1309.c
+    src/encoder.c
+    src/mcp23017.c
 )
 
 target_include_directories(rp2040_sequencer PRIVATE
