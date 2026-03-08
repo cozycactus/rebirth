@@ -103,7 +103,7 @@ test/
 - [x] OLED display driver (SSD1309, SPI, full framebuffer)
 - [x] UI state machine (pattern edit, song edit, track config, pattern select)
 - [x] Flash storage — save/load all patterns + song (step 9/10 in pattern select)
-- [ ] USB MIDI
+- [x] USB MIDI — TinyUSB MIDI 1.0 class device; DIN-5 + USB sent simultaneously
 - [ ] MIDI clock sync (external)
 
 ## License

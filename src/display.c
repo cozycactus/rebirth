@@ -267,7 +267,7 @@ void display_draw_pattern_select(uint8_t pattern, uint8_t variation,
     }
 
     // Track mutes display
-    char mute_line[22] = "Mutes: ";
+    char mute_line[24] = "Mutes: ";
     for (int t = 0; t < NUM_TRACKS; t++) {
         char c = (mutes & (1 << t)) ? '_' : ('1' + t);
         mute_line[7 + t * 2] = c;

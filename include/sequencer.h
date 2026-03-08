@@ -184,6 +184,7 @@ uint8_t seq_get_track_mutes(void);
 
 // midi_out.c
 void midi_init(void);
+void midi_usb_task(void);  // Call from Core 0 main loop: runs tud_task() + drains USB TX ring
 void midi_send_note_on(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_note_off(uint8_t channel, uint8_t note);
 void midi_send_cc(uint8_t channel, uint8_t cc, uint8_t value);
