@@ -83,11 +83,8 @@ int main(void) {
     // Launch sequencer engine on Core 1
     multicore_launch_core1(sequencer_core1_entry);
 
-    // Core 0: UI + USB loop
+    // Core 0: UI loop
     while (true) {
-        // Service TinyUSB and drain USB MIDI TX ring buffer
-        midi_usb_task();
-
         ui_update();
 
         // Refresh display at ~30fps

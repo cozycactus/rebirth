@@ -23,7 +23,6 @@ add_executable(rp2040_sequencer
     src/encoder.c
     src/mcp23017.c
     src/flash_storage.c
-    src/usb_descriptors.c
 )
 
 target_include_directories(rp2040_sequencer PRIVATE
@@ -41,12 +40,9 @@ target_link_libraries(rp2040_sequencer
     hardware_i2c        # For MCP23017 button expander
     hardware_gpio
     hardware_flash
-    tinyusb_device
-    tinyusb_board
 )
 
-# USB is now used for MIDI (TinyUSB), not stdio.
-# UART0 is used for DIN-5 MIDI, so UART stdio is also off.
+# UART0 is used for DIN-5 MIDI, so UART stdio is off. No USB stdio needed.
 pico_enable_stdio_usb(rp2040_sequencer 0)
 pico_enable_stdio_uart(rp2040_sequencer 0)
 

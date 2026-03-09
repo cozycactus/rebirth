@@ -1,7 +1,6 @@
 #ifndef MOCK_HARDWARE
 #include "pico/stdlib.h"
 #include "hardware/uart.h"
-#include "tusb.h"
 #else
 #include <stdint.h>
 void uart_putc_raw(void *uart, uint8_t c);
@@ -24,27 +23,6 @@ void uart_putc_raw(void *uart, uint8_t c);
 static uint8_t midi_buf[MIDI_BUF_SIZE];
 static uint8_t midi_buf_len = 0;
 
-// ─── USB MIDI TX ring buffer ────────────────────────────────────
-// Single-producer (Core 1 ISR) / single-consumer (Core 0 main loop).
-// Must be a power of 2 so the index wrap uses a bitmask.
-
-#define USB_TX_SIZE     256u    // bytes — comfortably handles bursts
-
-#ifndef MOCK_HARDWARE
-static uint8_t          usb_tx_buf[USB_TX_SIZE];
-static volatile uint8_t usb_tx_head = 0;   // written by Core 1
-static volatile uint8_t usb_tx_tail = 0;   // written by Core 0
-
-static inline void usb_tx_push(uint8_t b) {
-    uint8_t next = (uint8_t)((usb_tx_head + 1u) & (USB_TX_SIZE - 1u));
-    if (next != usb_tx_tail) {
-        usb_tx_buf[usb_tx_head] = b;
-        __dmb();                    // store data before advancing head
-        usb_tx_head = next;
-    }
-}
-#endif
-
 // ─── Init ───────────────────────────────────────────────────────
 
 void midi_init(void) {
@@ -56,40 +34,15 @@ void midi_init(void) {
     // MIDI is 8N1
     uart_set_format(MIDI_UART, 8, 1, UART_PARITY_NONE);
     uart_set_fifo_enabled(MIDI_UART, true);
-
-    // TinyUSB MIDI device
-    tud_init(0);
 #endif
 
     midi_buf_len = 0;
-}
-
-// ─── USB MIDI task (call from Core 0 main loop) ─────────────────
-
-void midi_usb_task(void) {
-#ifndef MOCK_HARDWARE
-    tud_task();
-
-    if (!tud_midi_mounted()) return;
-
-    // Drain the ring buffer into TinyUSB one byte at a time.
-    // tud_midi_stream_write handles the USB MIDI packet framing.
-    while (usb_tx_tail != usb_tx_head) {
-        uint8_t b = usb_tx_buf[usb_tx_tail];
-        __dmb();    // read data before advancing tail
-        usb_tx_tail = (uint8_t)((usb_tx_tail + 1u) & (USB_TX_SIZE - 1u));
-        tud_midi_stream_write(0, &b, 1);
-    }
-#endif
 }
 
 // ─── Low-level send ─────────────────────────────────────────────
 
 static inline void midi_send_byte(uint8_t b) {
     uart_putc_raw(MIDI_UART, b);
-#ifndef MOCK_HARDWARE
-    usb_tx_push(b);
-#endif
 }
 
 // ─── Buffered output ────────────────────────────────────────────
