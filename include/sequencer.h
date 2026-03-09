@@ -70,6 +70,7 @@ typedef struct {
 typedef struct {
     step_t         steps[NUM_TRACKS][STEPS_PER_PATTERN];
     track_config_t tracks[NUM_TRACKS];
+    uint8_t        length;          // Active step count: 1-16
     uint8_t        swing;           // 0–99, percentage of swing
     char           name[9];         // 8 chars + null
 } pattern_t;
@@ -213,6 +214,7 @@ void display_update(void);
 void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step);
 void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step);
 void display_draw_pattern_select(uint8_t pattern, uint8_t variation,
+                                  uint8_t length,
                                   uint8_t queued_pat, uint8_t queued_var,
                                   uint8_t mutes);
 void display_draw_track_config(const track_config_t *tc, uint8_t track,

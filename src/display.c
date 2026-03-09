@@ -66,12 +66,20 @@ void display_draw_bpm(float bpm) {
 
 static void draw_step_grid(const pattern_t *p, uint8_t track,
                            uint8_t play_step, int8_t selected_step) {
+    uint8_t length = p->length;
+    if (length < 1) length = 1;
+    if (length > STEPS_PER_PATTERN) length = STEPS_PER_PATTERN;
+
     for (int s = 0; s < STEPS_PER_PATTERN; s++) {
         uint8_t x = s * CELL_PITCH;
         const step_t *st = &p->steps[track][s];
         bool active = (st->flags & STEP_FLAG_ACTIVE) != 0;
+        bool in_range = s < length;
 
-        if (active) {
+        if (!in_range) {
+            ssd1309_draw_rect(x, GRID_Y, CELL_W, GRID_H, true);
+            ssd1309_draw_hline(x + 1, x + CELL_W - 2, GRID_Y + GRID_H / 2, true);
+        } else if (active) {
             // Filled box for active steps
             ssd1309_fill_rect(x, GRID_Y, CELL_W, GRID_H, true);
 
@@ -124,6 +132,12 @@ static void draw_step_grid(const pattern_t *p, uint8_t track,
         uint8_t x = beat * 4 * CELL_PITCH - 1;
         ssd1309_set_pixel(x, GRID_Y + GRID_H + 1, true);
     }
+
+    // Pattern-length marker: vertical divider after last active step
+    if (length < STEPS_PER_PATTERN) {
+        uint8_t x = length * CELL_PITCH - 1;
+        ssd1309_draw_vline(x, GRID_Y - 1, GRID_Y + GRID_H + 2, true);
+    }
 }
 
 // ─── Pattern View ──────────────────────────────────────────────
@@ -164,8 +178,8 @@ void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step) 
         case OUTPUT_BOTH:       out_str = "M+C"; break;
         default:                out_str = "MIDI"; break;
     }
-    snprintf(info, sizeof(info), "Ch:%-2d %-4s Sw:%-2d",
-             tc->midi_channel + 1, out_str, p->swing);
+    snprintf(info, sizeof(info), "Ch:%-2d %-4s L:%-2d",
+             tc->midi_channel + 1, out_str, p->length);
     ssd1309_draw_string(0, 10, info, false);
 
     // ── Step grid ──
@@ -247,6 +261,7 @@ void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step) {
 // ─── Pattern Select View ───────────────────────────────────────
 
 void display_draw_pattern_select(uint8_t pattern, uint8_t variation,
+                                  uint8_t length,
                                   uint8_t queued_pat, uint8_t queued_var,
                                   uint8_t mutes) {
     // Title
@@ -266,6 +281,10 @@ void display_draw_pattern_select(uint8_t pattern, uint8_t variation,
         ssd1309_draw_string(12, 30, "Queued: ---", false);
     }
 
+    char len[22];
+    snprintf(len, sizeof(len), "Len: %2d step", length);
+    ssd1309_draw_string(12, 37, len, false);
+
     // Track mutes display
     char mute_line[24] = "Mutes: ";
     for (int t = 0; t < NUM_TRACKS; t++) {
@@ -277,7 +296,7 @@ void display_draw_pattern_select(uint8_t pattern, uint8_t variation,
     ssd1309_draw_string(0, 44, mute_line, false);
 
     // Hints
-    ssd1309_draw_string(0, 56, "E1:pat E2:A/B Btn:mute", false);
+    ssd1309_draw_string(0, 56, "E1:pat E2:A/B 11/12:Len", false);
 }
 
 // ─── Track Config View ─────────────────────────────────────────

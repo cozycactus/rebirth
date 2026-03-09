@@ -30,6 +30,13 @@ static inline const pattern_t *get_playing_pattern(void) {
                 .variation[g_seq.transport.current_variation];
 }
 
+static inline uint8_t get_playing_pattern_steps(void) {
+    uint8_t steps = get_playing_pattern()->length;
+    if (steps < 1) return 1;
+    if (steps > STEPS_PER_PATTERN) return STEPS_PER_PATTERN;
+    return steps;
+}
+
 // Immediate note-off (used by transport_stop)
 static void send_note_off_if_active(uint8_t track) {
     if (!note_is_on[track]) return;
@@ -216,8 +223,9 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
         }
     }
 
-    // Check if we're at a step boundary
-    uint32_t pulse_in_pattern = t->pulse_count % (PULSES_PER_STEP * STEPS_PER_PATTERN);
+    uint8_t pattern_steps = get_playing_pattern_steps();
+    uint32_t pattern_pulses = PULSES_PER_STEP * (uint32_t)pattern_steps;
+    uint32_t pulse_in_pattern = t->pulse_count % pattern_pulses;
     uint8_t new_step = pulse_in_pattern / PULSES_PER_STEP;
 
     // Apply swing: delay even-numbered steps
@@ -225,7 +233,7 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
     // For simplicity, shift even steps by (swing-50)% of a step duration
     bool is_step_boundary = (pulse_in_pattern % PULSES_PER_STEP) == 0;
 
-    if (is_step_boundary && new_step != t->current_step) {
+    if (is_step_boundary) {
         t->current_step = new_step;
         t->step_triggered = true;
 

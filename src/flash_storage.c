@@ -45,7 +45,7 @@ _Static_assert(HDR_SIZE + PAT_SIZE + SONG_SIZE <= STORE_RESERVED,
 // ─── Header ────────────────────────────────────────────────────
 
 #define MAGIC   0x52425448u     // 'RBTH'
-#define VERSION 1u
+#define VERSION 2u
 
 typedef struct {
     uint32_t magic;

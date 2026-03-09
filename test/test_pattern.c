@@ -86,6 +86,7 @@ TEST(test_pattern_init_tracks) {
 
     /* Swing defaults to 50 (straight) */
     ASSERT_EQ(p.swing, 50);
+    ASSERT_EQ(p.length, STEPS_PER_PATTERN);
 }
 
 TEST(test_pattern_init_steps_zeroed) {
@@ -279,6 +280,7 @@ TEST(test_pattern_copy) {
     pattern_set_step(&src, 0, 0, 60, 100, STEP_FLAG_ACTIVE);
     pattern_set_step(&src, 3, 7, 48, 80, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
     src.tracks[1].muted = true;
+    src.length = 7;
     src.swing = 65;
 
     pattern_copy(&dst, &src);
@@ -287,6 +289,7 @@ TEST(test_pattern_copy) {
     ASSERT_EQ(dst.steps[3][7].note, 48);
     ASSERT_EQ(dst.steps[3][7].flags, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
     ASSERT_TRUE(dst.tracks[1].muted);
+    ASSERT_EQ(dst.length, 7);
     ASSERT_EQ(dst.swing, 65);
     ASSERT_STR_EQ(dst.name, "PT05");
 }

@@ -15,6 +15,7 @@ void pattern_init(pattern_t *p, uint8_t index) {
         p->tracks[t].muted = false;
     }
 
+    p->length = STEPS_PER_PATTERN;
     p->swing = 50;  // Straight (no swing)
     snprintf(p->name, sizeof(p->name), "PT%02d", index);
 }

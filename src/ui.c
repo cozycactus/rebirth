@@ -296,6 +296,24 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
         ui.notify_msg[15] = '\0';
         ui.notify_ticks = 30;
     }
+
+    // Step button 11 (index 10): shorten pattern length
+    if (steps->pressed & (1u << 10)) {
+        pattern_t *selected = &g_seq.patterns[ui.select_pattern]
+                                   .variation[ui.select_variation];
+        if (selected->length > 1) {
+            selected->length--;
+        }
+    }
+
+    // Step button 12 (index 11): lengthen pattern length
+    if (steps->pressed & (1u << 11)) {
+        pattern_t *selected = &g_seq.patterns[ui.select_pattern]
+                                   .variation[ui.select_variation];
+        if (selected->length < STEPS_PER_PATTERN) {
+            selected->length++;
+        }
+    }
 }
 
 // ─── Track Config Handler ──────────────────────────────────────
@@ -491,6 +509,7 @@ void ui_render(void) {
             display_draw_pattern_select(
                 ui.select_pattern,
                 ui.select_variation,
+                g_seq.patterns[ui.select_pattern].variation[ui.select_variation].length,
                 g_seq.transport.queued_pattern,
                 g_seq.transport.queued_variation,
                 seq_get_track_mutes());
