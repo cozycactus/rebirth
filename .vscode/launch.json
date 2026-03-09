@@ -1,0 +1,65 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "RP2040: Firmware Debug (CMSIS-DAP/OpenOCD)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "servertype": "openocd",
+      "executable": "${workspaceFolder}/build/firmware-debug/rp2040_sequencer.elf",
+      "configFiles": [
+        "interface/cmsis-dap.cfg",
+        "target/rp2040.cfg"
+      ],
+      "runToEntryPoint": "main",
+      "preLaunchTask": "build: firmware-debug",
+      "svdFile": "${env:PICO_SDK_PATH}/src/rp2040/hardware_regs/rp2040.svd"
+    },
+    {
+      "name": "RP2040: Firmware Debug (Picoprobe/OpenOCD)",
+      "type": "cortex-debug",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "servertype": "openocd",
+      "executable": "${workspaceFolder}/build/firmware-debug/rp2040_sequencer.elf",
+      "configFiles": [
+        "interface/picoprobe.cfg",
+        "target/rp2040.cfg"
+      ],
+      "runToEntryPoint": "main",
+      "preLaunchTask": "build: firmware-debug",
+      "svdFile": "${env:PICO_SDK_PATH}/src/rp2040/hardware_regs/rp2040.svd"
+    },
+    {
+      "name": "Host Test: pattern",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/test/build/host-debug/test_pattern.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/test/build/host-debug",
+      "preLaunchTask": "build: host-tests-debug",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Host Test: sync",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/test/build/host-debug/test_sync.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/test/build/host-debug",
+      "preLaunchTask": "build: host-tests-debug",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "Host Test: song",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/test/build/host-debug/test_song.exe",
+      "args": [],
+      "cwd": "${workspaceFolder}/test/build/host-debug",
+      "preLaunchTask": "build: host-tests-debug",
+      "console": "integratedTerminal"
+    }
+  ]
+}

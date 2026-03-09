@@ -1,0 +1,54 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "host-tests-debug",
+      "displayName": "Host Tests Debug",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "host-tests-release",
+      "displayName": "Host Tests Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/host-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "host-tests-debug",
+      "configurePreset": "host-tests-debug"
+    },
+    {
+      "name": "host-tests-release",
+      "configurePreset": "host-tests-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "host-tests-debug",
+      "configurePreset": "host-tests-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "host-tests-release",
+      "configurePreset": "host-tests-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

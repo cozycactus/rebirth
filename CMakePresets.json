@@ -1,0 +1,41 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "firmware-debug",
+      "displayName": "Firmware Debug (RP2040)",
+      "description": "Cross-compile RP2040 firmware with Pico SDK",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/firmware-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "firmware-release",
+      "displayName": "Firmware Release (RP2040)",
+      "description": "Cross-compile optimized RP2040 firmware",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/firmware-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "firmware-debug",
+      "configurePreset": "firmware-debug"
+    },
+    {
+      "name": "firmware-release",
+      "configurePreset": "firmware-release"
+    }
+  ],
+  "testPresets": []
+}

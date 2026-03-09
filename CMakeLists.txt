@@ -32,6 +32,7 @@ target_include_directories(rp2040_sequencer PRIVATE
 
 target_link_libraries(rp2040_sequencer
     pico_stdlib
+    pico_unique_id
     pico_multicore
     hardware_spi
     hardware_uart

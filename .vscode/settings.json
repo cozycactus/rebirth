@@ -1,0 +1,6 @@
+{
+  "cmake.useCMakePresets": "always",
+  "cmake.configureOnOpen": false,
+  "cmake.defaultConfigurePreset": "firmware-debug",
+  "cmake.defaultBuildPreset": "firmware-debug"
+}

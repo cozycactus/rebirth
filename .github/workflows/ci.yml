@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  host-tests:
+    name: Host Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure host tests
+        run: cmake -S test --preset host-tests-debug
+
+      - name: Build host tests
+        run: cmake --build test/build/host-debug --parallel
+
+      - name: Run host tests
+        run: ctest --test-dir test/build/host-debug --output-on-failure
+
+  firmware-build:
+    name: Firmware Build (Ubuntu)
+    runs-on: ubuntu-latest
+    env:
+      PICO_SDK_PATH: ${{ github.workspace }}/pico-sdk
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install ARM toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
+
+      - name: Fetch Pico SDK 1.5.1
+        run: git clone --depth 1 --branch 1.5.1 https://github.com/raspberrypi/pico-sdk.git "$PICO_SDK_PATH"
+
+      - name: Configure firmware
+        run: cmake --preset firmware-debug
+
+      - name: Build firmware
+        run: cmake --build --preset firmware-debug --parallel
+
+      - name: Upload UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rp2040-sequencer-uf2
+          path: build/firmware-debug/rp2040_sequencer.uf2
+          if-no-files-found: error
