@@ -18,6 +18,7 @@ uint64_t get_absolute_time(void) { return 0; }
 #include "encoder.h"
 #include "mcp23017.h"
 #include "flash_storage.h"
+#include "step_leds.h"
 
 // ─── Tempo LED ─────────────────────────────────────────────────
 #define TEMPO_LED_PIN   25
@@ -59,6 +60,8 @@ typedef struct {
     // Tempo LED
     uint32_t last_blink_ms;
     bool     led_on;
+    uint32_t led_anim_ms;
+    bool     led_anim_phase;
 
     // Flash notification: shown for ~1 second, then cleared
     char     notify_msg[17];    // up to 16 chars
@@ -316,6 +319,98 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
     }
 }
 
+static uint8_t clamp_pattern_length(uint8_t len) {
+    if (len < 1) return 1;
+    if (len > STEPS_PER_PATTERN) return STEPS_PER_PATTERN;
+    return len;
+}
+
+static uint16_t build_step_activity_mask(const pattern_t *pat, uint8_t track) {
+    uint16_t mask = 0;
+    uint8_t len = clamp_pattern_length(pat->length);
+
+    for (uint8_t s = 0; s < len; s++) {
+        if (pat->steps[track][s].flags & STEP_FLAG_ACTIVE) {
+            mask |= (uint16_t)(1u << s);
+        }
+    }
+    return mask;
+}
+
+static uint16_t build_pattern_select_mask(void) {
+    uint16_t mask = 0;
+    uint8_t mutes = seq_get_track_mutes();
+
+    // Buttons 1-8 represent track mute state (lit = unmuted).
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        if (!(mutes & (1u << t))) {
+            mask |= (uint16_t)(1u << t);
+        }
+    }
+    // Buttons 11/12 indicate length controls.
+    mask |= (1u << 10);
+    mask |= (1u << 11);
+    return mask;
+}
+
+static void update_step_leds(void) {
+    if (!step_leds_available()) return;
+
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - ui.led_anim_ms >= 120) {
+        ui.led_anim_ms = now;
+        ui.led_anim_phase = !ui.led_anim_phase;
+    }
+
+    uint16_t mask = 0;
+
+    switch (ui.mode) {
+        case UI_PATTERN_VIEW: {
+            pattern_t *p = seq_active_pattern();
+            mask = build_step_activity_mask(p, ui.selected_track);
+            if (g_seq.transport.state == TRANSPORT_PLAYING &&
+                ui.led_anim_phase &&
+                g_seq.transport.current_step < clamp_pattern_length(p->length)) {
+                mask ^= (uint16_t)(1u << g_seq.transport.current_step);
+            }
+            break;
+        }
+
+        case UI_STEP_EDIT: {
+            pattern_t *p = seq_active_pattern();
+            mask = build_step_activity_mask(p, ui.selected_track);
+
+            // Keep selected step obvious while editing.
+            if (ui.edit_step < STEPS_PER_PATTERN) {
+                if (ui.led_anim_phase) {
+                    mask |= (uint16_t)(1u << ui.edit_step);
+                } else {
+                    mask &= (uint16_t)~(1u << ui.edit_step);
+                }
+            }
+            break;
+        }
+
+        case UI_PATTERN_SELECT:
+            mask = build_pattern_select_mask();
+            break;
+
+        case UI_TRACK_CONFIG:
+            // Indicate currently configured track on buttons 1-8.
+            if (ui.config_track < NUM_TRACKS) {
+                mask = (uint16_t)(1u << ui.config_track);
+            }
+            break;
+
+        case UI_SONG_EDIT:
+            // Song controls: button 1 = loop/stop, button 2 = song play/start.
+            mask = (1u << 0) | (1u << 1);
+            break;
+    }
+
+    step_leds_set_mask(mask);
+}
+
 // ─── Track Config Handler ──────────────────────────────────────
 
 static void handle_track_config(int8_t e1d, int8_t e2d,
@@ -536,6 +631,7 @@ void ui_render(void) {
 void ui_init(void) {
     encoder_init();
     mcp23017_init();
+    step_leds_init();
 
     // Tempo LED
     gpio_init(TEMPO_LED_PIN);
@@ -583,7 +679,10 @@ void ui_update(void) {
             break;
     }
 
-    // 5. Clear consumed button events
+    // 5. Update step-button LEDs for current UI mode.
+    update_step_leds();
+
+    // 6. Clear consumed button events
     steps->pressed = 0;
     steps->released = 0;
     steps->long_pressed = 0;
