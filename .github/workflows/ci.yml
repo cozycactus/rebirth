@@ -47,7 +47,10 @@ jobs:
           sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi
 
       - name: Fetch Pico SDK 1.5.1
-        run: git clone --depth 1 --branch 1.5.1 https://github.com/raspberrypi/pico-sdk.git "$PICO_SDK_PATH"
+        run: |
+          git clone --depth 1 --branch 1.5.1 https://github.com/raspberrypi/pico-sdk.git "$PICO_SDK_PATH"
+          cd "$PICO_SDK_PATH"
+          git submodule update --init --depth 1
 
       - name: Configure firmware
         run: cmake --preset firmware-debug
