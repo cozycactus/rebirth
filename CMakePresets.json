@@ -12,6 +12,9 @@
       "description": "Cross-compile RP2040 firmware with Pico SDK",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/firmware-debug",
+      "environment": {
+        "PICO_SDK_PATH": "$penv{HOME}/.pico-sdk/sdk/2.2.0"
+      },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug"
       }
@@ -22,6 +25,9 @@
       "description": "Cross-compile optimized RP2040 firmware",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/firmware-release",
+      "environment": {
+        "PICO_SDK_PATH": "$penv{HOME}/.pico-sdk/sdk/2.2.0"
+      },
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
