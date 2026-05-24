@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
-#include "hardware/sync.h"
 #include "sequencer.h"
 
 // ─── Global shared state ────────────────────────────────────────
@@ -11,8 +10,7 @@ sequencer_state_t g_seq;
 // ─── Initialization ─────────────────────────────────────────────
 
 static void init_defaults(void) {
-    // Claim a hardware spinlock for shared data access
-    g_seq.spinlock_num = spin_lock_claim_unused(true);
+    seq_lock_init();
 
     // Transport defaults
     g_seq.transport.state = TRANSPORT_STOPPED;

@@ -76,10 +76,19 @@ bool flash_storage_save(void) {
     hdr.magic   = MAGIC;
     hdr.version = (uint8_t)VERSION;
 
+    // Build padded pattern and song buffers. Flash programming length must
+    // be page-aligned, so never read beyond the object being serialized.
+    static uint8_t pattern_buf[PAT_SIZE];
+    memset(pattern_buf, 0xFF, sizeof(pattern_buf));
+
     // Build padded song buffer (song_t may not be page-aligned)
     static uint8_t song_buf[SONG_SIZE];
     memset(song_buf, 0xFF, sizeof(song_buf));
+
+    uint32_t lock_state = seq_lock();
+    memcpy(pattern_buf, g_seq.patterns, PAT_BYTES);
     memcpy(song_buf, &g_seq.song, SONG_BYTES);
+    seq_unlock(lock_state);
 
     // Pause Core 1 so it won't execute from flash during the write
     multicore_lockout_start_blocking();
@@ -90,11 +99,8 @@ bool flash_storage_save(void) {
     flash_range_program(STORE_OFFSET + HDR_OFFSET,
                         (const uint8_t *)&hdr, HDR_SIZE);
 
-    // Write patterns directly from SRAM — PAT_SIZE is rounded up, so the
-    // last few bytes (if any) spill into adjacent fields of g_seq; harmless
-    // since load uses exact sizeof.
     flash_range_program(STORE_OFFSET + PAT_OFFSET,
-                        (const uint8_t *)g_seq.patterns, PAT_SIZE);
+                        pattern_buf, PAT_SIZE);
 
     flash_range_program(STORE_OFFSET + SONG_OFFSET,
                         song_buf, SONG_SIZE);
@@ -112,8 +118,10 @@ bool flash_storage_load(void) {
     if (!flash_storage_is_valid()) return false;
 
     const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
+    uint32_t lock_state = seq_lock();
     memcpy(g_seq.patterns, base + PAT_OFFSET,  sizeof(g_seq.patterns));
     memcpy(&g_seq.song,    base + SONG_OFFSET, sizeof(g_seq.song));
+    seq_unlock(lock_state);
     return true;
 #else
     return false;

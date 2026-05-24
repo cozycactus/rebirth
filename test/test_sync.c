@@ -299,6 +299,13 @@ TEST(test_commit_order_gate_off_before_on) {
     ASSERT_EQ(op_log[1].type, OP_GPIO_SET);
 }
 
+/* ── Timing constants ────────────────────────────────────── */
+
+TEST(test_96ppqn_uses_24_pulses_per_16th_step) {
+    ASSERT_EQ(PPQN, 96);
+    ASSERT_EQ(PULSES_PER_STEP, 24);
+}
+
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(void) {
@@ -323,6 +330,9 @@ int main(void) {
     /* Commit ordering */
     RUN(test_commit_order_gates_before_midi);
     RUN(test_commit_order_gate_off_before_on);
+
+    /* Timing constants */
+    RUN(test_96ppqn_uses_24_pulses_per_16th_step);
 
     printf("\n  %d/%d tests passed\n\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

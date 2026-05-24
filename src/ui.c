@@ -104,8 +104,6 @@ static void handle_tempo_led(void) {
 static void handle_pattern_view(int8_t e1d, int8_t e2d,
                                  button_event_t e1b, button_event_t e2b,
                                  step_buttons_t *steps) {
-    pattern_t *pat = seq_active_pattern();
-
     // Enc1 rotate: select track
     if (e1d != 0) {
         int16_t t = (int16_t)ui.selected_track + e1d;
@@ -144,11 +142,14 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
 
     // Step buttons: toggle steps on current track
     if (steps->pressed) {
+        uint32_t lock_state = seq_lock();
+        pattern_t *pat = seq_active_pattern();
         for (int s = 0; s < STEPS_PER_PATTERN; s++) {
             if (steps->pressed & (1u << s)) {
                 pattern_toggle_step(pat, ui.selected_track, s);
             }
         }
+        seq_unlock(lock_state);
     }
 }
 
@@ -157,6 +158,7 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
 static void handle_step_edit(int8_t e1d, int8_t e2d,
                               button_event_t e1b, button_event_t e2b,
                               step_buttons_t *steps) {
+    uint32_t lock_state = seq_lock();
     pattern_t *pat = seq_active_pattern();
     step_t *st = &pat->steps[ui.selected_track][ui.edit_step];
 
@@ -213,6 +215,8 @@ static void handle_step_edit(int8_t e1d, int8_t e2d,
             }
         }
     }
+
+    seq_unlock(lock_state);
 }
 
 // ─── Pattern Select Handler ────────────────────────────────────
@@ -235,8 +239,10 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
 
     // Enc1 press: confirm, go to pattern view
     if (e1b == BTN_PRESS) {
+        uint32_t lock_state = seq_lock();
         g_seq.active_pattern = ui.select_pattern;
         g_seq.active_variation = ui.select_variation;
+        seq_unlock(lock_state);
         ui.mode = UI_PATTERN_VIEW;
     }
 
@@ -302,20 +308,29 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
 
     // Step button 11 (index 10): shorten pattern length
     if (steps->pressed & (1u << 10)) {
+        uint32_t lock_state = seq_lock();
         pattern_t *selected = &g_seq.patterns[ui.select_pattern]
                                    .variation[ui.select_variation];
         if (selected->length > 1) {
             selected->length--;
         }
+        seq_unlock(lock_state);
     }
 
     // Step button 12 (index 11): lengthen pattern length
     if (steps->pressed & (1u << 11)) {
+        uint32_t lock_state = seq_lock();
         pattern_t *selected = &g_seq.patterns[ui.select_pattern]
                                    .variation[ui.select_variation];
         if (selected->length < STEPS_PER_PATTERN) {
             selected->length++;
         }
+        seq_unlock(lock_state);
+    }
+
+    // Step button 13 (index 12): reset jitter measurement counters
+    if (steps->pressed & (1u << 12)) {
+        sequencer_reset_jitter_stats();
     }
 }
 
@@ -350,6 +365,8 @@ static uint16_t build_pattern_select_mask(void) {
     // Buttons 11/12 indicate length controls.
     mask |= (1u << 10);
     mask |= (1u << 11);
+    // Button 13 resets jitter stats.
+    mask |= (1u << 12);
     return mask;
 }
 
@@ -417,6 +434,7 @@ static void handle_track_config(int8_t e1d, int8_t e2d,
                                  button_event_t e1b, button_event_t e2b,
                                  step_buttons_t *steps) {
     (void)steps;
+    uint32_t lock_state = seq_lock();
     pattern_t *pat = seq_active_pattern();
     track_config_t *tc = &pat->tracks[ui.config_track];
 
@@ -478,6 +496,8 @@ static void handle_track_config(int8_t e1d, int8_t e2d,
     if (e2b == BTN_PRESS) {
         ui.mode = UI_PATTERN_SELECT;
     }
+
+    seq_unlock(lock_state);
 }
 
 // ─── Song Edit Handler ─────────────────────────────────────────
@@ -490,40 +510,48 @@ static void handle_song_edit(int8_t e1d, int8_t e2d,
 
     // Enc1 rotate: navigate entries
     if (e1d != 0) {
+        uint32_t lock_state = seq_lock();
+        uint16_t song_len = s->length;
+        seq_unlock(lock_state);
+
         int16_t pos = (int16_t)ui.song_cursor + e1d;
         if (pos < 0) pos = 0;
-        if (pos >= (int16_t)s->length && s->length > 0) {
-            pos = s->length - 1;
+        if (pos >= (int16_t)song_len && song_len > 0) {
+            pos = song_len - 1;
         }
         ui.song_cursor = (uint16_t)pos;
     }
 
     // Enc2 rotate: modify current entry based on field
-    if (e2d != 0 && ui.song_cursor < s->length) {
-        song_entry_t *entry = &s->entries[ui.song_cursor];
-        switch (ui.song_field) {
-            case 0: {
-                // Pattern index
-                int16_t p = (int16_t)entry->pattern_index + e2d;
-                if (p < 0) p = 0;
-                if (p >= MAX_PATTERNS) p = MAX_PATTERNS - 1;
-                entry->pattern_index = (uint8_t)p;
-                break;
-            }
-            case 1: {
-                // Variation A/B
-                entry->variation = entry->variation ? 0 : 1;
-                break;
-            }
-            case 2: {
-                // Repeats 1–255
-                int16_t r = (int16_t)entry->repeats + e2d;
-                if (r < 1) r = 1;
-                if (r > 255) r = 255;
-                entry->repeats = (uint8_t)r;
-                break;
+    if (e2d != 0) {
+        uint32_t lock_state = seq_lock();
+        if (ui.song_cursor < s->length) {
+            song_entry_t *entry = &s->entries[ui.song_cursor];
+            switch (ui.song_field) {
+                case 0: {
+                    // Pattern index
+                    int16_t p = (int16_t)entry->pattern_index + e2d;
+                    if (p < 0) p = 0;
+                    if (p >= MAX_PATTERNS) p = MAX_PATTERNS - 1;
+                    entry->pattern_index = (uint8_t)p;
+                    break;
+                }
+                case 1: {
+                    // Variation A/B
+                    entry->variation = entry->variation ? 0 : 1;
+                    break;
+                }
+                case 2: {
+                    // Repeats 1–255
+                    int16_t r = (int16_t)entry->repeats + e2d;
+                    if (r < 1) r = 1;
+                    if (r > 255) r = 255;
+                    entry->repeats = (uint8_t)r;
+                    break;
+                }
             }
         }
+        seq_unlock(lock_state);
     }
 
     // Enc1 press: insert new entry / cycle field
@@ -534,9 +562,14 @@ static void handle_song_edit(int8_t e1d, int8_t e2d,
 
     // Enc1 long press: insert new entry after cursor
     if (e1b == BTN_LONG_PRESS) {
-        uint16_t insert_pos = (s->length > 0) ? ui.song_cursor + 1 : 0;
-        if (song_insert(insert_pos, g_seq.active_pattern,
-                        g_seq.active_variation, 1)) {
+        uint32_t lock_state = seq_lock();
+        uint16_t song_len = s->length;
+        uint8_t active_pattern = g_seq.active_pattern;
+        uint8_t active_variation = g_seq.active_variation;
+        seq_unlock(lock_state);
+
+        uint16_t insert_pos = (song_len > 0) ? ui.song_cursor + 1 : 0;
+        if (song_insert(insert_pos, active_pattern, active_variation, 1)) {
             ui.song_cursor = insert_pos;
         }
     }
@@ -548,24 +581,41 @@ static void handle_song_edit(int8_t e1d, int8_t e2d,
 
     // Enc2 long press: delete current entry
     if (e2b == BTN_LONG_PRESS) {
-        if (s->length > 0 && ui.song_cursor < s->length) {
+        uint32_t lock_state = seq_lock();
+        bool can_delete = (s->length > 0 && ui.song_cursor < s->length);
+        seq_unlock(lock_state);
+
+        if (can_delete) {
             song_remove(ui.song_cursor);
-            if (ui.song_cursor > 0 && ui.song_cursor >= s->length) {
-                ui.song_cursor = s->length - 1;
+
+            lock_state = seq_lock();
+            uint16_t song_len = s->length;
+            seq_unlock(lock_state);
+            if (song_len == 0) {
+                ui.song_cursor = 0;
+            } else if (ui.song_cursor > 0 && ui.song_cursor >= song_len) {
+                ui.song_cursor = song_len - 1;
             }
         }
     }
 
     // Step button 1: toggle end mode (loop/stop)
     if (steps->pressed & (1u << 0)) {
+        uint32_t lock_state = seq_lock();
+        song_end_mode_t next_mode =
+            (s->end_mode == SONG_END_LOOP) ? SONG_END_STOP : SONG_END_LOOP;
+        seq_unlock(lock_state);
+
         song_set_end_mode(
-            (s->end_mode == SONG_END_LOOP) ? SONG_END_STOP : SONG_END_LOOP
+            next_mode
         );
     }
 
     // Step button 2: switch to song play mode and start
     if (steps->pressed & (1u << 1)) {
+        uint32_t lock_state = seq_lock();
         g_seq.transport.mode = PLAY_MODE_SONG;
+        seq_unlock(lock_state);
         transport_start();
     }
 }

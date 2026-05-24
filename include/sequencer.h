@@ -32,6 +32,9 @@
 #define MIDI_STOP           0xFC
 #define MIDI_CONTINUE       0xFB
 
+// Jitter measurement
+#define JITTER_PROBE_PIN    7       // High while sequencer timer ISR runs
+
 // ─── Data Types ─────────────────────────────────────────────────
 
 // Step flags
@@ -126,6 +129,20 @@ typedef struct {
     bool              step_triggered;   // Flag: new step just started
 } transport_t;
 
+typedef struct {
+    uint32_t samples;
+    int32_t  last_irq_latency_us;       // ISR entry time - scheduled alarm time
+    int32_t  min_irq_latency_us;
+    int32_t  max_irq_latency_us;
+    int32_t  last_period_error_us;      // Actual ISR period - target period
+    int32_t  min_period_error_us;
+    int32_t  max_period_error_us;
+    uint32_t max_abs_period_error_us;
+    uint32_t last_isr_duration_us;
+    uint32_t max_isr_duration_us;
+    uint32_t overruns;                  // ISR entered later than one pulse interval
+} sequencer_jitter_stats_t;
+
 // ─── Shared State (accessed by both cores) ──────────────────────
 
 typedef struct {
@@ -134,9 +151,10 @@ typedef struct {
     song_t               song;
     uint8_t              active_pattern;     // Pattern being edited
     uint8_t              active_variation;   // Which variation (A/B) is being edited
-    uint8_t              track_mutes;        // Bitmask: bit N = track N muted for playback
+    volatile uint8_t     track_mutes;        // Bitmask: bit N = track N muted for playback
     // Spinlock index for mutex
     uint32_t             spinlock_num;
+    bool                 spinlock_ready;
 } sequencer_state_t;
 
 // ─── Global ─────────────────────────────────────────────────────
@@ -144,6 +162,11 @@ typedef struct {
 extern sequencer_state_t g_seq;
 
 // ─── API ────────────────────────────────────────────────────────
+
+// shared_state.c — shared state locking
+void seq_lock_init(void);
+uint32_t seq_lock(void);
+void seq_unlock(uint32_t irq_state);
 
 // sequencer.c — Core 1
 void sequencer_core1_entry(void);
@@ -153,6 +176,9 @@ void transport_start(void);
 void transport_stop(void);
 void transport_continue(void);
 void transport_set_bpm(float bpm);
+void sequencer_prepare_queued_pattern(uint8_t pattern_index, uint8_t variation);
+void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out);
+void sequencer_reset_jitter_stats(void);
 
 // pattern.c
 void pattern_init(pattern_t *p, uint8_t index);

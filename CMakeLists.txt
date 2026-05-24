@@ -40,6 +40,7 @@ add_executable(rp2040_sequencer
     src/mcp23017.c
     src/step_leds.c
     src/flash_storage.c
+    src/shared_state.c
 )
 
 target_include_directories(rp2040_sequencer PRIVATE

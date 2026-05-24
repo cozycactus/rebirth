@@ -295,8 +295,14 @@ void display_draw_pattern_select(uint8_t pattern, uint8_t variation,
     mute_line[7 + NUM_TRACKS * 2] = '\0';
     ssd1309_draw_string(0, 44, mute_line, false);
 
-    // Hints
-    ssd1309_draw_string(0, 56, "E1:pat E2:A/B 11/12:Len", false);
+    sequencer_jitter_stats_t jit;
+    sequencer_get_jitter_stats(&jit);
+    char jit_line[22];
+    snprintf(jit_line, sizeof(jit_line), "J:%ld P:%lu I:%lu",
+             (long)jit.max_irq_latency_us,
+             (unsigned long)jit.max_abs_period_error_us,
+             (unsigned long)jit.max_isr_duration_us);
+    ssd1309_draw_string(0, 56, jit_line, false);
 }
 
 // ─── Track Config View ─────────────────────────────────────────
