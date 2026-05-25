@@ -164,6 +164,16 @@ void midi_buf_flush(void) {
 #endif
 }
 
+void midi_clear_output_queue(void) {
+    midi_buf_len = 0;
+#ifndef MOCK_HARDWARE
+    uint32_t lock_state = midi_tx_lock();
+    midi_tx_tail = midi_tx_head;
+    midi_tx_unlock(lock_state);
+    uart_set_irq_enables(MIDI_UART, false, false);
+#endif
+}
+
 void midi_buf_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
     midi_buf_push(MIDI_NOTE_ON | (channel & 0x0F));
     midi_buf_push(note & 0x7F);
@@ -210,4 +220,11 @@ void midi_send_stop(void) {
 
 void midi_send_continue(void) {
     midi_send_byte(MIDI_CONTINUE);
+}
+
+void midi_send_all_notes_off(void) {
+    for (uint8_t ch = 0; ch < 16; ch++) {
+        midi_send_cc(ch, MIDI_CC_ALL_SOUND_OFF, 0);
+        midi_send_cc(ch, MIDI_CC_ALL_NOTES_OFF, 0);
+    }
 }

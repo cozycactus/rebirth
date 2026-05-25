@@ -14,7 +14,7 @@
 // Last 128 KB of the 2 MB Pico flash is reserved for storage:
 //
 //   Byte 0        : Header (1 page = 256 bytes)
-//   Byte 256      : Patterns (64 × 2 variations × sizeof(pattern_t))
+//   Byte 256      : Patterns (4 banks × 8 slots × sizeof(pattern_t))
 //   Byte 256+PAT  : Song (padded to page boundary)
 //
 // RP2040 flash constants (always these values for the Pico):
@@ -30,7 +30,7 @@
 #define HDR_SIZE        FLASH_PAGE
 
 #define PAT_OFFSET      HDR_SIZE
-#define PAT_BYTES       (sizeof(pattern_pair_t) * MAX_PATTERNS)
+#define PAT_BYTES       (sizeof(pattern_t) * MAX_PATTERNS)
 // Round up to next page boundary
 #define PAT_SIZE        (((PAT_BYTES) + FLASH_PAGE - 1u) & ~(FLASH_PAGE - 1u))
 
@@ -45,7 +45,7 @@ _Static_assert(HDR_SIZE + PAT_SIZE + SONG_SIZE <= STORE_RESERVED,
 // ─── Header ────────────────────────────────────────────────────
 
 #define MAGIC   0x52425448u     // 'RBTH'
-#define VERSION 2u
+#define VERSION 4u
 
 typedef struct {
     uint32_t magic;

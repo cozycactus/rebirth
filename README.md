@@ -6,10 +6,15 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 ## Features
 
 - **8 tracks × 16 steps** — synth (melodic) or drum (percussive) per track
-- **64 patterns** with **A/B variations** each
+- **32 pattern locations** arranged like ReBirth: banks A-D, slots 1-8
+- **Independent pattern selection per track** — each track can play or queue a different bank/slot
+- **Per-track pattern length** — each track can loop at 1-16 sixteenth-note steps
+- **Live pattern editing** — step, length, and track-setting edits update playback while running
+- **Performance view** — safe live mutes, per-track pattern queueing, transport, BPM, and jitter status
 - **Song mode** — chain patterns with repeat counts, loop or stop at end
 - **Pattern queue** — schedule the next pattern during playback
 - **Track mutes** — instant bitmask-based mute/unmute
+- **Panic combo** — hold both encoder buttons to stop playback, drop gates, and send MIDI all-notes-off
 - **Simultaneous output** — two-phase commit ensures all tracks fire at the same time
 - **MIDI output** — DIN-5 UART only, avoiding USB MIDI host scheduling jitter
 - **CV/Gate output** — 4 channels via MCP4822 DACs (1V/oct, 12-bit)
@@ -69,9 +74,9 @@ mkdir build && cd build
 cmake ..
 make -j$(nproc)
 
-./test_pattern   # 18 tests — pattern data manipulation
-./test_sync      # 15 tests — MIDI buffer, gate commit, sync ordering
-./test_song      # 29 tests — song editing, pattern queue, track mutes
+./test_pattern   # 23 tests — pattern data manipulation
+./test_sync      # 17 tests — MIDI buffer, gate commit, sync ordering
+./test_song      # 33 tests — song editing, pattern queue, track mutes
 ```
 
 ## Project Structure
@@ -101,10 +106,14 @@ test/
 - [x] Sequencer engine with 96 PPQN timer
 - [x] Two-phase commit for track synchronization
 - [x] Song mode with pattern chaining
-- [x] A/B pattern variations
+- [x] ReBirth-style pattern banks A-D × 1-8
+- [x] Independent per-track pattern selection and queueing
+- [x] Per-track pattern lengths
 - [x] Pattern queue
 - [x] Track mutes
-- [x] 62 unit tests passing
+- [x] Performance-safe live control view
+- [x] Panic / all-notes-off recovery
+- [x] 73 unit tests passing
 - [x] OLED display driver (SSD1309, SPI, full framebuffer)
 - [x] UI state machine (pattern edit, song edit, track config, pattern select)
 - [x] Flash storage — save/load all patterns + song (step 9/10 in pattern select)

@@ -10,6 +10,12 @@ static const char *track_names[NUM_TRACKS] = {
     "DR1", "DR2", "DR3", "DR4",
 };
 
+static void pattern_label(uint8_t pattern, char *buf, size_t len) {
+    snprintf(buf, len, "%c%d",
+             'A' + pattern_bank(pattern),
+             pattern_slot(pattern) + 1);
+}
+
 // ─── Note Name Helpers ─────────────────────────────────────────
 
 static const char *note_letters[12] = {
@@ -66,9 +72,7 @@ void display_draw_bpm(float bpm) {
 
 static void draw_step_grid(const pattern_t *p, uint8_t track,
                            uint8_t play_step, int8_t selected_step) {
-    uint8_t length = p->length;
-    if (length < 1) length = 1;
-    if (length > STEPS_PER_PATTERN) length = STEPS_PER_PATTERN;
+    uint8_t length = pattern_get_track_length(p, track);
 
     for (int s = 0; s < STEPS_PER_PATTERN; s++) {
         uint8_t x = s * CELL_PITCH;
@@ -143,11 +147,91 @@ static void draw_step_grid(const pattern_t *p, uint8_t track,
 // ─── Pattern View ──────────────────────────────────────────────
 //
 // Layout (128×64):
-//   Line 0 (y=0):   P01A SY1  120.0 >
-//   Line 1 (y=10):  Ch:10 MIDI  Sw:50
+//   Line 0 (y=0):   A1  SY1  120.0 >
+//   Line 1 (y=10):  Ch:10 MIDI  L:16
 //   Grid (y=20–31): 16 step boxes
 //   Line 4 (y=36):  Beat markers / position
 //   Line 5+ (y=44): Mute status
+
+void display_draw_performance_view(uint8_t selected_track, uint8_t bank,
+                                   uint8_t mutes) {
+    if (selected_track >= NUM_TRACKS) selected_track = 0;
+    if (bank >= PATTERN_BANKS) bank = 0;
+
+    const char *transport_sym;
+    switch (g_seq.transport.state) {
+        case TRANSPORT_PLAYING: transport_sym = ">"; break;
+        case TRANSPORT_PAUSED:  transport_sym = "||"; break;
+        default:                transport_sym = "[]"; break;
+    }
+
+    const char mode = (g_seq.transport.mode == PLAY_MODE_SONG) ? 'S' : 'P';
+    char header[22];
+    snprintf(header, sizeof(header), "PERF %s %c %5.1f",
+             transport_sym,
+             mode,
+             (double)g_seq.transport.bpm);
+    ssd1309_draw_string(0, 0, header, false);
+
+    uint8_t current = g_seq.transport.current_pattern[selected_track];
+    uint8_t queued = g_seq.transport.queued_pattern[selected_track];
+    char cur_label[4];
+    char q_label[4] = "---";
+    pattern_label(current, cur_label, sizeof(cur_label));
+    if (queued != NO_QUEUED_PATTERN) {
+        pattern_label(queued, q_label, sizeof(q_label));
+    }
+
+    char line[22];
+    snprintf(line, sizeof(line), "T%d %-3s Cur:%-3s Q:%-3s",
+             selected_track + 1,
+             track_names[selected_track],
+             cur_label,
+             q_label);
+    ssd1309_draw_string(0, 10, line, false);
+
+    char mute_line[22];
+    snprintf(mute_line, sizeof(mute_line), "M:");
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        char c = (mutes & (1u << t)) ? '_' : ('1' + t);
+        mute_line[2 + t * 2] = c;
+        mute_line[3 + t * 2] = ' ';
+    }
+    mute_line[2 + NUM_TRACKS * 2] = '\0';
+    ssd1309_draw_string(0, 22, mute_line, false);
+
+    uint8_t mx = (uint8_t)((2 + selected_track * 2) * FONT_CHAR_W);
+    ssd1309_draw_hline(mx, mx + FONT_CHAR_W - 1, 30, true);
+
+    char bank_line[22];
+    snprintf(bank_line, sizeof(bank_line), "Bank %c  keys 9-16", 'A' + bank);
+    ssd1309_draw_string(0, 34, bank_line, false);
+
+    for (uint8_t slot = 0; slot < PATTERNS_PER_BANK; slot++) {
+        uint8_t x = (uint8_t)(slot * 16);
+        uint8_t pattern = pattern_make_index(bank, slot);
+        bool is_current = current == pattern;
+        bool is_queued = queued == pattern;
+        ssd1309_draw_rect(x, 44, 14, 10, true);
+        if (is_current) {
+            ssd1309_fill_rect(x + 1, 45, 12, 8, true);
+        }
+        char slot_label[2] = { (char)('1' + slot), '\0' };
+        ssd1309_draw_string(x + 4, 45, slot_label, is_current);
+        if (is_queued) {
+            ssd1309_draw_hline(x + 2, x + 11, 55, true);
+        }
+    }
+
+    sequencer_jitter_stats_t jit;
+    sequencer_get_jitter_stats(&jit);
+    char jit_line[22];
+    snprintf(jit_line, sizeof(jit_line), "J:%ld P:%lu O:%lu",
+             (long)jit.max_irq_latency_us,
+             (unsigned long)jit.max_abs_period_error_us,
+             (unsigned long)jit.overruns);
+    ssd1309_draw_string(0, 56, jit_line, false);
+}
 
 void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step) {
     // ── Header line ──
@@ -158,11 +242,11 @@ void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step) 
         default:                transport_sym = "[]"; break;
     }
 
+    char label[4];
+    pattern_label(g_seq.active_pattern[track], label, sizeof(label));
+
     char header[22];
-    snprintf(header, sizeof(header), "P%02d%c %-3s",
-             g_seq.active_pattern + 1,
-             'A' + g_seq.active_variation,
-             track_names[track]);
+    snprintf(header, sizeof(header), "%-3s %-3s", label, track_names[track]);
     ssd1309_draw_string(0, 0, header, false);
 
     // BPM is drawn separately (by display_draw_bpm or ui_render)
@@ -179,7 +263,7 @@ void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step) 
         default:                out_str = "MIDI"; break;
     }
     snprintf(info, sizeof(info), "Ch:%-2d %-4s L:%-2d",
-             tc->midi_channel + 1, out_str, p->length);
+             tc->midi_channel + 1, out_str, pattern_get_track_length(p, track));
     ssd1309_draw_string(0, 10, info, false);
 
     // ── Step grid ──
@@ -202,11 +286,11 @@ void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step) 
     ssd1309_draw_hline(mx, mx + FONT_CHAR_W - 1, 52, true);
 
     // ── Pattern queue indicator ──
-    if (g_seq.transport.queued_pattern != 0xFF) {
+    if (g_seq.transport.queued_pattern[track] != NO_QUEUED_PATTERN) {
+        char q_label[4];
+        pattern_label(g_seq.transport.queued_pattern[track], q_label, sizeof(q_label));
         char q[12];
-        snprintf(q, sizeof(q), "Q:P%02d%c",
-                 g_seq.transport.queued_pattern + 1,
-                 'A' + g_seq.transport.queued_variation);
+        snprintf(q, sizeof(q), "Q:%s", q_label);
         ssd1309_draw_string(0, 56, q, false);
     }
 }
@@ -252,7 +336,7 @@ void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step) {
     }
 
     // Step grid with selection marker
-    draw_step_grid(p, track, g_seq.transport.current_step, step);
+    draw_step_grid(p, track, g_seq.transport.current_track_step[track], step);
 
     // Hint
     ssd1309_draw_string(0, 56, "E1:note E2:vel", false);
@@ -260,22 +344,27 @@ void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step) {
 
 // ─── Pattern Select View ───────────────────────────────────────
 
-void display_draw_pattern_select(uint8_t pattern, uint8_t variation,
+void display_draw_pattern_select(uint8_t pattern,
                                   uint8_t length,
-                                  uint8_t queued_pat, uint8_t queued_var,
+                                  uint8_t queued_pat,
                                   uint8_t mutes) {
     // Title
     ssd1309_draw_string(16, 0, "SELECT PATTERN", false);
 
+    char label[4];
+    pattern_label(pattern, label, sizeof(label));
+
     // Big pattern display
     char big[12];
-    snprintf(big, sizeof(big), ">> P%02d %c <<", pattern + 1, 'A' + variation);
+    snprintf(big, sizeof(big), ">> %s <<", label);
     ssd1309_draw_string(12, 16, big, true);
 
     // Queue info
-    if (queued_pat != 0xFF) {
+    if (queued_pat != NO_QUEUED_PATTERN) {
+        char q_label[4];
+        pattern_label(queued_pat, q_label, sizeof(q_label));
         char q[22];
-        snprintf(q, sizeof(q), "Queued: P%02d %c", queued_pat + 1, 'A' + queued_var);
+        snprintf(q, sizeof(q), "Queued: %s", q_label);
         ssd1309_draw_string(12, 30, q, false);
     } else {
         ssd1309_draw_string(12, 30, "Queued: ---", false);
@@ -356,11 +445,15 @@ void display_draw_track_config(const track_config_t *tc, uint8_t track,
 
 // ─── Song View ─────────────────────────────────────────────────
 
-void display_draw_song_view(const song_t *s, uint16_t pos) {
+void display_draw_song_view(const song_t *s, uint16_t pos, uint8_t track) {
+    if (track >= NUM_TRACKS) track = 0;
+
     // Title
     char title[22];
-    snprintf(title, sizeof(title), "SONG [%d/%d]",
-             s->length > 0 ? pos + 1 : 0, s->length);
+    snprintf(title, sizeof(title), "SONG %s [%d/%d]",
+             track_names[track],
+             s->length > 0 ? pos + 1 : 0,
+             s->length);
     ssd1309_draw_string(0, 0, title, false);
 
     // End mode
@@ -381,10 +474,11 @@ void display_draw_song_view(const song_t *s, uint16_t pos) {
         bool is_current = (idx == (int)pos);
 
         char line[22];
-        snprintf(line, sizeof(line), "%3d: P%02d %c x%d",
+        char label[4];
+        pattern_label(s->entries[idx].pattern_index[track], label, sizeof(label));
+        snprintf(line, sizeof(line), "%3d: %-3s x%d",
                  idx + 1,
-                 s->entries[idx].pattern_index + 1,
-                 'A' + s->entries[idx].variation,
+                 label,
                  s->entries[idx].repeats);
         ssd1309_draw_string(0, y, line, is_current);
     }

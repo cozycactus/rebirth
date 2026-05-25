@@ -206,6 +206,33 @@ TEST(test_midi_buf_note_off_format) {
     ASSERT_EQ(mock_midi_bytes[2], 0);    /* velocity 0 */
 }
 
+TEST(test_midi_send_all_notes_off) {
+    midi_send_all_notes_off();
+    ASSERT_EQ(mock_midi_len, 16 * 6);
+
+    ASSERT_EQ(mock_midi_bytes[0], 0xB0);
+    ASSERT_EQ(mock_midi_bytes[1], MIDI_CC_ALL_SOUND_OFF);
+    ASSERT_EQ(mock_midi_bytes[2], 0);
+    ASSERT_EQ(mock_midi_bytes[3], 0xB0);
+    ASSERT_EQ(mock_midi_bytes[4], MIDI_CC_ALL_NOTES_OFF);
+    ASSERT_EQ(mock_midi_bytes[5], 0);
+
+    ASSERT_EQ(mock_midi_bytes[mock_midi_len - 6], 0xBF);
+    ASSERT_EQ(mock_midi_bytes[mock_midi_len - 5], MIDI_CC_ALL_SOUND_OFF);
+    ASSERT_EQ(mock_midi_bytes[mock_midi_len - 4], 0);
+    ASSERT_EQ(mock_midi_bytes[mock_midi_len - 3], 0xBF);
+    ASSERT_EQ(mock_midi_bytes[mock_midi_len - 2], MIDI_CC_ALL_NOTES_OFF);
+    ASSERT_EQ(mock_midi_bytes[mock_midi_len - 1], 0);
+}
+
+TEST(test_midi_clear_output_queue_clears_staged_buffer) {
+    midi_buf_clear();
+    midi_buf_note_on(0, 60, 100);
+    midi_clear_output_queue();
+    midi_buf_flush();
+    ASSERT_EQ(mock_midi_len, 0);
+}
+
 /* ── gate_commit tests ───────────────────────────────────── */
 
 /* Gate pins: 14, 15, 16, 17 (from cv_gate.c) */
@@ -319,6 +346,8 @@ int main(void) {
     RUN(test_midi_buf_multiple_channels);
     RUN(test_midi_buf_channel_mask);
     RUN(test_midi_buf_note_off_format);
+    RUN(test_midi_send_all_notes_off);
+    RUN(test_midi_clear_output_queue_clears_staged_buffer);
 
     /* Gate commit */
     RUN(test_gate_commit_on);
