@@ -3,21 +3,34 @@
 
 // ─── Pattern access helpers ─────────────────────────────────────
 
-pattern_t *seq_active_pattern(void) {
-    return &g_seq.patterns[g_seq.active_pattern].variation[g_seq.active_variation];
+pattern_t *seq_active_pattern(uint8_t track) {
+    if (track >= NUM_TRACKS) track = 0;
+    return &g_seq.patterns[g_seq.active_pattern[track]];
 }
 
-pattern_t *seq_playing_pattern(void) {
-    return &g_seq.patterns[g_seq.transport.current_pattern]
-                .variation[g_seq.transport.current_variation];
+pattern_t *seq_playing_pattern(uint8_t track) {
+    if (track >= NUM_TRACKS) track = 0;
+    return &g_seq.patterns[g_seq.transport.current_pattern[track]];
 }
 
 // ─── Song editing ───────────────────────────────────────────────
 
-bool song_append(uint8_t pattern_index, uint8_t variation, uint8_t repeats) {
+bool song_append(uint8_t pattern_index, uint8_t repeats) {
     if (pattern_index >= MAX_PATTERNS) return false;
-    if (variation > 1) return false;
+
+    uint8_t patterns[NUM_TRACKS];
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        patterns[track] = pattern_index;
+    }
+    return song_append_patterns(patterns, repeats);
+}
+
+bool song_append_patterns(const uint8_t pattern_index[NUM_TRACKS], uint8_t repeats) {
+    if (!pattern_index) return false;
     if (repeats == 0) return false;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        if (pattern_index[track] >= MAX_PATTERNS) return false;
+    }
 
     uint32_t lock_state = seq_lock();
     if (g_seq.song.length >= MAX_SONG_ENTRIES) {
@@ -26,18 +39,30 @@ bool song_append(uint8_t pattern_index, uint8_t variation, uint8_t repeats) {
     }
 
     song_entry_t *e = &g_seq.song.entries[g_seq.song.length];
-    e->pattern_index = pattern_index;
-    e->variation = variation;
+    memcpy(e->pattern_index, pattern_index, sizeof(e->pattern_index));
     e->repeats = repeats;
     g_seq.song.length++;
     seq_unlock(lock_state);
     return true;
 }
 
-bool song_insert(uint16_t position, uint8_t pattern_index, uint8_t variation, uint8_t repeats) {
+bool song_insert(uint16_t position, uint8_t pattern_index, uint8_t repeats) {
     if (pattern_index >= MAX_PATTERNS) return false;
-    if (variation > 1) return false;
+
+    uint8_t patterns[NUM_TRACKS];
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        patterns[track] = pattern_index;
+    }
+    return song_insert_patterns(position, patterns, repeats);
+}
+
+bool song_insert_patterns(uint16_t position, const uint8_t pattern_index[NUM_TRACKS],
+                          uint8_t repeats) {
+    if (!pattern_index) return false;
     if (repeats == 0) return false;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        if (pattern_index[track] >= MAX_PATTERNS) return false;
+    }
 
     uint32_t lock_state = seq_lock();
     if (g_seq.song.length >= MAX_SONG_ENTRIES || position > g_seq.song.length) {
@@ -53,8 +78,9 @@ bool song_insert(uint16_t position, uint8_t pattern_index, uint8_t variation, ui
                 count * sizeof(song_entry_t));
     }
 
-    g_seq.song.entries[position].pattern_index = pattern_index;
-    g_seq.song.entries[position].variation = variation;
+    memcpy(g_seq.song.entries[position].pattern_index,
+           pattern_index,
+           sizeof(g_seq.song.entries[position].pattern_index));
     g_seq.song.entries[position].repeats = repeats;
     g_seq.song.length++;
     seq_unlock(lock_state);
@@ -121,25 +147,43 @@ void song_set_end_mode(song_end_mode_t mode) {
 
 // ─── Pattern queue ──────────────────────────────────────────────
 
-void transport_queue_pattern(uint8_t pattern_index, uint8_t variation) {
+void transport_queue_pattern(uint8_t pattern_index) {
     if (pattern_index >= MAX_PATTERNS) return;
-    if (variation > 1) return;
-#ifndef REBIRTH_HOST_TEST
-    sequencer_prepare_queued_pattern(pattern_index, variation);
-#endif
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        transport_queue_track_pattern(track, pattern_index);
+    }
+}
+
+void transport_queue_track_pattern(uint8_t track, uint8_t pattern_index) {
+    if (track >= NUM_TRACKS) return;
+    if (pattern_index >= MAX_PATTERNS) return;
 
     uint32_t lock_state = seq_lock();
     transport_t *t = (transport_t *)&g_seq.transport;
-    t->queued_pattern = pattern_index;
-    t->queued_variation = variation;
+    t->queued_pattern[track] = NO_QUEUED_PATTERN;
+    seq_unlock(lock_state);
+
+#ifndef REBIRTH_HOST_TEST
+    sequencer_prepare_queued_pattern(track, pattern_index);
+#endif
+
+    lock_state = seq_lock();
+    t = (transport_t *)&g_seq.transport;
+    t->queued_pattern[track] = pattern_index;
     seq_unlock(lock_state);
 }
 
 void transport_clear_queue(void) {
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        transport_clear_track_queue(track);
+    }
+}
+
+void transport_clear_track_queue(uint8_t track) {
+    if (track >= NUM_TRACKS) return;
     uint32_t lock_state = seq_lock();
     transport_t *t = (transport_t *)&g_seq.transport;
-    t->queued_pattern = 0xFF;
-    t->queued_variation = 0;
+    t->queued_pattern[track] = NO_QUEUED_PATTERN;
     seq_unlock(lock_state);
 }
 

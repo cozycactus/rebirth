@@ -43,13 +43,13 @@ static int tests_passed = 0;
 TEST(test_pattern_init_name) {
     pattern_t p;
     pattern_init(&p, 0);
-    ASSERT_STR_EQ(p.name, "PT00");
+    ASSERT_STR_EQ(p.name, "PA1");
 
     pattern_init(&p, 7);
-    ASSERT_STR_EQ(p.name, "PT07");
+    ASSERT_STR_EQ(p.name, "PA8");
 
-    pattern_init(&p, 63);
-    ASSERT_STR_EQ(p.name, "PT63");
+    pattern_init(&p, 31);
+    ASSERT_STR_EQ(p.name, "PD8");
 }
 
 TEST(test_pattern_init_tracks) {
@@ -87,6 +87,9 @@ TEST(test_pattern_init_tracks) {
     /* Swing defaults to 50 (straight) */
     ASSERT_EQ(p.swing, 50);
     ASSERT_EQ(p.length, STEPS_PER_PATTERN);
+    for (int t = 0; t < NUM_TRACKS; t++) {
+        ASSERT_EQ(pattern_get_track_length(&p, t), STEPS_PER_PATTERN);
+    }
 }
 
 TEST(test_pattern_init_steps_zeroed) {
@@ -281,6 +284,7 @@ TEST(test_pattern_copy) {
     pattern_set_step(&src, 3, 7, 48, 80, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
     src.tracks[1].muted = true;
     src.length = 7;
+    pattern_set_track_length(&src, 3, 11);
     src.swing = 65;
 
     pattern_copy(&dst, &src);
@@ -289,9 +293,10 @@ TEST(test_pattern_copy) {
     ASSERT_EQ(dst.steps[3][7].note, 48);
     ASSERT_EQ(dst.steps[3][7].flags, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
     ASSERT_TRUE(dst.tracks[1].muted);
-    ASSERT_EQ(dst.length, 7);
+    ASSERT_EQ(dst.length, 11);
+    ASSERT_EQ(pattern_get_track_length(&dst, 3), 11);
     ASSERT_EQ(dst.swing, 65);
-    ASSERT_STR_EQ(dst.name, "PT05");
+    ASSERT_STR_EQ(dst.name, "PA6");
 }
 
 TEST(test_pattern_copy_independence) {
@@ -305,6 +310,69 @@ TEST(test_pattern_copy_independence) {
     pattern_set_step(&src, 0, 0, 72, 127, STEP_FLAG_ACTIVE);
     ASSERT_EQ(dst.steps[0][0].note, 60);
     ASSERT_EQ(dst.steps[0][0].velocity, 100);
+}
+
+/* ── Pattern length / edit helpers ─────────────────────── */
+
+TEST(test_track_length_per_track) {
+    pattern_t p;
+    pattern_init(&p, 0);
+
+    pattern_set_track_length(&p, 0, 7);
+    pattern_set_track_length(&p, 1, 13);
+
+    ASSERT_EQ(pattern_get_track_length(&p, 0), 7);
+    ASSERT_EQ(pattern_get_track_length(&p, 1), 13);
+    ASSERT_EQ(pattern_get_track_length(&p, 2), STEPS_PER_PATTERN);
+}
+
+TEST(test_track_length_clamps) {
+    pattern_t p;
+    pattern_init(&p, 0);
+
+    pattern_set_track_length(&p, 0, 0);
+    ASSERT_EQ(pattern_get_track_length(&p, 0), 1);
+
+    pattern_set_track_length(&p, 0, 99);
+    ASSERT_EQ(pattern_get_track_length(&p, 0), STEPS_PER_PATTERN);
+}
+
+TEST(test_pattern_clear_track) {
+    pattern_t p;
+    pattern_init(&p, 0);
+
+    pattern_set_step(&p, 0, 0, 60, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&p, 1, 0, 62, 100, STEP_FLAG_ACTIVE);
+    pattern_clear_track(&p, 0);
+
+    ASSERT_EQ(p.steps[0][0].flags, 0);
+    ASSERT_EQ(p.steps[1][0].flags, STEP_FLAG_ACTIVE);
+}
+
+TEST(test_pattern_shift_track_right_wraps_16_steps) {
+    pattern_t p;
+    pattern_init(&p, 0);
+    pattern_set_track_length(&p, 0, 7);
+    pattern_set_step(&p, 0, 15, 72, 90, STEP_FLAG_ACTIVE);
+
+    pattern_shift_track(&p, 0, 1);
+
+    ASSERT_EQ(p.steps[0][0].note, 72);
+    ASSERT_EQ(p.steps[0][0].flags, STEP_FLAG_ACTIVE);
+    ASSERT_EQ(p.steps[0][15].flags, 0);
+}
+
+TEST(test_pattern_shift_track_left_wraps_16_steps) {
+    pattern_t p;
+    pattern_init(&p, 0);
+    pattern_set_track_length(&p, 0, 7);
+    pattern_set_step(&p, 0, 0, 72, 90, STEP_FLAG_ACTIVE);
+
+    pattern_shift_track(&p, 0, -1);
+
+    ASSERT_EQ(p.steps[0][15].note, 72);
+    ASSERT_EQ(p.steps[0][15].flags, STEP_FLAG_ACTIVE);
+    ASSERT_EQ(p.steps[0][0].flags, 0);
 }
 
 /* ── Main ────────────────────────────────────────────────── */
@@ -339,6 +407,13 @@ int main(void) {
     /* pattern_copy */
     RUN(test_pattern_copy);
     RUN(test_pattern_copy_independence);
+
+    /* pattern length / edit helpers */
+    RUN(test_track_length_per_track);
+    RUN(test_track_length_clamps);
+    RUN(test_pattern_clear_track);
+    RUN(test_pattern_shift_track_right_wraps_16_steps);
+    RUN(test_pattern_shift_track_left_wraps_16_steps);
 
     printf("\n  %d/%d tests passed\n\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

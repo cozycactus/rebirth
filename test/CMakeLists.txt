@@ -24,7 +24,7 @@ add_executable(test_sync
 target_include_directories(test_sync PRIVATE ${REBIRTH_INC})
 target_compile_definitions(test_sync PRIVATE ${REBIRTH_HOST_DEFS} MOCK_HARDWARE=1)
 
-# Test 3: song mode (song editing, pattern queue, mutes, A/B)
+# Test 3: song mode (song editing, pattern queue, mutes, banks)
 add_executable(test_song
     test_song.c
     ${REBIRTH_SRC}/song.c

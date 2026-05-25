@@ -100,18 +100,25 @@ UI: OLED display + rotary encoders + buttons.
 - Timer-driven at 96 PPQN (pulses per quarter note)
 - At each pulse: check if current pulse == step boundary (every 24 pulses for 16th notes)
 - Pattern-mode playback uses prepared step events so the ISR does not copy full pattern data at each step.
-- On step boundary: switch queued prepared pattern if needed, then iterate 8 tracks, fire note-on/off, update CV/gate
+- Pattern locations follow ReBirth's bank model: A-D banks with 8 slots each.
+- Current, queued, and edited pattern locations are tracked independently per track.
+- Pattern length is stored per track, so tracks can loop independently at 1-16 sixteenth-note steps.
+- Live step, length, and track-setting edits refresh the prepared playback row for the affected track.
+- The default performance view avoids destructive step edits and exposes mutes, per-track queueing, transport, BPM, and jitter status.
+- Holding both encoder buttons triggers panic: stop playback, clear gates, and send MIDI all-notes-off controllers.
+- On step boundary: switch any queued track pattern whose own loop wrapped, then iterate 8 tracks, fire note-on/off, update CV/gate
+- In Song mode, bar changes reset only tracks whose pattern location actually changed.
 - Stores swing per pattern; timing implementation is still pending
 - Queued patterns are prepared before the pattern boundary and swapped into playback at step 0.
 
 ### 2. `pattern.c` — Pattern Data
-- 8 tracks × 16 steps × N patterns (32–64 patterns in flash)
+- 8 tracks × 16 steps × 32 pattern locations in flash
 - Each step: `{ uint8_t note, velocity, flags; }` (3 bytes)
 - Per track: instrument type (synth/drum), MIDI channel, CV assign
-- Total per pattern: 8 × 16 × 3 = 384 bytes → 64 patterns = 24KB
+- Total step data: 8 × 16 × 3 × 32 = 12KB, plus track configuration and per-track lengths
 
 ### 3. `song.c` — Song Mode
-- Array of pattern indices with repeat counts
+- Array of per-track pattern-index snapshots with repeat counts
 - Max 256 entries
 - Song position pointer, advancing on pattern completion
 
@@ -168,7 +175,7 @@ leaving >95% CPU headroom.
 - Timer period recalculated on BPM change
 
 ## Memory Budget
-- Pattern storage: ~24KB (64 patterns)
+- Pattern storage: ~16KB (32 banked pattern locations)
 - Song data: ~512 bytes
 - OLED framebuffer: ~1KB
 - Code + stack: ~100KB

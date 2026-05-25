@@ -8,8 +8,11 @@
 
 #define NUM_TRACKS          8
 #define STEPS_PER_PATTERN   16
-#define MAX_PATTERNS        64
+#define PATTERN_BANKS       4
+#define PATTERNS_PER_BANK   8
+#define MAX_PATTERNS        (PATTERN_BANKS * PATTERNS_PER_BANK)
 #define MAX_SONG_ENTRIES    256
+#define NO_QUEUED_PATTERN   0xFF
 #define PPQN                96      // Pulses per quarter note
 #define PULSES_PER_STEP     (PPQN / 4)  // 24 pulses per 16th note at 96 PPQN
 #define DEFAULT_BPM         120.0f
@@ -27,6 +30,8 @@
 #define MIDI_NOTE_ON        0x90
 #define MIDI_NOTE_OFF       0x80
 #define MIDI_CC             0xB0
+#define MIDI_CC_ALL_SOUND_OFF 120
+#define MIDI_CC_ALL_NOTES_OFF 123
 #define MIDI_CLOCK          0xF8
 #define MIDI_START          0xFA
 #define MIDI_STOP           0xFC
@@ -73,20 +78,15 @@ typedef struct {
 typedef struct {
     step_t         steps[NUM_TRACKS][STEPS_PER_PATTERN];
     track_config_t tracks[NUM_TRACKS];
-    uint8_t        length;          // Active step count: 1-16
+    uint8_t        length;          // Default/fallback step count: 1-16
+    uint8_t        track_length[NUM_TRACKS]; // Per-track/section step count: 1-16
     uint8_t        swing;           // 0–99, percentage of swing
     char           name[9];         // 8 chars + null
 } pattern_t;
 
-// Pattern with A/B variations (like ReBirth)
-typedef struct {
-    pattern_t      variation[2];    // 0 = A, 1 = B
-} pattern_pair_t;
-
 // Song mode
 typedef struct {
-    uint8_t pattern_index;  // Which pattern to play
-    uint8_t variation;      // 0 = A, 1 = B
+    uint8_t pattern_index[NUM_TRACKS]; // Pattern location per track/section
     uint8_t repeats;        // How many times (1–255, 0 = skip)
 } song_entry_t;
 
@@ -120,10 +120,10 @@ typedef struct {
     float             bpm;
     uint32_t          pulse_count;      // Current pulse within pattern
     uint8_t           current_step;     // 0–15
-    uint8_t           current_pattern;  // Pattern index for pattern mode
-    uint8_t           current_variation;// 0 = A, 1 = B
-    uint8_t           queued_pattern;   // Next pattern (0xFF = none)
-    uint8_t           queued_variation; // Next variation
+    uint32_t          track_step_count[NUM_TRACKS]; // Independent per-track step counters
+    uint8_t           current_track_step[NUM_TRACKS]; // Per-track playhead
+    uint8_t           current_pattern[NUM_TRACKS]; // Pattern per track/section
+    uint8_t           queued_pattern[NUM_TRACKS];  // Next per-track pattern (0xFF = none)
     uint16_t          song_position;    // Current entry in song
     uint8_t           song_repeat_count;// Repeats remaining
     bool              step_triggered;   // Flag: new step just started
@@ -147,10 +147,9 @@ typedef struct {
 
 typedef struct {
     volatile transport_t transport;
-    pattern_pair_t       patterns[MAX_PATTERNS];
+    pattern_t            patterns[MAX_PATTERNS];
     song_t               song;
-    uint8_t              active_pattern;     // Pattern being edited
-    uint8_t              active_variation;   // Which variation (A/B) is being edited
+    uint8_t              active_pattern[NUM_TRACKS]; // Edited pattern per track/section
     volatile uint8_t     track_mutes;        // Bitmask: bit N = track N muted for playback
     // Spinlock index for mutex
     uint32_t             spinlock_num;
@@ -176,7 +175,9 @@ void transport_start(void);
 void transport_stop(void);
 void transport_continue(void);
 void transport_set_bpm(float bpm);
-void sequencer_prepare_queued_pattern(uint8_t pattern_index, uint8_t variation);
+void sequencer_panic(void);
+void sequencer_prepare_queued_pattern(uint8_t track, uint8_t pattern_index);
+void sequencer_refresh_track_playback(uint8_t track, uint8_t pattern_index);
 void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out);
 void sequencer_reset_jitter_stats(void);
 
@@ -187,22 +188,36 @@ void pattern_set_step(pattern_t *p, uint8_t track, uint8_t step,
 void pattern_clear_step(pattern_t *p, uint8_t track, uint8_t step);
 void pattern_toggle_step(pattern_t *p, uint8_t track, uint8_t step);
 void pattern_copy(pattern_t *dst, const pattern_t *src);
+void pattern_clear(pattern_t *p);
+void pattern_clear_track(pattern_t *p, uint8_t track);
+void pattern_shift(pattern_t *p, int8_t direction);
+void pattern_shift_track(pattern_t *p, uint8_t track, int8_t direction);
+uint8_t pattern_get_track_length(const pattern_t *p, uint8_t track);
+void pattern_set_track_length(pattern_t *p, uint8_t track, uint8_t length);
+uint8_t pattern_bank(uint8_t pattern_index);
+uint8_t pattern_slot(uint8_t pattern_index);
+uint8_t pattern_make_index(uint8_t bank, uint8_t slot);
 
-// Pattern access helpers (returns active variation)
-pattern_t *seq_active_pattern(void);
-pattern_t *seq_playing_pattern(void);
+// Pattern access helpers
+pattern_t *seq_active_pattern(uint8_t track);
+pattern_t *seq_playing_pattern(uint8_t track);
 
 // Song editing
-bool song_append(uint8_t pattern_index, uint8_t variation, uint8_t repeats);
-bool song_insert(uint16_t position, uint8_t pattern_index, uint8_t variation, uint8_t repeats);
+bool song_append(uint8_t pattern_index, uint8_t repeats);
+bool song_append_patterns(const uint8_t pattern_index[NUM_TRACKS], uint8_t repeats);
+bool song_insert(uint16_t position, uint8_t pattern_index, uint8_t repeats);
+bool song_insert_patterns(uint16_t position, const uint8_t pattern_index[NUM_TRACKS],
+                          uint8_t repeats);
 bool song_remove(uint16_t position);
 bool song_move(uint16_t from, uint16_t to);
 void song_clear(void);
 void song_set_end_mode(song_end_mode_t mode);
 
 // Pattern queue — set next pattern to switch at end of current
-void transport_queue_pattern(uint8_t pattern_index, uint8_t variation);
+void transport_queue_pattern(uint8_t pattern_index);
+void transport_queue_track_pattern(uint8_t track, uint8_t pattern_index);
 void transport_clear_queue(void);
+void transport_clear_track_queue(uint8_t track);
 
 // Track mutes (bitmask, instant)
 void seq_set_track_mute(uint8_t track, bool muted);
@@ -218,6 +233,8 @@ void midi_send_clock(void);
 void midi_send_start(void);
 void midi_send_stop(void);
 void midi_send_continue(void);
+void midi_send_all_notes_off(void);
+void midi_clear_output_queue(void);
 // Buffered output — collect messages, then flush all at once
 void midi_buf_clear(void);
 void midi_buf_flush(void);
@@ -237,15 +254,17 @@ void cv_gate_all_off(void);
 void display_init(void);
 void display_clear(void);
 void display_update(void);
+void display_draw_performance_view(uint8_t selected_track, uint8_t bank,
+                                   uint8_t mutes);
 void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step);
 void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step);
-void display_draw_pattern_select(uint8_t pattern, uint8_t variation,
+void display_draw_pattern_select(uint8_t pattern,
                                   uint8_t length,
-                                  uint8_t queued_pat, uint8_t queued_var,
+                                  uint8_t queued_pat,
                                   uint8_t mutes);
 void display_draw_track_config(const track_config_t *tc, uint8_t track,
                                 uint8_t param_cursor);
-void display_draw_song_view(const song_t *s, uint16_t pos);
+void display_draw_song_view(const song_t *s, uint16_t pos, uint8_t track);
 void display_draw_bpm(float bpm);
 void display_draw_text(uint8_t x, uint8_t y, const char *text);
 

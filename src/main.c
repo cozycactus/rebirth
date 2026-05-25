@@ -18,22 +18,22 @@ static void init_defaults(void) {
     g_seq.transport.bpm = DEFAULT_BPM;
     g_seq.transport.pulse_count = 0;
     g_seq.transport.current_step = 0;
-    g_seq.transport.current_pattern = 0;
-    g_seq.transport.current_variation = 0;
-    g_seq.transport.queued_pattern = 0xFF;
-    g_seq.transport.queued_variation = 0;
+    for (int t = 0; t < NUM_TRACKS; t++) {
+        g_seq.transport.current_track_step[t] = 0;
+        g_seq.transport.track_step_count[t] = 0;
+        g_seq.transport.current_pattern[t] = 0;
+        g_seq.transport.queued_pattern[t] = NO_QUEUED_PATTERN;
+        g_seq.active_pattern[t] = 0;
+    }
     g_seq.transport.song_position = 0;
     g_seq.transport.song_repeat_count = 0;
     g_seq.transport.step_triggered = false;
 
-    g_seq.active_pattern = 0;
-    g_seq.active_variation = 0;
     g_seq.track_mutes = 0;
 
-    // Initialize all patterns with defaults (both A and B)
+    // Initialize all ReBirth-style pattern locations: banks A-D, slots 1-8.
     for (int i = 0; i < MAX_PATTERNS; i++) {
-        pattern_init(&g_seq.patterns[i].variation[0], i);
-        pattern_init(&g_seq.patterns[i].variation[1], i);
+        pattern_init(&g_seq.patterns[i], i);
     }
 
     // Initialize song
@@ -41,8 +41,8 @@ static void init_defaults(void) {
     g_seq.song.end_mode = SONG_END_LOOP;
     g_seq.song.name[0] = '\0';
 
-    // Set up a basic demo pattern on pattern 0, variation A
-    pattern_t *p = &g_seq.patterns[0].variation[0];
+    // Set up a basic demo pattern on bank A, slot 1.
+    pattern_t *p = &g_seq.patterns[0];
     p->tracks[0].type = TRACK_TYPE_DRUM;
     p->tracks[0].drum_note = 36;  // GM Kick
     p->tracks[0].midi_channel = 9; // GM drums
