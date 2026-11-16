@@ -84,8 +84,8 @@ int main(void) {
     midi_init();
     cv_gate_init();
     display_init();
+    sequencer_init();   // Claims the playback lock; ui_init's session_init takes it
     ui_init();
-    sequencer_init();
 
     // Launch sequencer engine on Core 1
     multicore_launch_core1(sequencer_core1_entry);

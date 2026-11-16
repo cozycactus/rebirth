@@ -10,7 +10,10 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **Independent pattern selection per track** — each track can play or queue a different bank/slot
 - **Per-track pattern length** — each track can loop at 1-16 sixteenth-note steps
 - **Live pattern editing** — step, length, and track-setting edits update playback while running
-- **Performance view** — safe live mutes, per-track pattern queueing, transport, BPM, and jitter status
+- **Session view** — 8×8 pad grid (tracks × slots of the shown bank), SCENE column,
+  MUTE row and a PLAY button; the 16 step buttons edit the focused clip
+- **Launch quantization** — pad and scene launches land on the next bar (default),
+  beat, step, or at the end of the track's loop
 - **Song mode** — chain patterns with repeat counts, loop or stop at end
 - **Pattern queue** — schedule the next pattern during playback
 - **Track mutes** — instant bitmask-based mute/unmute
@@ -87,16 +90,42 @@ Unix builds also exercise concurrent Stop/Panic during a pending gate commit.
 
 ## Live Controls
 
-- Performance: encoder 1 selects the track; encoder 2 changes tempo.
-- Buttons 1-8 mute on press. Buttons 9-16 select bank slots 1-8: while stopped
-  selection is immediate; while playing it queues at that track's loop end.
-- Encoder 1 short opens the selected playing pattern for editing; long cycles bank.
-- Encoder 2 short starts/stops; long opens the pattern selector.
-- Hold both encoder buttons for Panic. Release both before issuing another command.
+The Session view is home. The grid shows one bank (A-D) of 8 slots per track:
+column = track, row = slot. The **focus** is one cell (track, slot); the step
+buttons edit it.
+
+- **Pad:** launches that slot on the track at the next launch point and moves
+  the focus there. While stopped the selection is immediate. Pressing a queued
+  pad cancels the queue; pressing the playing pad changes nothing. An empty
+  slot launches too, which silences the track.
+- **SCENE:** launches the row on every track together; tracks already playing
+  it keep playing. Pressed while any track is queued to that row, it cancels
+  all queues.
+- **MUTE:** toggles the track's mute at once.
+- **PLAY:** starts and stops the transport; it is the only start/stop. Stop
+  cancels pending queues.
+- **Step buttons 1-16:** a short press toggles the focused clip's step on
+  release; a long press opens the step editor on that step without toggling it.
+  Steps beyond the clip's length do nothing.
+- **Encoder 1 (TRACK):** turn to focus the previous/next track (on the slot it
+  plays, or its queued one); press opens the pattern view on the focus; long
+  press shows the next bank A → B → C → D → A.
+- **Encoder 2 (VALUE):** turn for tempo; press cycles the launch quantization
+  (1 BAR, 1 BEAT, NEXT STEP, TRACK LOOP; 1 BAR after power-up); long press opens
+  the pattern selector on the focus.
+- Pads, SCENE, MUTE and PLAY work on every screen. Outside the Session view a
+  pad launches without moving the focus.
+- The step editor returns to the screen it was opened from. In the pattern
+  view, encoder 1 long returns to the Session view; in the selector, encoder 2
+  long does.
+- Hold both encoder buttons for Panic: it stops playback and returns to the
+  Session view. Release both before issuing another command; keys held through
+  the panic or pressed while it is held do nothing afterwards.
 - In the selector, buttons 1-8 mute on **short release**; holding opens track
   configuration without muting. Save/load (9/10) require stopped playback.
-- Manual queues are unavailable in Song mode. In the song editor, button 2
-  starts Song mode and button 3 returns to Pattern playback.
+- Pad and scene launches are unavailable in Song mode (`SONG MODE`); a pad
+  still moves the focus. In the song editor, button 2 selects Song mode and
+  button 3 Pattern playback; PLAY starts it.
 - Song entries can be inserted or removed while Song mode plays: the playing
   entry finishes, then the entry after it in the edited list plays.
 - Slide/tie connect a step to the following step. Gate length controls MIDI
@@ -142,7 +171,7 @@ test/
 - [x] Per-track pattern lengths
 - [x] Pattern queue
 - [x] Track mutes
-- [x] Performance-safe live control view
+- [x] Session view: pad grid, scenes, mutes, PLAY and launch quantization
 - [x] Panic / all-notes-off recovery
 - [x] Host regression tests for playback, UI, storage and output
 - [x] OLED display driver (SSD1309, SPI, full framebuffer)

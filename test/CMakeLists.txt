@@ -86,6 +86,8 @@ add_executable(test_ui
     ${REBIRTH_SRC}/flash_storage.c
     ${REBIRTH_SRC}/display.c
     ${REBIRTH_SRC}/ssd1309.c
+    ${REBIRTH_SRC}/session.c
+    ${REBIRTH_SRC}/led_frame.c
 )
 target_include_directories(test_ui PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME ui_tests COMMAND test_ui)

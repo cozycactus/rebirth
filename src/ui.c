@@ -8,6 +8,8 @@
 #include "mcp23017.h"
 #include "flash_storage.h"
 #include "step_leds.h"
+#include "session.h"
+#include "panel_input.h"
 
 // ─── Tempo LED ─────────────────────────────────────────────────
 #define TEMPO_LED_PIN   25
@@ -16,7 +18,7 @@
 // ─── UI Modes ──────────────────────────────────────────────────
 
 typedef enum {
-    UI_PERFORMANCE,         // Safe live control surface
+    UI_SESSION,             // Home: pad grid, focus cell on the step row
     UI_PATTERN_VIEW,        // Main step grid
     UI_STEP_EDIT,           // Edit note/velocity/flags
     UI_PATTERN_SELECT,      // Choose bank A-D and pattern 1-8
@@ -28,15 +30,16 @@ typedef enum {
 
 typedef struct {
     ui_mode_t mode;
-    uint8_t performance_bank;       // A-D bank used by live queue buttons
     bool panic_latched;
     uint16_t select_short_pending;
+    uint16_t step_short_pending;    // SESSION: steps pressed here, toggled on release
 
     // PATTERN_VIEW
     uint8_t selected_track;         // 0–7
 
     // STEP_EDIT
     uint8_t edit_step;              // 0–15
+    ui_mode_t step_edit_return;     // Screen the step editor was opened from
 
     // PATTERN_SELECT
     uint8_t select_pattern;         // 0–31 (bank A-D × slot 1-8)
@@ -70,10 +73,10 @@ static inline int8_t clamp_i8(int16_t val, int16_t lo, int16_t hi) {
     return (int8_t)val;
 }
 
-static void ui_pattern_label(uint8_t pattern, char *buf, size_t len) {
-    snprintf(buf, len, "%c%d",
-             'A' + pattern_bank(pattern),
-             pattern_slot(pattern) + 1);
+static uint8_t clamp_pattern_length(uint8_t len) {
+    if (len < 1) return 1;
+    if (len > STEPS_PER_PATTERN) return STEPS_PER_PATTERN;
+    return len;
 }
 
 static void show_notify(const char *msg) {
@@ -101,13 +104,51 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
     if ((e1b == BTN_LONG_PRESS && encoder_button_held(1)) ||
         (e2b == BTN_LONG_PRESS && encoder_button_held(0))) {
         sequencer_panic();
+        // Panel keys held through the panic must not fire afterwards.
+        panel_input_resync();
         ui.panic_latched = true;
         ui.select_short_pending = 0;
-        ui.mode = UI_PERFORMANCE;
+        ui.step_short_pending = 0;
+        ui.mode = UI_SESSION;
         show_notify("PANIC: ALL OFF");
         return true;
     }
     return false;
+}
+
+// ─── Global panel controls (every screen) ──────────────────────
+
+// Pads, SCENE, MUTE and PLAY. Called with no lock held: every session_* and
+// transport call below takes the locks itself.
+static void handle_panel_events(void) {
+    panel_event_t ev;
+    while (panel_input_next(&ev)) {
+        if (!ev.down) continue;
+        switch (ev.kind) {
+            case PANEL_PAD:
+                // Outside the Session view a pad only launches.
+                if (!session_pad(ev.track, ev.row, ui.mode == UI_SESSION)) {
+                    show_notify("SONG MODE");
+                }
+                break;
+            case PANEL_SCENE:
+                if (!session_scene(ev.row)) show_notify("SONG MODE");
+                break;
+            case PANEL_MUTE:
+                session_mute(ev.track);
+                break;
+            case PANEL_PLAY:
+                toggle_transport();
+                break;
+        }
+    }
+}
+
+// Drops panel events, e.g. while the panic combo is still held.
+static void discard_panel_events(void) {
+    panel_event_t ev;
+    while (panel_input_next(&ev)) {
+    }
 }
 
 // ─── Tempo LED Handler ────────────────────────────────────────
@@ -131,82 +172,106 @@ static void handle_tempo_led(void) {
     }
 }
 
-// ─── Performance Handler ───────────────────────────────────────
+// ─── Session Handler ───────────────────────────────────────────
 
-static void handle_performance_view(int8_t e1d, int8_t e2d,
-                                    button_event_t e1b, button_event_t e2b,
-                                    step_buttons_t *steps) {
-    // Enc1 rotate: select controlled track.
+static const char *const launch_quant_names[LAUNCH_QUANT_COUNT] = {
+    [LAUNCH_QUANT_TRACK_LOOP] = "TRACK LOOP",
+    [LAUNCH_QUANT_BAR]        = "1 BAR",
+    [LAUNCH_QUANT_BEAT]       = "1 BEAT",
+    [LAUNCH_QUANT_STEP]       = "NEXT STEP",
+};
+
+// Points the editing screens (selected_track, active_pattern) at the focus.
+static void target_focus(session_focus_t focus) {
+    ui.selected_track = focus.track;
+    uint32_t lock_state = seq_lock();
+    g_seq.active_pattern[focus.track] = focus.location;
+    seq_unlock(lock_state);
+}
+
+static void handle_session_view(int8_t e1d, int8_t e2d,
+                                button_event_t e1b, button_event_t e2b,
+                                step_buttons_t *steps) {
+    // TRACK rotate: focus the previous/next track.
     if (e1d != 0) {
-        int16_t t = (int16_t)ui.selected_track + e1d;
-        ui.selected_track = clamp_i8(t, 0, NUM_TRACKS - 1);
+        session_move_focus(e1d);
     }
 
-    // Enc2 rotate: nudge tempo without leaving the performance surface.
+    // VALUE rotate: tempo.
     if (e2d != 0) {
         float new_bpm = g_seq.transport.bpm + (float)e2d * 0.1f;
         transport_set_bpm(new_bpm);
     }
 
-    // Enc1 press enters the editable pattern grid.
+    session_focus_t focus = session_get_focus();
+
+    // TRACK press: pattern view on the focus.
     if (e1b == BTN_PRESS) {
-        uint32_t lock_state = seq_lock();
-        g_seq.active_pattern[ui.selected_track] = g_seq.transport.current_pattern[ui.selected_track];
-        seq_unlock(lock_state);
+        target_focus(focus);
         ui.mode = UI_PATTERN_VIEW;
     }
 
-    // Enc1 long cycles the live queue bank A-D.
+    // TRACK long: step the shown bank A-D.
     if (e1b == BTN_LONG_PRESS) {
-        ui.performance_bank = (uint8_t)((ui.performance_bank + 1u) % PATTERN_BANKS);
+        session_next_bank();
         char msg[17];
-        snprintf(msg, sizeof(msg), "BANK %c", 'A' + ui.performance_bank);
+        snprintf(msg, sizeof(msg), "BANK %c", 'A' + session_bank());
         show_notify(msg);
     }
 
-    // Enc2 press is the transport toggle.
+    // VALUE press: cycle the launch quantization.
     if (e2b == BTN_PRESS) {
-        toggle_transport();
+        launch_quant_t q = (launch_quant_t)((transport_get_launch_quant() + 1u) %
+                                            LAUNCH_QUANT_COUNT);
+        transport_set_launch_quant(q);
+        char msg[17];
+        snprintf(msg, sizeof(msg), "QUANT %s", launch_quant_names[q]);
+        show_notify(msg);
     }
 
-    // Enc2 long opens the detailed pattern selector.
+    // VALUE long: pattern selector on the focus.
     if (e2b == BTN_LONG_PRESS) {
+        ui.selected_track = focus.track;
+        ui.select_pattern = focus.location;
         ui.mode = UI_PATTERN_SELECT;
-        ui.select_pattern = pattern_make_index(ui.performance_bank,
-                                               pattern_slot(g_seq.active_pattern[ui.selected_track]));
     }
 
-    // Buttons 1-8: instant track mutes. Long events are ignored here so held
-    // buttons cannot accidentally trigger a second command.
-    uint16_t pressed = (uint16_t)(steps->pressed & ~steps->long_pressed);
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if (pressed & (1u << track)) {
-            seq_toggle_track_mute(track);
+    // A step pressed here and released on another screen does nothing.
+    if (ui.mode != UI_SESSION) return;
+
+    // Steps edit the focused cell; steps beyond its length do nothing.
+    uint8_t len = clamp_pattern_length(
+        pattern_get_track_length(&g_seq.patterns[focus.location], focus.track));
+    uint16_t in_length = (uint16_t)((1u << len) - 1u);
+
+    // A short press toggles on release, unless it became a long press.
+    ui.step_short_pending |= steps->pressed & in_length;
+    ui.step_short_pending &= (uint16_t)~steps->long_pressed;
+    uint16_t short_releases = steps->released & ui.step_short_pending & in_length;
+    ui.step_short_pending &= (uint16_t)~steps->released;
+    if (short_releases) {
+        uint32_t lock_state = seq_lock();
+        pattern_t *pat = &g_seq.patterns[focus.location];
+        for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+            if (short_releases & (1u << s)) {
+                pattern_toggle_step(pat, focus.track, s);
+            }
         }
+        seq_unlock(lock_state);
+        sequencer_refresh_track_playback(focus.track, focus.location);
     }
 
-    // Buttons 9-16: queue pattern slots 1-8 in the selected performance bank.
-    for (uint8_t slot = 0; slot < PATTERNS_PER_BANK; slot++) {
-        uint16_t mask = (uint16_t)(1u << (slot + NUM_TRACKS));
-        if (!(pressed & mask)) continue;
-
-        uint8_t pattern_index = pattern_make_index(ui.performance_bank, slot);
-        uint8_t queued = g_seq.transport.queued_pattern[ui.selected_track];
-
-        if (queued == pattern_index) {
-            transport_clear_track_queue(ui.selected_track);
-            show_notify("QUEUE CLEARED");
-        } else if (transport_queue_track_pattern(ui.selected_track, pattern_index)) {
-            char label[4];
-            char msg[17];
-            ui_pattern_label(pattern_index, label, sizeof(label));
-            snprintf(msg, sizeof(msg), "%s T%d %s",
-                     g_seq.transport.state == TRANSPORT_PLAYING ? "QUEUE" : "SELECT",
-                     ui.selected_track + 1,
-                     label);
-            show_notify(msg);
-        } else {
-            show_notify("SONG MODE");
+    // A long press opens the step editor on that step without toggling it.
+    uint16_t long_presses = steps->long_pressed & in_length;
+    if (long_presses) {
+        for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+            if (long_presses & (1u << s)) {
+                target_focus(focus);
+                ui.edit_step = s;
+                ui.step_edit_return = UI_SESSION;
+                ui.mode = UI_STEP_EDIT;
+                break;
+            }
         }
     }
 }
@@ -232,16 +297,12 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
     if (e1b == BTN_PRESS) {
         ui.mode = UI_STEP_EDIT;
         ui.edit_step = 0;
+        ui.step_edit_return = UI_PATTERN_VIEW;
     }
 
-    // Enc1 long: back to safe performance view
+    // Enc1 long: back to the Session view
     if (e1b == BTN_LONG_PRESS) {
-        ui.mode = UI_PERFORMANCE;
-    }
-
-    // Enc2 press: play/stop toggle
-    if (e2b == BTN_PRESS) {
-        toggle_transport();
+        ui.mode = UI_SESSION;
     }
 
     // Enc2 long press: enter pattern select
@@ -317,9 +378,9 @@ static void handle_step_edit(int8_t e1d, int8_t e2d,
         changed = true;
     }
 
-    // Enc2 press: back to pattern view
+    // Enc2 press: back to the screen the editor was opened from
     if (e2b == BTN_PRESS) {
-        ui.mode = UI_PATTERN_VIEW;
+        ui.mode = ui.step_edit_return;
     }
 
     // Step buttons: select which step to edit
@@ -393,9 +454,9 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
         }
     }
 
-    // Enc2 long press: back to safe performance view (escape)
+    // Enc2 long press: back to the Session view (escape)
     if (e2b == BTN_LONG_PRESS) {
-        ui.mode = UI_PERFORMANCE;
+        ui.mode = UI_SESSION;
     }
 
     // In the selector only, defer short presses until release so opening
@@ -481,12 +542,6 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
     }
 }
 
-static uint8_t clamp_pattern_length(uint8_t len) {
-    if (len < 1) return 1;
-    if (len > STEPS_PER_PATTERN) return STEPS_PER_PATTERN;
-    return len;
-}
-
 static uint16_t build_step_activity_mask(const pattern_t *pat, uint8_t track) {
     uint16_t mask = 0;
     uint8_t len = clamp_pattern_length(pattern_get_track_length(pat, track));
@@ -499,21 +554,26 @@ static uint16_t build_step_activity_mask(const pattern_t *pat, uint8_t track) {
     return mask;
 }
 
+// Interim Session step LEDs (replaced by the session lights in Task 9):
+// buttons 1-8 show mutes with the focused track blinking, buttons 9-16 the
+// focused track's slots in the shown bank.
 static uint16_t build_performance_mask(void) {
     uint16_t mask = 0;
     uint8_t mutes = seq_get_track_mutes();
+    uint8_t focus_track = session_get_focus().track;
+    uint8_t bank = session_bank();
     uint8_t current_pattern;
     uint8_t queued_pattern;
 
     uint32_t lock_state = seq_lock();
-    current_pattern = g_seq.transport.current_pattern[ui.selected_track];
-    queued_pattern = g_seq.transport.queued_pattern[ui.selected_track];
+    current_pattern = g_seq.transport.current_pattern[focus_track];
+    queued_pattern = g_seq.transport.queued_pattern[focus_track];
     seq_unlock(lock_state);
 
-    // Buttons 1-8 show tracks; lit means audible, selected track blinks.
+    // Buttons 1-8 show tracks; lit means audible, focused track blinks.
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         bool lit = (mutes & (1u << track)) == 0;
-        if (track == ui.selected_track && ui.led_anim_phase) {
+        if (track == focus_track && ui.led_anim_phase) {
             lit = !lit;
         }
         if (lit) {
@@ -521,12 +581,12 @@ static uint16_t build_performance_mask(void) {
         }
     }
 
-    // Buttons 9-16 show slots in the selected performance bank.
-    if (pattern_bank(current_pattern) == ui.performance_bank) {
+    // Buttons 9-16 show slots in the shown bank.
+    if (pattern_bank(current_pattern) == bank) {
         mask |= (uint16_t)(1u << (NUM_TRACKS + pattern_slot(current_pattern)));
     }
     if (queued_pattern != NO_QUEUED_PATTERN &&
-        pattern_bank(queued_pattern) == ui.performance_bank &&
+        pattern_bank(queued_pattern) == bank &&
         ui.led_anim_phase) {
         mask ^= (uint16_t)(1u << (NUM_TRACKS + pattern_slot(queued_pattern)));
     }
@@ -564,7 +624,7 @@ static void update_step_leds(void) {
     uint16_t mask = 0;
 
     switch (ui.mode) {
-        case UI_PERFORMANCE:
+        case UI_SESSION:
             mask = build_performance_mask();
             break;
 
@@ -813,14 +873,12 @@ static void handle_song_edit(int8_t e1d, int8_t e2d,
         );
     }
 
-    // Step button 2: switch to song play mode and start
+    // Step buttons 2/3: Song or Pattern playback; PLAY starts it.
     if (steps->pressed & (1u << 1)) {
         transport_set_mode(PLAY_MODE_SONG);
-        transport_start();
     }
     if (steps->pressed & (1u << 2)) {
         transport_set_mode(PLAY_MODE_PATTERN);
-        transport_start();
     }
 }
 
@@ -839,10 +897,11 @@ static void render_notify(void) {
 
 void ui_render(void) {
     switch (ui.mode) {
-        case UI_PERFORMANCE:
+        case UI_SESSION:
+            // Interim: the performance screen on the focused track.
             display_draw_performance_view(
-                ui.selected_track,
-                ui.performance_bank,
+                session_get_focus().track,
+                session_bank(),
                 seq_get_track_mutes());
             break;
 
@@ -891,6 +950,7 @@ void ui_render(void) {
 void ui_init(void) {
     encoder_init();
     mcp23017_init();
+    panel_input_init();     // TCA8418 shares I2C0, set up by mcp23017_init
     step_leds_init();
 
     // Tempo LED
@@ -900,14 +960,16 @@ void ui_init(void) {
 
     // Default state
     memset(&ui, 0, sizeof(ui));
-    ui.mode = UI_PERFORMANCE;
-    ui.performance_bank = 0;
+    ui.mode = UI_SESSION;
+    ui.step_edit_return = UI_SESSION;
+    session_init();         // Reads the transport: call after sequencer_init
 }
 
 // ─── Main Update Loop ──────────────────────────────────────────
 
 void ui_update(void) {
-    // 1. Poll inputs
+    // 1. Poll inputs: the panel on every pass, then encoders and step buttons
+    panel_input_poll(to_ms_since_boot(get_absolute_time()));
     encoder_poll();
     mcp23017_poll();
 
@@ -922,6 +984,9 @@ void ui_update(void) {
     handle_tempo_led();
 
     if (handle_panic_combo(e1b, e2b)) {
+        // Panel presses during the panic gesture are consumed like the
+        // encoder and step events, so none fires once it is released.
+        discard_panel_events();
         update_step_leds();
         steps->pressed = 0;
         steps->released = 0;
@@ -929,10 +994,12 @@ void ui_update(void) {
         return;
     }
 
-    // 4. Dispatch to mode handler
+    // 4. Global panel controls (no lock held), then the screen's own handler
+    handle_panel_events();
+
     switch (ui.mode) {
-        case UI_PERFORMANCE:
-            handle_performance_view(e1d, e2d, e1b, e2b, steps);
+        case UI_SESSION:
+            handle_session_view(e1d, e2d, e1b, e2b, steps);
             break;
         case UI_PATTERN_VIEW:
             handle_pattern_view(e1d, e2d, e1b, e2b, steps);
@@ -956,6 +1023,7 @@ void ui_update(void) {
 
     // 6. Clear consumed button events
     if (ui.mode != UI_PATTERN_SELECT) ui.select_short_pending = 0;
+    if (ui.mode != UI_SESSION) ui.step_short_pending = 0;
     steps->pressed = 0;
     steps->released = 0;
     steps->long_pressed = 0;
