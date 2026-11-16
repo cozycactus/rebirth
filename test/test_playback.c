@@ -765,6 +765,23 @@ static void test_queue_right_after_bar_waits_a_whole_bar(void) {
     CHECK(g_seq.transport.current_pattern[0] == 1);
 }
 
+static void test_launch_keeps_track_routing(void) {
+    track_config_t cfg = g_seq.patterns[0].tracks[0];
+    cfg.midi_channel = 5;
+    cfg.output_mode = OUTPUT_MIDI_ONLY;
+    seq_set_track_config(0, &cfg);
+    set_note(3, 0, 0, 60, 0);
+    transport_start();
+    CHECK(transport_queue_track_pattern(0, 3));
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[0] == 3);
+    bool found = false;
+    for (unsigned i = 0; i + 2 < fake_midi_length; i++) {
+        found |= fake_midi[i] == 0x95 && fake_midi[i + 1] == 60;
+    }
+    CHECK(found);
+}
+
 static void test_launch_quant_setter_ignores_invalid(void) {
     transport_set_launch_quant(LAUNCH_QUANT_BEAT);
     transport_set_launch_quant(LAUNCH_QUANT_COUNT);
@@ -891,6 +908,7 @@ int main(void) {
     RUN(test_quant_change_retargets_pending_queue);
     RUN(test_shortening_under_bar_does_not_launch_early);
     RUN(test_queue_right_after_bar_waits_a_whole_bar);
+    RUN(test_launch_keeps_track_routing);
     RUN(test_launch_quant_setter_ignores_invalid);
     RUN(test_clip_mask_tracks_edits);
     RUN(test_clip_mask_ignores_stored_mute);

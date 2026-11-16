@@ -188,6 +188,22 @@ static void test_nonplaying_editor_hides_playhead(void) {
     CHECK(memcmp(without_playhead, ssd1309_get_framebuffer(), sizeof(without_playhead)) == 0);
 }
 
+static void test_track_config_edit_reaches_all_locations(void) {
+    uint8_t old = g_seq.patterns[0].tracks[0].midi_channel;
+    press_encoder(1, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    step_buttons.long_pressed = 1;
+    ui_update();
+    CHECK(ui.mode == UI_TRACK_CONFIG);
+    step_buttons.long_pressed = 0;
+    deltas[0] = 1;
+    deltas[1] = 1;
+    ui_update();
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        CHECK(g_seq.patterns[p].tracks[0].midi_channel == old + 1);
+    }
+}
+
 static void render_views(const char *path) {
     uint8_t image[6][OLED_HEIGHT][OLED_WIDTH / 8];
     for (unsigned entry = 0; entry < MAX_SONG_ENTRIES; entry++) CHECK(song_append(0, 255));
@@ -237,6 +253,7 @@ int main(int argc, char **argv) {
     RUN(test_song_mode_has_a_return_to_pattern_playback);
     RUN(test_song_editor_lights_its_three_buttons);
     RUN(test_nonplaying_editor_hides_playhead);
+    RUN(test_track_config_edit_reaches_all_locations);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS all six OLED views render");

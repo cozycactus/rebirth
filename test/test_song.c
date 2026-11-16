@@ -328,6 +328,18 @@ TEST(test_track_mute_bounds) {
     ASSERT_EQ(seq_get_track_mutes(), 0);
 }
 
+TEST(test_track_config_applies_to_every_location) {
+    for (int i = 0; i < MAX_PATTERNS; i++) pattern_init(&g_seq.patterns[i], i);
+    uint8_t other = g_seq.patterns[5].tracks[1].midi_channel;
+    track_config_t cfg = g_seq.patterns[0].tracks[2];
+    cfg.midi_channel = 7;
+    seq_set_track_config(2, &cfg);
+    for (int p = 0; p < MAX_PATTERNS; p++) {
+        ASSERT_EQ(g_seq.patterns[p].tracks[2].midi_channel, 7);
+    }
+    ASSERT_EQ(g_seq.patterns[5].tracks[1].midi_channel, other);
+}
+
 /* ── Pattern access helpers ────────────────────────────── */
 
 TEST(test_seq_active_pattern) {
@@ -429,6 +441,8 @@ int main(void) {
     RUN(test_track_mute_unset);
     RUN(test_track_mute_toggle);
     RUN(test_track_mute_bounds);
+
+    RUN(test_track_config_applies_to_every_location);
 
     /* Pattern access */
     RUN(test_seq_active_pattern);

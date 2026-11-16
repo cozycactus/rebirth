@@ -43,8 +43,14 @@ lock, including for locations not currently playing.
   playhead starts at `(global step % 16) % new length`, so it lines up with the
   bar. `TRACK LOOP` always starts the new clip at step 1. Queuing the location
   that is already playing just clears the queue and keeps the playhead.
-  Shortening below the next step wraps to zero; extending preserves position,
-  and neither applies a pending queue. The quantization is not saved.
+  Shortening below the next step wraps to zero; extending preserves position.
+  Under `BAR`, `BEAT` and `STEP` neither applies a pending queue; under
+  `TRACK LOOP`, shortening below the playhead counts as the loop end and does
+  apply it. The quantization is not saved.
+- Routing (`track_config_t`: channel, drum note, output mode, CV channel, gate
+  length) belongs to the track: `seq_set_track_config()` writes it to all 32
+  locations and refreshes that track's prepared rows. Older saves whose
+  locations differ play as before until that track's config is edited.
 - Selection while stopped is immediate and survives Start.
 - Stop cancels pending queues and retains the current playing locations.
 - Manual queues are rejected in Song mode. Song entries apply on 16-step bar

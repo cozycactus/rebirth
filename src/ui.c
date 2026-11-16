@@ -622,12 +622,13 @@ static void handle_track_config(int8_t e1d, int8_t e2d,
                                  button_event_t e1b, button_event_t e2b,
                                  step_buttons_t *steps) {
     (void)steps;
-    uint32_t lock_state = seq_lock();
     uint8_t edited_track = ui.config_track;
-    uint8_t pattern_index = g_seq.active_pattern[edited_track];
+    uint32_t lock_state = seq_lock();
+    track_config_t config = g_seq.patterns[g_seq.active_pattern[edited_track]]
+                                .tracks[edited_track];
+    seq_unlock(lock_state);
+    track_config_t *tc = &config;
     bool changed = false;
-    pattern_t *pat = &g_seq.patterns[pattern_index];
-    track_config_t *tc = &pat->tracks[edited_track];
 
     int max_params = (tc->type == TRACK_TYPE_DRUM) ? 4 : 3;
 
@@ -701,9 +702,8 @@ static void handle_track_config(int8_t e1d, int8_t e2d,
         ui.mode = UI_PATTERN_SELECT;
     }
 
-    seq_unlock(lock_state);
     if (changed) {
-        sequencer_refresh_track_playback(edited_track, pattern_index);
+        seq_set_track_config(edited_track, &config);
     }
 }
 

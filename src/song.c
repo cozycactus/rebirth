@@ -188,6 +188,18 @@ void seq_set_track_mute(uint8_t track, bool muted) {
     seq_unlock(lock_state);
 }
 
+void seq_set_track_config(uint8_t track, const track_config_t *config) {
+    if (track >= NUM_TRACKS || !config) return;
+    uint32_t lock_state = seq_lock();
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        g_seq.patterns[p].tracks[track] = *config;
+    }
+    seq_unlock(lock_state);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        sequencer_refresh_track_playback(track, p);
+    }
+}
+
 void seq_toggle_track_mute(uint8_t track) {
     if (track >= NUM_TRACKS) return;
     uint32_t lock_state = seq_lock();

@@ -260,6 +260,9 @@ uint64_t sequencer_clip_mask(uint8_t bank);
 
 // Track mutes (bitmask, instant)
 void seq_set_track_mute(uint8_t track, bool muted);
+// Copies a track's routing into all 32 locations, then refreshes that track's
+// prepared rows. Takes seq_lock: call with none held.
+void seq_set_track_config(uint8_t track, const track_config_t *config);
 void seq_toggle_track_mute(uint8_t track);
 uint8_t seq_get_track_mutes(void);
 

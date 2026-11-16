@@ -65,6 +65,13 @@ static void init_defaults(void) {
     for (int s = 0; s < 16; s++) {
         pattern_set_step(p, 2, s, 42, 80, STEP_FLAG_ACTIVE);
     }
+
+    // Routing belongs to the track: every location gets location 0's config.
+    for (int i = 1; i < MAX_PATTERNS; i++) {
+        for (int t = 0; t < NUM_TRACKS; t++) {
+            g_seq.patterns[i].tracks[t] = p->tracks[t];
+        }
+    }
 }
 
 // ─── Main (Core 0) ─────────────────────────────────────────────
