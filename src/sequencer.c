@@ -73,12 +73,16 @@ static uint8_t note_off_countdown[NUM_TRACKS];
 
 // What a track playing a kit row has sounding. Every voice is released at the latest
 // at the next step boundary, before that step's hits, so the sounding voices all come
-// from one step and share its channel; each keeps the note it was sent on.
+// from one step and share its channel; each keeps the note it was sent on. A flam's
+// second hits come before that release and use the same notes and channel.
 typedef struct {
     uint16_t sounding;               // bit v: voice v
+    uint16_t flam;                   // voices whose second hit is due; within sounding
     uint8_t  note[KIT_VOICES];
     uint8_t  channel;
     uint8_t  countdown;              // pulses to the release; 0 = none due
+    uint8_t  flam_countdown;         // pulses to the second hits; 0 = none due
+    uint8_t  flam_velocity;          // one level above the step's note level
 } kit_runtime_t;
 
 static kit_runtime_t kit_runtime[NUM_TRACKS];
@@ -408,7 +412,8 @@ static void commit_step(void) {
 // MIDI only: a kit never touches CV or gates. Its Note Off is Note On velocity 0.
 
 // Writes a release for every voice the kit on `track` has sounding into `out`, on the
-// note and channel each was sent on; the voices stop sounding. Returns the byte count.
+// note and channel each was sent on; the voices stop sounding and a pending flam is
+// cancelled. Returns the byte count.
 static uint8_t kit_take_release(uint8_t track, uint8_t *out) {
     kit_runtime_t *k = &kit_runtime[track];
     uint8_t length = 0;
@@ -424,6 +429,8 @@ static uint8_t kit_take_release(uint8_t track, uint8_t *out) {
         k->sounding = 0;
     }
     k->countdown = 0;
+    k->flam = 0;
+    k->flam_countdown = 0;
     return length;
 }
 
@@ -447,13 +454,16 @@ static void kit_release_all(void) {
 }
 
 // A kit step on an audible track: leftovers released first, then the step's Note Ons
-// into midi_buf in kit_voice_order. A flam plays its first hit at the note level.
+// into midi_buf in kit_voice_order. A flam plays its first hit at the note level and
+// arms its second hit, one level up, `flam_pulses` later; the step's note-off then
+// waits for the second hit's gate, up to the step boundary.
 static void play_kit_step(uint8_t track, const prepared_track_pattern_t *row, uint8_t step) {
     kit_release(track);              // only after a kind change; the countdown ends by now
     uint32_t word = row->kit.lanes[step];
     if (!(word & 0x00FFFFFCu)) return;  // no voice lane set
     kit_runtime_t *k = &kit_runtime[track];
     uint8_t accent = (word & 3u) != 0;  // lane 0: AC
+    uint16_t flam = 0;
     for (uint8_t i = 0; i < KIT_VOICES; i++) {
         uint8_t v = kit_voice_order[i];
         uint8_t value = (uint8_t)((word >> (2u * (v + 1u))) & 3u);
@@ -463,9 +473,46 @@ static void play_kit_step(uint8_t track, const prepared_track_pattern_t *row, ui
         midi_buf_note_on(row->kit.channel, row->kit.note[v], velocity);
         k->note[v] = row->kit.note[v];
         k->sounding |= (uint16_t)(1u << v);
+        if (value == KIT_FLAM) flam |= (uint16_t)(1u << v);
     }
     k->channel = row->kit.channel;
     k->countdown = row->kit.gate_pulses;
+    if (flam) {
+        unsigned off = (unsigned)row->kit.gate_pulses + row->kit.flam_pulses;
+        k->countdown = (uint8_t)(off < PULSES_PER_STEP ? off : PULSES_PER_STEP);
+        k->flam = flam;
+        k->flam_countdown = row->kit.flam_pulses;
+        k->flam_velocity = row->kit.vel[1 + accent];  // AC ? max : accent
+    }
+}
+
+// Free TX queue bytes a flam's second hits must leave: the most one pulse adds in
+// mandatory messages (two kits' note-offs and the worst step burst, 168 bytes as queued).
+#define KIT_FLAM_RESERVE 192u
+
+// Pulse order step 4: the second hits of a kit's flam, per voice Note On velocity 0
+// then Note On at the flam velocity, in one send of their own, never through midi_buf.
+// The only kit message that may be dropped: skipped when it would leave the TX queue
+// under KIT_FLAM_RESERVE bytes free; the voices then sound on until their note-off.
+static void kit_play_flam(uint8_t track) {
+    kit_runtime_t *k = &kit_runtime[track];
+    uint8_t message[KIT_VOICES * 6];
+    uint8_t length = 0;
+    uint8_t status = (uint8_t)(MIDI_NOTE_ON | k->channel);
+    for (uint8_t i = 0; i < KIT_VOICES; i++) {
+        uint8_t v = kit_voice_order[i];
+        if (!(k->flam & (1u << v))) continue;
+        message[length++] = status;
+        message[length++] = k->note[v];
+        message[length++] = 0;
+        message[length++] = status;
+        message[length++] = k->note[v];
+        message[length++] = k->flam_velocity;
+    }
+    k->flam = 0;
+    if (length && !midi_try_send_bytes_reserve(message, length, KIT_FLAM_RESERVE)) {
+        jitter_stats.flam_drops++;
+    }
 }
 
 static void clear_runtime_note_state(void) {
@@ -622,6 +669,13 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
         }
         if (kit_runtime[track].countdown > 0 && --kit_runtime[track].countdown == 0) {
             kit_release(track);
+        }
+    }
+
+    // Flam countdowns, after every note-off of this pulse.
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        if (kit_runtime[track].flam_countdown > 0 && --kit_runtime[track].flam_countdown == 0) {
+            kit_play_flam(track);
         }
     }
 

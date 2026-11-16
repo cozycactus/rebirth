@@ -1502,6 +1502,254 @@ static void test_kit_step_releases_leftover_voices_first(void) {
     CHECK(msg_is(msg[4], KIT_STATUS, 36, 80));
 }
 
+// ─── Kit flams ──────────────────────────────────────────────────
+
+static void set_flam(uint8_t track, uint8_t flam_pulses) {
+    g_seq.kit_config[track].flam_pulses = flam_pulses;
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) sequencer_refresh_track_playback(track, p);
+}
+
+static void test_flam_second_hit(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_FLAM);
+    set_kit(0, 1, 1, KIT_LANE_AC, 1);
+    set_kit(0, 1, 1, KIT_LANE_BD, KIT_FLAM);
+    transport_start();
+    tick();                                 // pulse 0
+    CHECK(msgs() == 1 && msg_is(msg[0], KIT_STATUS, 0x24, 0x50));
+    pulses(2);
+    CHECK(msgs() == 1);
+    tick();                                 // pulse 3: flam 3
+    CHECK(msgs() == 3);
+    CHECK(msg_is(msg[1], KIT_STATUS, 0x24, 0x00));
+    CHECK(msg_is(msg[2], KIT_STATUS, 0x24, 0x6E));
+    pulses(PULSES_PER_STEP - 4);            // gate 50 % + flam 3: the release at pulse 15
+    CHECK(msgs() == 4 && msg_is(msg[3], KIT_STATUS, 0x24, 0x00));
+    tick();                                 // pulse 24: step 1, AC
+    CHECK(msgs() == 5 && msg_is(msg[4], KIT_STATUS, 0x24, 0x6E));
+    pulses(3);
+    CHECK(msgs() == 7);
+    CHECK(msg_is(msg[5], KIT_STATUS, 0x24, 0x00));
+    CHECK(msg_is(msg[6], KIT_STATUS, 0x24, 0x7F));
+}
+
+static void test_flam_gate_extends_to_second_hit(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 10);                        // 2 pulses
+    set_flam(1, 12);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_FLAM);
+    transport_start();
+    tick();                                 // pulse 0
+    pulses(11);
+    CHECK(msgs() == 1);
+    tick();                                 // pulse 12: the second hit
+    CHECK(msgs() == 3 && msg_is(msg[2], KIT_STATUS, 36, 110));
+    tick();
+    CHECK(msgs() == 3);
+    tick();                                 // pulse 14 = gate 2 + flam 12
+    CHECK(msgs() == 4 && msg_is(msg[3], KIT_STATUS, 36, 0));
+    pulses(PPQN);
+    CHECK(msgs() == 4);
+}
+
+// Review focus: gate 100 and flam 12 on BD, SD and CH on every step for one bar's first
+// four steps, then Stop.
+static void test_flam_gate_100_every_step(void) {
+    static const uint8_t notes[] = {36, 38, 42};
+    static unsigned sent_at[256];           // pulse each kit message came in; 96: Stop
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    set_flam(1, 12);
+    for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
+        set_kit(0, 1, step, KIT_LANE_BD, KIT_FLAM);
+        set_kit(0, 1, step, KIT_LANE_SD, KIT_FLAM);
+        set_kit(0, 1, step, KIT_LANE_CH, KIT_FLAM);
+    }
+    transport_start();
+    unsigned seen = 0;
+    for (unsigned pulse = 0; pulse <= 96; pulse++) {
+        if (pulse < 96) tick(); else transport_stop();
+        unsigned total = msgs();
+        CHECK(total <= 256);
+        for (; seen < total; seen++) sent_at[seen] = pulse;
+    }
+    for (unsigned n = 0; n < sizeof(notes); n++) {
+        // Per note: the first hit, then (release, hit) at every flam and step, the
+        // release at Stop last.
+        unsigned expect_pulse[16];
+        uint8_t expect_velocity[16];
+        unsigned expected = 0;
+        for (unsigned step = 0; step < 4; step++) {
+            if (step) {
+                expect_pulse[expected] = 24 * step;
+                expect_velocity[expected++] = 0;
+            }
+            expect_pulse[expected] = 24 * step;
+            expect_velocity[expected++] = 80;
+            expect_pulse[expected] = 24 * step + 12;
+            expect_velocity[expected++] = 0;
+            expect_pulse[expected] = 24 * step + 12;
+            expect_velocity[expected++] = 110;
+        }
+        expect_pulse[expected] = 96;
+        expect_velocity[expected++] = 0;
+        CHECK(expected == 16);
+        unsigned found = 0;
+        for (unsigned i = 0; i < seen; i++) {
+            if (msg[i].status != KIT_STATUS || msg[i].data1 != notes[n]) continue;
+            CHECK(found < expected);
+            CHECK(sent_at[i] == expect_pulse[found]);
+            CHECK(msg[i].data2 == expect_velocity[found]);
+            found++;
+        }
+        CHECK(found == expected);           // eight hits, eight releases
+    }
+    CHECK(msg_is(last_msg(3), KIT_STATUS, 36, 0));
+    CHECK(msg_is(last_msg(2), KIT_STATUS, 38, 0));
+    CHECK(msg_is(last_msg(1), KIT_STATUS, 42, 0));
+    CHECK(msg_is(last_msg(0), MIDI_STOP, 0, 0));
+}
+
+static void test_live_mute_cancels_pending_flam(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_FLAM);
+    set_kit(0, 1, 1, KIT_LANE_BD, KIT_FLAM);
+    transport_start();
+    tick();                                 // pulse 0: the first hit
+    seq_toggle_track_mute(1);
+    tick();                                 // pulse 1: released, the flam cancelled
+    CHECK(msgs() == 2 && msg_is(msg[1], KIT_STATUS, 36, 0));
+    pulses(PULSES_PER_STEP - 2);            // through pulse 23
+    CHECK(msgs() == 2);
+    seq_toggle_track_mute(1);
+    pulses(4);                              // step 1 and its flam play
+    CHECK(count_kit(36, 80) == 2);
+    CHECK(count_kit(36, 110) == 1);
+}
+
+static void test_edit_during_flam_keeps_second_hit(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_kit(0, 1, 0, KIT_LANE_CH, KIT_FLAM);
+    transport_start();
+    tick();                                 // pulse 0
+    tick();
+    g_seq.kit_config[1].note[7] = 44;       // CH
+    sequencer_refresh_track_playback(1, 0);
+    pulses(PULSES_PER_STEP - 2);            // through pulse 23
+    CHECK(msgs() == 4);
+    CHECK(msg_is(msg[0], KIT_STATUS, 42, 80));
+    CHECK(msg_is(msg[1], KIT_STATUS, 42, 0));
+    CHECK(msg_is(msg[2], KIT_STATUS, 42, 110));
+    CHECK(msg_is(msg[3], KIT_STATUS, 42, 0));
+}
+
+static uint32_t flam_drops(void) {
+    sequencer_jitter_stats_t stats;
+    sequencer_get_jitter_stats(&stats);
+    return stats.flam_drops;
+}
+
+static void test_flam_overload_drops_second_hits(void) {
+    make_kit(1, KIT_CHANNEL);
+    for (uint8_t lane = 1; lane < KIT_LANES; lane++) set_kit(0, 1, 0, lane, KIT_FLAM);
+    transport_start();
+    tick();                                 // pulse 0: the first hits go out at once
+    CHECK(count_kit_hits() == KIT_VOICES);
+    fake_uart_writable = false;
+    // 255 bytes queued, 256 free: under 192 + 66, the 11-voice flam message as queued.
+    for (unsigned i = 0; i < 85; i++) midi_send_note_on(0, 60, 100);
+    pulses(3);                              // pulse 3: flam 3
+    CHECK(flam_drops() == 1);
+    CHECK(!midi_output_overflowed());
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    pulses(PULSES_PER_STEP - 4);            // gate 50 % + flam 3: the releases at pulse 15
+    CHECK(count_kit_hits() == KIT_VOICES);  // no second hits
+    for (uint8_t v = 0; v < KIT_VOICES; v++) {
+        CHECK(count_kit(g_seq.kit_config[1].note[v], 0) == 1);
+    }
+    CHECK(!midi_output_overflowed());
+    sequencer_reset_jitter_stats();
+    tick();
+    CHECK(flam_drops() == 0);
+}
+
+typedef struct {
+    float bpm;
+    uint8_t kit_gate_pct;                   // the SYNTH tracks play at gate 100 %
+    uint8_t flam_pulses;
+    uint8_t flam_kits;                      // kits with every voice flammed: 0, 1 or 2
+    uint8_t bars;
+} load_case_t;
+
+// Kits on tracks 0 and 1 (channels 9 and 10) with every voice on every step, six SYNTH
+// tracks with a note every step, played in wire time; checks the run and returns the
+// flam drops.
+static uint32_t play_load(const load_case_t *c) {
+    reset();
+    fake_uart_run_until(0);                 // wire-time mode
+    transport_set_bpm(c->bpm);
+    for (uint8_t kit = 0; kit < 2; kit++) {
+        make_kit(kit, (uint8_t)(9 + kit));
+        set_flam(kit, c->flam_pulses);
+        uint32_t word = 0;
+        uint8_t value = kit < c->flam_kits ? KIT_FLAM : KIT_NOTE;
+        for (uint8_t lane = 1; lane < KIT_LANES; lane++) word = kit_set(word, lane, value);
+        for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
+            g_seq.patterns[0].kit_steps[kit][step] = word;
+        }
+    }
+    for (uint8_t track = 2; track < NUM_TRACKS; track++) {
+        g_seq.patterns[0].tracks[track].type = TRACK_TYPE_SYNTH;
+        for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
+            pattern_set_step(&g_seq.patterns[0], track, step, 60, 100, STEP_FLAG_ACTIVE);
+        }
+    }
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        set_gate(track, track < 2 ? c->kit_gate_pct : 100);
+    }
+    transport_start();
+    unsigned steps = c->bars * 16u;
+    for (unsigned pulse = 0; pulse < steps * PULSES_PER_STEP; pulse++) {
+        fake_uart_run_until(timer_hw->alarm[0]);
+        tick();
+    }
+    // A TX overflow would have stopped the transport (the ISR panics and clears the flag).
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    CHECK(!midi_output_overflowed());
+    fake_uart_run_until(timer_hw->timerawl + 1000000); // the queue drains
+    CHECK(!fake_uart_tx_irq);
+    unsigned total = msgs();
+    unsigned first_hits[2] = {0, 0};
+    for (unsigned i = 0; i < total; i++) {
+        for (uint8_t kit = 0; kit < 2; kit++) {
+            first_hits[kit] += msg[i].status == (MIDI_NOTE_ON | (9 + kit)) && msg[i].data2 == 80;
+        }
+    }
+    CHECK(first_hits[0] == KIT_VOICES * steps);
+    CHECK(first_hits[1] == KIT_VOICES * steps);
+    return flam_drops();
+}
+
+static void test_kits_at_wire_rate(void) {
+    static const float tempos[] = {150.0f, 200.0f, 300.0f};
+    for (unsigned i = 0; i < sizeof(tempos) / sizeof(tempos[0]); i++) {
+        load_case_t c = {tempos[i], 100, 3, 0, 16};
+        CHECK(play_load(&c) == 0);
+    }
+    static const uint8_t gates[] = {10, 50, 100};
+    static const uint8_t flams[] = {1, 12};
+    for (unsigned g = 0; g < sizeof(gates); g++) {
+        for (unsigned f = 0; f < sizeof(flams); f++) {
+            load_case_t c = {300.0f, gates[g], flams[f], 2, 8};
+            CHECK(play_load(&c) > 0);
+        }
+    }
+    load_case_t one_kit = {150.0f, 100, 3, 1, 16};
+    CHECK(play_load(&one_kit) == 0);
+}
+
 int main(void) {
     unsigned tests = 0;
     seq_lock_init();
@@ -1590,6 +1838,13 @@ int main(void) {
     RUN(test_kit_settings_edit_keeps_sounding_note);
     RUN(test_kit_channel_edit_releases_on_old_channel);
     RUN(test_kit_step_releases_leftover_voices_first);
+    RUN(test_flam_second_hit);
+    RUN(test_flam_gate_extends_to_second_hit);
+    RUN(test_flam_gate_100_every_step);
+    RUN(test_live_mute_cancels_pending_flam);
+    RUN(test_edit_during_flam_keeps_second_hit);
+    RUN(test_flam_overload_drops_second_hits);
+    RUN(test_kits_at_wire_rate);
 #ifdef REBIRTH_THREADED_TEST
     RUN(test_stop_during_pending_gate_commit);
     RUN(test_panic_during_pending_gate_commit);
