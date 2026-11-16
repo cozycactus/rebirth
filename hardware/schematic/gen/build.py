@@ -48,13 +48,18 @@ FP_SO8 = "Package_SO:SOIC-8_3.9x4.9mm_P1.27mm"
 FP_SO14 = "Package_SO:SOIC-14_3.9x8.7mm_P1.27mm"
 FP_SO28W = "Package_SO:SOIC-28W_7.5x17.9mm_P1.27mm"
 FP_DIP6 = "Package_DIP:DIP-6_W7.62mm"
-FP_JACK = "Connector_Audio:Jack_3.5mm_QingPu_WQP-PJ398SM_Vertical_CircularHoles"
+FP_JACK = "Connector_Audio:Jack_3.5mm_CUI_SJ1-3513N_Horizontal"   # right angle, rear wall
 FP_MX = "Button_Switch_Keyboard:SW_Cherry_MX_1.00u_PCB"
 FP_TACT = "Button_Switch_THT:SW_PUSH_6mm"
 FP_ENC = "Rotary_Encoder:RotaryEncoder_Alps_EC11E-Switch_Vertical_H20mm"
-FP_HDR7 = "Connector_PinHeader_2.54mm:PinHeader_1x07_P2.54mm_Vertical"
+FP_HDR7 = "Connector_PinSocket_2.54mm:PinSocket_1x07_P2.54mm_Vertical"   # the module has pins
 FP_PICO = "Module:RaspberryPi_Pico_Common_THT"
 FP_RGB = "LED_SMD:LED_SK6812MINI-E_3.2x2.8mm_P1.5mm_ReverseMount"
+FP_DIN = "rebirth:DIN-5_180deg_SameSky_SDS-50J_Horizontal"     # hardware/pcb/rebirth.pretty
+FP_TVS = "Diode_SMD:D_SOD-323"
+TVS_PART = "PESD5V0S1BA"     # bidirectional 5 V TVS, SOD-323
+FP_IDC = "Connector_IDC:IDC-Header_2x13_P2.54mm_Horizontal"
+FP_SJ3 = "Jumper:SolderJumper-3_P1.3mm_Bridged12_RoundedPad1.0x1.5mm_NumberLabels"
 
 
 # ------------------------------------------------------------------ project symbols
@@ -192,9 +197,20 @@ def sheet_power(d):
     # switch
     place(sh, "rebirth:TPS2553DBV", "U201", "TPS2553DBV", 91.44, 63.5, fp=FP_SOT236,
           ref_at=(-10.16, -6.35, "left"), val_at=(-2.54, -6.35, "left"),
-          conn={"1": "VBUS", "2": "GND", "3": "+3V3", "4": "LED_FAULT_N", "5": "ILIM", "6": "+5V_LED"})
-    sh.wire((76.2, 66.04), (71.12, 66.04))
-    rail(sh, "+3V3", 71.12, 66.04)
+          conn={"1": "VBUS", "2": "GND", "3": "LED_EN", "4": "LED_FAULT_N", "5": "ILIM", "6": "+5V_LED"})
+    # EN: JP201 1-2 (bridged on the board) = +3V3; cut 1-2, bridge 2-3 = GPIO 7 drives it, R203 holds it off
+    sh.wire((76.2, 66.04), (66.04, 66.04))
+    sh.label("LED_EN", (66.04, 66.04), angle=180, justify="right bottom")
+    pull_down(sh, "R203", "100k", 71.12, 66.04, "LED_EN", fields=RIGHT)
+    place(sh, "Jumper:SolderJumper_3_Bridged12", "JP201", "EN: +3V3 / GPIO 7", 35.56, 76.2, rot=180, fp=FP_SJ3,
+          conn={"1": "+3V3", "2": "LED_EN", "3": "JITTER_PROBE"}, ref_at=(0, 3.81, "center"),
+          val_at=(0, 6.35, "center"))
+    sh.wire((35.56, 72.39), (35.56, 69.85))
+    sh.label("LED_EN", (35.56, 69.85))
+    sh.wire((40.64, 76.2), (43.18, 76.2), (43.18, 73.66))
+    rail(sh, "+3V3", 43.18, 73.66)
+    sh.wire((30.48, 76.2), (27.94, 76.2))
+    sh.hlabel("JITTER_PROBE", (27.94, 76.2), "bidirectional", "left")
     sh.wire((88.9, 78.74), (88.9, yg))
     gnd(sh, 88.9, yg)
     sh.wire((93.98, 78.74), (93.98, 81.28))
@@ -225,7 +241,9 @@ def sheet_power(d):
          " - power-up: EN follows +3V3 (threshold 0.66-1.1 V), so the rail comes up with the Pico's regulator, before the firmware runs.",
          "R201 100 kOhm 1% sets the limit, IOS = (232, 267, 306) mA with the 1 % tolerance (TPS2553 eq. 1-3). Firmware budget 200 mA;",
          "keep R201 >= 82 kOhm (IOS max 369 mA). The 5 V budget below is an estimate until the OLED is chosen and the board measured.",
-         "TP201: low while U201 limits current or is too hot. Keep large capacitors behind U201: C201 is the only one on VBUS.",
+         "TP201: low while U201 limits current or is too hot. Large capacitors sit behind U201; on VBUS only C201, C504/C505/C507 (sheet 5).",
+         "JP201 (EN source): 1-2 bridged by copper = rail follows +3V3, as designed. Cut 1-2 and bridge 2-3 to let GPIO 7 switch",
+         "the rail after USB enumeration (R203 keeps it off until then); GPIO 7 is then no longer the jitter probe (TP301).",
          "+5V_LED min 4.7 V is VBUS min minus the switch (~30 mV at 200 mA); it falls lower only while U201 limits current.")
     sh.heading("Rails and budget", (20.32, 139.7))
     note(sh, 20.32, 146.05,
@@ -245,14 +263,14 @@ def sheet_power(d):
 
 PICO_GPIO = {  # gpio -> (pin number, net, shape seen from the Pico)
     0: (1, "MIDI_TX", "output"), 1: (2, "MIDI_RX", "input"),
-    2: (4, "OLED_SCK", "output"), 3: (5, "OLED_MOSI", "output"), 4: (6, "OLED_CS_N", "output"),
-    5: (7, "OLED_DC", "output"), 6: (9, "OLED_RST_N", "output"), 7: (10, "JITTER_PROBE", None),
+    2: (4, "OLED_SCK_PICO", "output"), 3: (5, "OLED_MOSI_PICO", "output"), 4: (6, "OLED_CS_N_PICO", "output"),
+    5: (7, "OLED_DC_PICO", "output"), 6: (9, "OLED_RST_N_PICO", "output"), 7: (10, "JITTER_PROBE", None),
     8: (11, "I2C_SDA", "bidirectional"), 9: (12, "I2C_SCL", "output"),
     10: (14, "DAC_SCK", "output"), 11: (15, "DAC_MOSI", "output"), 12: (16, "DAC_CS1_N", "output"),
     13: (17, "DAC_CS2_N", "output"), 14: (19, "GATE1", "output"), 15: (20, "GATE2", "output"),
     16: (21, "GATE3", "output"), 17: (22, "GATE4", "output"), 18: (24, "ENC1_A", "input"),
     19: (25, "ENC1_B", "input"), 20: (26, "ENC1_SW_N", "input"), 21: (27, "ENC2_A", "input"),
-    22: (29, "ENC2_B", "input"), 26: (31, "ENC2_SW_N", "input"), 27: (32, "LED_DATA", "output"),
+    22: (29, "ENC2_B", "input"), 26: (31, "ENC2_SW_N", "input"), 27: (32, "LED_DATA_PICO", "output"),
     28: (34, "PLAY_N", "input"),
 }
 
@@ -274,10 +292,9 @@ def sheet_mcu(d):
             sh.wire((px, py), (63.5, py))
             sh.hlabel(net, (63.5, py), shape, "left")
         elif gpio == 7:
-            sh.wire((px, py), (px - 17.78, py))
-            place(sh, "Connector:TestPoint", "TP301", "JITTER", px - 17.78, py, rot=90, fp=FP_TP,
-                  conn={"1": "JITTER_PROBE"}, ref_at=(-8.89, 0, "center"), val_at=(-8.89, 2.54, "center"),
-                  hide_val=True)
+            # also to JP201 (sheet 2): GPIO 7 can be moved from the jitter probe to the LED rail enable
+            sh.wire((px, py), (px - 5.08, py))
+            sh.hlabel(net, (px - 5.08, py), "bidirectional", "left")
         elif left:
             sh.wire((px, py), (px - 5.08, py))
             sh.hlabel(net, (px - 5.08, py), shape, "left")
@@ -311,6 +328,10 @@ def sheet_mcu(d):
     sh.wire((gx, gy), (gx, gy + 2.54))
     gnd(sh, gx, gy + 2.54)
     # test points
+    place(sh, "Connector:TestPoint", "TP301", "JITTER", 35.56, 152.4, fp=FP_TP, conn={"1": "JITTER_PROBE"},
+          ref_at=(2.54, -5.08, "left"), val_at=(2.54, -2.54, "left"))
+    sh.wire((35.56, 152.4), (35.56, 154.94))
+    sh.label("JITTER_PROBE", (35.56, 154.94), angle=270, justify="right bottom")
     place(sh, "Connector:TestPoint", "TP302", "GND", 50.8, 152.4, fp=FP_TP, conn={"1": "GND"},
           ref_at=(2.54, -5.08, "left"), val_at=(2.54, -2.54, "left"))
     sh.wire((50.8, 152.4), (50.8, 154.94))
@@ -328,6 +349,7 @@ def sheet_mcu(d):
          "to 4.7 k when the measured bus allows it.")
     note(sh, 20.32, 165.1,
          "TP301 (JITTER, on GPIO 7): high while the sequencer timer ISR runs (JITTER_MEASUREMENT.md); TP302 is the probe ground.",
+         "GPIO 7 also reaches JP201 (sheet 2): bridged 2-3 instead of 1-2, it switches the LED rail and is no longer the jitter probe.",
          "Left open on purpose: RUN and 3V3_EN (pulled up on the Pico), VSYS (5 V comes from VBUS),",
          "ADC_VREF (GPIO 26-28 are digital here). R303 0 R joins AGND to GND at one point. GPIO 25 (on-board LED) is not on the header.")
     return sh
@@ -366,7 +388,7 @@ def sheet_midi(d):
     place(sh, "Device:FerriteBead_Small", "FB401", "1k@100MHz", 134.62, yj, rot=90, fp=FP_FB,
           conn={"1": "MIDI_OUT_5", "2": "MIDI_OUT_5F"}, ref_at=(0, -3.175, "center"), val_at=(0, 3.81, "center"))
     sh.wire((137.16, yj), (147.32, yj))
-    place(sh, "Connector:DIN-5_180degree", "J401", "MIDI OUT", 154.94, yj - 2.54, rot=180,
+    place(sh, "Connector:DIN-5_180degree", "J401", "MIDI OUT", 154.94, yj - 2.54, rot=180, fp=FP_DIN,
           conn={"5": "MIDI_OUT_5F", "4": "MIDI_OUT_4F", "2": "GND", "1": None, "3": None},
           ref_at=(-5.08, -8.89, "left"), val_at=(5.08, 7.62, "left"))
     sh.nc((147.32, yj - 2.54))
@@ -393,7 +415,7 @@ def sheet_midi(d):
 
     sh.heading("MIDI IN: opto-isolated receiver (reserved in firmware)", (20.32, 99.06))
     yi = 114.3
-    place(sh, "Connector:DIN-5_180degree", "J402", "MIDI IN", 40.64, 116.84, mirror="y",
+    place(sh, "Connector:DIN-5_180degree", "J402", "MIDI IN", 40.64, 116.84, mirror="y", fp=FP_DIN,
           conn={"4": "MIDI_IN_4", "5": "MIDI_IN_5", "1": None, "2": None, "3": None},
           ref_at=(-5.08, -11.43, "left"), val_at=(-5.08, 11.43, "left"))
     for pin in ("1", "2", "3"):
@@ -437,7 +459,7 @@ def sheet_midi(d):
 
 def dac_block(sh, ref, X, Y, cs_net, outs, cap_refs):
     place(sh, "Analog_DAC:MCP4822", ref, "MCP4822", X, Y, fp=FP_SO8,
-          conn={"1": "+3V3", "2": cs_net, "3": "DAC_SCK", "4": "DAC_MOSI", "5": "GND", "6": outs[1],
+          conn={"1": "+3V3", "2": cs_net + "_T", "3": "DAC_SCK_T", "4": "DAC_MOSI_T", "5": "GND", "6": outs[1],
                 "7": "GND", "8": outs[0]},
           ref_at=(2.54, -13.97, "left"), val_at=(2.54, -11.43, "left"))
     sh.wire((X, Y - 10.16), (X, Y - 12.7))
@@ -446,16 +468,31 @@ def dac_block(sh, ref, X, Y, cs_net, outs, cap_refs):
     gnd(sh, X, Y + 15.24)
     lx = X - 35.56
     sh.wire((X - 12.7, Y - 2.54), (lx, Y - 2.54))
-    sh.hlabel("DAC_SCK", (lx, Y - 2.54), "input", "left")
+    sh.label("DAC_SCK_T", (lx, Y - 2.54), angle=180, justify="right bottom")
     sh.wire((X - 12.7, Y), (X - 22.86, Y))
     gnd(sh, X - 22.86, Y)
     sh.wire((X - 12.7, Y + 2.54), (X - 17.78, Y + 2.54), (X - 17.78, Y + 7.62), (lx, Y + 7.62))
-    sh.hlabel("DAC_MOSI", (lx, Y + 7.62), "input", "left")
+    sh.label("DAC_MOSI_T", (lx, Y + 7.62), angle=180, justify="right bottom")
     sh.wire((X - 12.7, Y + 5.08), (X - 15.24, Y + 5.08), (X - 15.24, Y + 10.16), (lx, Y + 10.16))
-    sh.hlabel(cs_net, (lx, Y + 10.16), "input", "left")
+    sh.label(cs_net + "_T", (lx, Y + 10.16), angle=180, justify="right bottom")
     decap(sh, cap_refs[0], "100n", X + 20.32, Y - 17.78, "+3V3")
     if len(cap_refs) > 1:
         decap(sh, cap_refs[1], "10u", X + 30.48, Y - 17.78, "+3V3", fp=FP_C0805)
+
+
+SPI_SERIES = [("DAC_SCK", "R561"), ("DAC_MOSI", "R562"), ("DAC_CS1_N", "R563"), ("DAC_CS2_N", "R564")]
+
+
+def spi_entry(sh):
+    """DAC SPI from the Pico: 33 R source termination, placed at U301 on the board (the lines are long)."""
+    for i, (net, ref) in enumerate(SPI_SERIES):
+        y = 152.4 + 7.62 * i
+        sh.hlabel(net, (30.48, y), "input", "left")
+        sh.wire((30.48, y), (40.64, y))
+        res(sh, ref, "33R", 44.45, y, {"1": net, "2": net + "_T"}, horiz=True)
+        sh.wire((48.26, y), (55.88, y))
+        sh.label(net + "_T", (55.88, y))
+    note(sh, 20.32, 143.51, "DAC SPI from GPIO 10-13: R561-R564 at the Pico end of the lines.")
 
 
 def cv_stage(sh, unit, Xo, Yo, n, dac_net, refs):
@@ -482,16 +519,23 @@ def cv_stage(sh, unit, Xo, Yo, n, dac_net, refs):
     sh.wire((Xo + 8.89, Yo + 15.24), (Xo + 22.86, Yo + 15.24), (Xo + 22.86, Yo))
     sh.wire((Xo + 19.05, Yo), (Xo + 30.48, Yo))
     sh.label(jack, (Xo + 24.13, Yo))
-    jack_out(sh, "J%d" % (500 + n), "CV %d" % n, Xo + 35.56, Yo, jack)
+    jack_out(sh, "J%d" % (500 + n), "CV %d" % n, Xo + 35.56, Yo, jack, tvs="D%d" % (500 + n))
 
 
-def jack_out(sh, ref, label, x, y, net):
+def jack_out(sh, ref, label, x, y, net, tvs=None):
     place(sh, "Connector_Audio:AudioJack2", ref, "3.5mm TS", x, y, rot=180, fp=FP_JACK,
           conn={"T": net, "S": "GND"}, ref_at=(6.35, -3.175, "left"), val_at=(6.35, 3.81, "left"),
           hide_val=True)
-    sh.wire((x - 5.08, y + 2.54), (x - 7.62, y + 2.54), (x - 7.62, y + 5.08))
-    gnd(sh, x - 7.62, y + 5.08)
+    sh.wire((x - 5.08, y + 2.54), (x - 5.08, y + 5.08))
+    gnd(sh, x - 5.08, y + 5.08)
     sh.text(label, (x + 6.35, y + 0.635), size=1.524, bold=True)
+    if tvs:
+        xt = x - 8.89
+        sh.wire((xt, y), (xt, y + 2.54))
+        place(sh, "Device:D_TVS", tvs, TVS_PART, xt, y + 6.35, rot=270, fp=FP_TVS,
+              conn={"1": net, "2": "GND"}, ref_at=(-1.905, -1.27, "right"), val_at=(-1.905, 1.27, "right"),
+              hide_val=True)
+        gnd(sh, xt, y + 10.16)
 
 
 def sheet_cv(d):
@@ -501,6 +545,7 @@ def sheet_cv(d):
          "CV = (0, , 2.048) V, 1 V/oct, MIDI note 24 = 0 V, note 36 = 1 V, note 48 = 2 V; higher notes saturate (ARCHITECTURE.md, CV Circuit).",
          "The DACs run from +3V3, so only the default gain 1x is possible: -DREBIRTH_CV_DAC_GAIN=2 (0-4.096 V) would need the DACs on",
          "VBUS and 3.3 V -> 5 V buffers on DAC_SCK/DAC_MOSI/DAC_CSx_N. The buffers already run from VBUS and have the headroom.")
+    spi_entry(sh)
     dac_block(sh, "U501", 76.2, 63.5, "DAC_CS1_N", ("CV1_DAC", "CV2_DAC"), ("C501", "C503"))
     dac_block(sh, "U502", 76.2, 127.0, "DAC_CS2_N", ("CV3_DAC", "CV4_DAC"), ("C502", "C506"))
     Xo = 121.92
@@ -528,8 +573,9 @@ def sheet_cv(d):
          "~10 mV (MCP4822 output swing; the MCP6004 reaches ~0.2 mV into a grounded load):",
          "up to ~17 cents sharp at note 24 with the op-amp offset. DAC gain/offset errors (about",
          "+-2 % FSR) and op-amp offset need a per-channel calibration in firmware; no trimmers.",
-         "R511-R514 limit a short to GND to ~5 mA; external voltages are not clamped.",
-         "J501-J504: rear 3.5 mm TS jacks (PJ398SM type) to a synth's pitch CV input.")
+         "R511-R514 limit a short to GND to ~5 mA; D501-D504 (5 V TVS) clamp ESD and external voltages behind them",
+         "(the loop takes its feedback at the jack, so their leakage does not shift the pitch).",
+         "J501-J504: rear 3.5 mm jacks (CUI SJ1-3513N, right angle; R contact open) to a synth's pitch CV input.")
 
     sh.heading("Gate outputs: 3.3 V GPIO -> 5 V gates", (20.32, 181.61))
     xb = 76.2
@@ -560,13 +606,13 @@ def sheet_cv(d):
         sh.wire((127.0, y), (127.0, y + 1.27))
         sh.wire((127.0, y + 8.89), (127.0, y + 11.43))
         gnd(sh, 127.0, y + 11.43)
-        jack_out(sh, "J%d" % (504 + n), "GATE %d" % n, jx, y, jack)
+        jack_out(sh, "J%d" % (504 + n), "GATE %d" % n, jx, y, jack, tvs="D%d" % (504 + n))
     note(sh, 180.34, 193.04,
          "U504 74AHCT125 on VBUS: TTL-level inputs accept the 3.3 V GPIO (VIH 2.0 V),",
          "outputs swing to VBUS, so a gate is (0, 5, 5.25) V. R531-R534 hold the",
          "inputs low until the firmware drives GPIO 14-17; R551-R554 hold the jacks low",
          "with the device unplugged. R541-R544 (1 k) limit a short to GND to ~5 mA;",
-         "external voltages are not clamped.",
+         "D505-D508 (5 V TVS) clamp ESD and external voltages at the jacks.",
          "J505-J508: rear 3.5 mm TS jacks to a synth's gate / trigger input.",
          "Use one active source track per CV/gate pair (ARCHITECTURE.md).")
     # supply units
@@ -665,14 +711,14 @@ def sheet_top(d):
     sh.wire((210.82, 50.8), (226.06, 50.8))
     sh.hlabel("PLAY_N", (226.06, 50.8), "output", "right")
     note(sh, 190.5, 63.5,
-         "Pressed = low. GPIO 28 uses its internal pull-up,",
+         "Pressed = low. R1203 (sheet 12) pulls it up at the cable,",
          "20 ms firmware debounce. Its RGB light is D981",
          "in the chain (sheet 9), BEAT is D982.")
 
     sh.heading("Encoders: TRACK (enc 1) and VALUE (enc 2)", (20.32, 96.52))
     note(sh, 20.32, 102.87,
          "A/B contacts close to GND. R pull-up 10 k + R 10 k + C 10 nF per contact: the encoder maker's filter (tau 0.1 ms).",
-         "The GPIOs also enable their internal pull-ups. Push switch = low when pressed, firmware debounce 20 ms.")
+         "Push switch = low when pressed (R1201/R1202 pull-ups at the cable, sheet 12), firmware debounce 20 ms.")
     encoder_block(sh, "SW601", "TRACK", 35.56, 137.16, ("ENC1_A", "ENC1_B", "ENC1_SW_N"),
                   (("R601", "R602", "C603"), ("R603", "R604", "C604")))
     encoder_block(sh, "SW602", "VALUE", 139.7, 137.16, ("ENC2_A", "ENC2_B", "ENC2_SW_N"),
@@ -1074,129 +1120,350 @@ def sheet_rgb(d):
     return sh
 
 
-# ------------------------------------------------------------------ sheet 1: root
+# ------------------------------------------------------------------ sheets 11, 12: board-to-board cable
 
-ROOT_GROUPS = [
-    ("MIDI", [("MIDI_TX", "output", "input"), ("MIDI_RX", "input", "output")]),
-    ("CV_Gate", [("DAC_SCK", "output", "input"), ("DAC_MOSI", "output", "input"),
-                 ("DAC_CS1_N", "output", "input"), ("DAC_CS2_N", "output", "input"),
-                 ("GATE1", "output", "input"), ("GATE2", "output", "input"),
-                 ("GATE3", "output", "input"), ("GATE4", "output", "input")]),
-    ("Top_strip", [("OLED_SCK", "output", "input"), ("OLED_MOSI", "output", "input"),
-                   ("OLED_CS_N", "output", "input"), ("OLED_DC", "output", "input"),
-                   ("OLED_RST_N", "output", "input"), ("ENC1_A", "input", "output"),
-                   ("ENC1_B", "input", "output"), ("ENC1_SW_N", "input", "output"),
-                   ("ENC2_A", "input", "output"), ("ENC2_B", "input", "output"),
-                   ("ENC2_SW_N", "input", "output"), ("PLAY_N", "input", "output")]),
-    ("RGB_chain", [("LED_DATA", "output", "input")]),
-    ("Step_row", [("I2C_SDA", "bidirectional", "bidirectional"), ("I2C_SCL", "output", "input")]),
-]
+# 26-wire IDC ribbon between the main board (J1101) and the panel board (J1201), wire n = pin n.
+# A cable crimped the wrong way round joins pin n to pin 27 - n: power then meets GND (+5V_LED, limited
+# by U201) or itself (+3V3 on 13/14), never the other rail. Fast lines sit between ground wires.
+CABLE = {
+    1: "+5V_LED", 2: "+5V_LED", 3: "GND", 4: "LED_DATA", 5: "GND", 6: "OLED_SCK", 7: "GND",
+    8: "OLED_MOSI", 9: "OLED_DC", 10: "OLED_CS_N", 11: "OLED_RST_N", 12: "PLAY_N", 13: "+3V3",
+    14: "+3V3", 15: "GND", 16: "I2C_SCL", 17: "GND", 18: "I2C_SDA", 19: "ENC1_A", 20: "ENC1_B",
+    21: "ENC1_SW_N", 22: "ENC2_A", 23: "ENC2_B", 24: "ENC2_SW_N", 25: "GND", 26: "GND",
+}
+# signals with a source termination at the Pico end: net -> (resistor, value)
+CABLE_SERIES = {"LED_DATA": ("R1106", "100R"), "OLED_SCK": ("R1101", "33R"), "OLED_MOSI": ("R1102", "33R"),
+                "OLED_DC": ("R1103", "33R"), "OLED_CS_N": ("R1104", "33R"), "OLED_RST_N": ("R1105", "33R")}
+# direction seen from the Pico (main board) side
+CABLE_FROM_PICO = {"LED_DATA", "OLED_SCK", "OLED_MOSI", "OLED_DC", "OLED_CS_N", "OLED_RST_N", "I2C_SCL"}
+CABLE_TO_PICO = {"PLAY_N", "ENC1_A", "ENC1_B", "ENC1_SW_N", "ENC2_A", "ENC2_B", "ENC2_SW_N"}
+RAIL_NETS = {"GND", "+3V3", "+5V_LED"}
 
 
-def root_sheet(d, sheets):
+def cable_signals():
+    return [n for _, n in sorted(CABLE.items()) if n not in RAIL_NETS]
+
+
+def idc_header(sh, ref, X, Y, side_net, shape_of):
+    """IDC 2x13 drawn as one column in wire order (pin n = wire n); signals get a flag or label,
+    each rail one bus: +5V_LED (1-2) and +3V3 (13-14) close by, GND (3 ... 26) further out."""
+    conn = {str(pin): side_net(pin, net) for pin, net in CABLE.items()}
+    place(sh, "Connector_Generic:Conn_01x26", ref, "IDC 2x13, wire order", X, Y, fp=FP_IDC, conn=conn,
+          ref_at=(0, -35.56, "center"), val_at=(0, 35.56, "center"))
+    bus = {"+5V_LED": 17.78, "+3V3": 17.78, "GND": 30.48}
+    ends = {}
+    for pin, net in CABLE.items():
+        px, py = sh.pin(ref, str(pin))
+        name = conn[str(pin)]
+        if net in bus:
+            ex = px - bus[net]
+            sh.wire((px, py), (ex, py))
+            ends.setdefault(net, []).append((ex, py))
+            continue
+        ex = px - 2.54
+        sh.wire((px, py), (ex, py))
+        shape = shape_of(name)
+        if shape is None:
+            sh.label(name, (ex, py), angle=180, justify="right bottom")
+        else:
+            sh.hlabel(name, (ex, py), shape, "left")
+    for net, pts in ends.items():
+        pts.sort(key=lambda p: p[1])
+        if len(pts) > 1:
+            sh.wire(pts[0], pts[-1])
+        if net == "GND":
+            sh.wire(pts[-1], (pts[-1][0], pts[-1][1] + 2.54))
+            gnd(sh, pts[-1][0], pts[-1][1] + 2.54)
+        else:
+            rail(sh, net, *pts[0])
+
+
+def sheet_main_link(d, system=False):
+    """J1101 on the main board. system=True also brings out the cable side of the terminated lines."""
+    sh = d.sheet("Main_link", "main_link.kicad_sch", "Cable to the panel board: main board side (J1101)", "A4", 11)
+    sh.heading("Cable to the panel board: J1101 on the main board", (20.32, 30.48))
+
+    def side(pin, net):
+        return net
+
+    def shape(name):
+        if name in CABLE_SERIES:
+            return "output" if system else None
+        if name in CABLE_FROM_PICO:
+            return "input"
+        if name in CABLE_TO_PICO:
+            return "output"
+        return "bidirectional"
+
+    idc_header(sh, "J1101", 215.9, 99.06, side, shape)
+    # source terminations: from the Pico (sheet 3) to the cable
+    for i, (net, (ref, val)) in enumerate(sorted(CABLE_SERIES.items(), key=lambda kv: kv[1][0])):
+        y = 63.5 + 7.62 * i
+        sh.hlabel(net + "_PICO", (35.56, y), "input", "left")
+        sh.wire((35.56, y), (48.26, y))
+        res(sh, ref, val, 52.07, y, {"1": net + "_PICO", "2": net}, horiz=True)
+        sh.wire((55.88, y), (68.58, y))
+        sh.label(net, (68.58, y))
+    note(sh, 20.32, 38.1,
+         "R1101-R1106: source terminations, placed next to U301 (Pico) on the board, not at J1101.",
+         "LED_DATA 100 R (800 kbit/s, U901 input on the panel), OLED SPI and control 33 R.")
+    note(sh, 20.32, 119.38,
+         "J1101: right-angle shrouded 2x13 IDC header (2.54 mm), keyed; 26-wire ribbon, ~100 mm, to J1201",
+         "on the panel board, wire n = pin n. A ribbon crimped the wrong way round puts pin n on pin 27-n:",
+         "+5V_LED then meets GND (U201 limits it) and +3V3 meets +3V3 (pins 13/14). Ring the cable",
+         "pin 1 to pin 1 before the first power-up. Current: +5V_LED <= 306 mA on two contacts, the LED",
+         "return on seven GND contacts; bring it to the Pico's GND, away from the DACs (sheet 5).",
+         "LED_DATA, OLED_SCK and both I2C lines sit between GND wires; +3V3 next to GND.")
+    return sh
+
+
+def sheet_panel_link(d, flags=False):
+    """J1201 on the panel board, +3V3 bulk at the far end of the cable, switch pull-ups."""
+    sh = d.sheet("Panel_link", "panel_link.kicad_sch", "Cable to the main board: panel side (J1201)", "A4", 12)
+    sh.heading("Cable to the main board: J1201 on the panel board", (20.32, 30.48))
+
+    def side(pin, net):
+        return net
+
+    def shape(name):
+        if name in CABLE_FROM_PICO:
+            return "output"
+        if name in CABLE_TO_PICO:
+            return "input"
+        return "bidirectional"
+
+    idc_header(sh, "J1201", 215.9, 99.06, side, shape)
+    # +3V3 arrives over 100 mm of ribbon: local bulk and HF decoupling at the connector
+    decap(sh, "C1201", "10u", 50.8, 71.12, "+3V3", fp=FP_C0805)
+    decap(sh, "C1202", "100n", 63.5, 71.12, "+3V3")
+    # switch pull-ups (the Pico's internal ~50 k alone is weak for 100 mm of cable)
+    for i, (net, ref) in enumerate((("ENC1_SW_N", "R1201"), ("ENC2_SW_N", "R1202"), ("PLAY_N", "R1203"))):
+        x = 88.9 + 15.24 * i
+        res(sh, ref, "10k", x, 71.12, {"1": "+3V3", "2": net})
+        sh.wire((x, 67.31), (x, 64.77))
+        rail(sh, "+3V3", x, 64.77)
+        sh.wire((x, 74.93), (x, 78.74))
+        sh.label(net, (x, 78.74), angle=270, justify="right bottom")
+    if flags:
+        # in the panel project the rails come in on J1201 only
+        for i, net in enumerate(("+5V_LED", "+3V3", "GND")):
+            x = 50.8 + 15.24 * i
+            if net == "GND":
+                sh.pwr("PWR_FLAG", (x, 101.6))
+                sh.wire((x, 101.6), (x, 106.68))
+                gnd(sh, x, 106.68)
+            else:
+                rail(sh, net, x, 101.6)
+                sh.wire((x, 101.6), (x, 106.68))
+                sh.pwr("PWR_FLAG", (x, 106.68), rot=180)
+    note(sh, 20.32, 124.46,
+         "J1201: right-angle shrouded 2x13 IDC header on the bottom side of the panel board, opening",
+         "toward the main board; pin n = wire n = J1101 pin n (sheet 11). C1201/C1202 at the connector;",
+         "C984 470 uF (sheet 9) is the +5V_LED bulk at this end of the cable. R1201-R1203 pull the encoder",
+         "push switches and PLAY up at the cable entry; the A/B contacts have their own filters (sheet 6).")
+    return sh
+
+
+# ------------------------------------------------------------------ roots
+
+SYSTEM_TITLE = "ReBirth RP2040 sequencer with session-style live panel"
+
+
+def draw_root(d, boxes, x0=40.64, y0=48.26, col_w=101.6, max_y=180.34):
+    """boxes: (sheet, [(sheet pin name, root net or None, shape, side)]). Pins get a stub and a label."""
     root = d.root
+    x, y = x0, y0
+    for sheet, pins in boxes:
+        left = [p for p in pins if p[3] == "left"]
+        right = [p for p in pins if p[3] == "right"]
+        rows = max(len(left), len(right), 1)
+        h = 2.54 * rows + 5.08
+        w = 45.72
+        if y + h > max_y:
+            x, y = x + col_w, y0
+        spins = []
+        for side, lst in (("left", left), ("right", right)):
+            px = x if side == "left" else x + w
+            for i, (name, net, shape, _) in enumerate(lst):
+                py = y + 5.08 + 2.54 * i
+                spins.append((name, shape, (px, py), side))
+                ex = px - 2.54 if side == "left" else px + 2.54
+                root.wire((px, py), (ex, py))
+                if net is None:
+                    root.nc((ex, py))
+                else:
+                    root.label(net, (ex, py), angle=180 if side == "left" else 0,
+                               justify="right bottom" if side == "left" else "left bottom")
+        d.add_sheet_symbol(sheet, (x, y), (w, h), spins)
+        y += h + 12.7
+
+
+def pins(names, shape, side, rename=None):
+    rename = rename or {}
+    return [(n, rename.get(n, n), shape, side) for n in names]
+
+
+GPIO_MAP_NOTE = (
+    "GPIO map (all 26 header GPIOs used)",
+    "0  MIDI_TX  (UART0)        14-17  GATE1-4",
+    "1  MIDI_RX  (reserved)     18 19 20  ENC1 A B SW (TRACK)",
+    "2  OLED_SCK (SPI0)         21 22 26  ENC2 A B SW (VALUE)",
+    "3  OLED_MOSI               27  LED_DATA (PIO, SK6812 chain)",
+    "4  OLED_CS_N               28  PLAY_N",
+    "5  OLED_DC",
+    "6  OLED_RST_N              I2C0 400 kHz, external pull-ups:",
+    "7  JITTER_PROBE (TP301)      0x20  MCP23017 step buttons 1-7, 9-15",
+    "   or LED rail enable (JP201)  0x21  MCP23017 step LEDs",
+    "8  I2C_SDA                   0x24  MCP23017 step buttons 8, 16",
+    "9  I2C_SCL                   0x22, 0x23  MCP23017 key scanner",
+    "10 DAC_SCK (SPI1)",
+    "11 DAC_MOSI",
+    "12 DAC_CS1_N (U501: CV1 CV2)",
+    "13 DAC_CS2_N (U502: CV3 CV4)")
+
+MCU_LOCAL = ["MIDI_TX", "MIDI_RX", "DAC_SCK", "DAC_MOSI", "DAC_CS1_N", "DAC_CS2_N",
+             "GATE1", "GATE2", "GATE3", "GATE4", "JITTER_PROBE"]
+PICO_SIDE = [n + "_PICO" for n in ("LED_DATA", "OLED_SCK", "OLED_MOSI", "OLED_DC", "OLED_CS_N", "OLED_RST_N")]
+DIRECT = ["I2C_SDA", "I2C_SCL", "PLAY_N", "ENC1_A", "ENC1_B", "ENC1_SW_N", "ENC2_A", "ENC2_B", "ENC2_SW_N"]
+MATRIX = ["ROW%d" % r for r in range(8)] + ["COL%d" % c for c in range(10)]
+OLED = ["OLED_SCK", "OLED_MOSI", "OLED_CS_N", "OLED_DC", "OLED_RST_N"]
+ENC = ["ENC1_A", "ENC1_B", "ENC1_SW_N", "ENC2_A", "ENC2_B", "ENC2_SW_N", "PLAY_N"]
+
+
+def main_boxes(by, system):
+    link = pins(PICO_SIDE, "input", "left") + pins(DIRECT, "bidirectional", "left")
+    if system:
+        link += pins(sorted(CABLE_SERIES), "output", "right")
+    return [
+        (by["MCU"], pins(MCU_LOCAL, "bidirectional", "right") + pins(PICO_SIDE, "output", "right")
+         + pins(DIRECT, "bidirectional", "right")),
+        (by["Power"], pins(["JITTER_PROBE"], "bidirectional", "left")),
+        (by["MIDI"], pins(["MIDI_TX", "MIDI_RX"], "bidirectional", "left")),
+        (by["CV_Gate"], pins(["DAC_SCK", "DAC_MOSI", "DAC_CS1_N", "DAC_CS2_N", "GATE1", "GATE2", "GATE3", "GATE4"],
+                             "input", "left")),
+        (by["Main_link"], link),
+    ]
+
+
+def panel_boxes(by):
+    return [
+        (by["Panel_link"], pins(sorted(CABLE_SERIES), "output", "right") + pins(DIRECT, "bidirectional", "right")),
+        (by["Top_strip"], pins(OLED, "input", "left") + pins(ENC, "output", "left")),
+        (by["RGB_chain"], pins(["LED_DATA"], "input", "left")),
+        (by["Step_row"], pins(["I2C_SDA", "I2C_SCL"], "bidirectional", "left")),
+        (by["Key_scanner"], pins(["I2C_SDA", "I2C_SCL"], "bidirectional", "left")
+         + pins(MATRIX, "bidirectional", "right")),
+        (by["Key_matrix"], pins(MATRIX, "bidirectional", "left")),
+    ]
+
+
+def root_system(d, sheets):
     by = {s.name: s for s in sheets}
-    xm, wm = 60.96, 50.8
-    xd, wd = 175.26, 55.88
-    y = 48.26
-    mcu_pins = []
-    boxes = []
-    for name, pins in ROOT_GROUPS:
-        top = y
-        dpins = []
-        for net, mshape, dshape in pins:
-            mcu_pins.append((net, mshape, (xm + wm, y), "right"))
-            dpins.append((net, dshape, (xd, y), "left"))
-            root.wire((xm + wm, y), (xd, y))
-            y += 2.54
-        boxes.append((name, top - 5.08, y - top + 7.62, dpins))
-        y += 17.78
-    # the key scanner shares the I2C bus of the step row and drives the key matrix
-    sda_y = [p[2][1] for p in mcu_pins if p[0] == "I2C_SDA"][0]
-    scl_y = sda_y + 2.54
-    ky = scl_y + 25.4
-    kpins = [("I2C_SDA", "bidirectional", (xd, ky), "left"), ("I2C_SCL", "input", (xd, ky + 2.54), "left")]
-    root.wire((152.4, sda_y), (152.4, ky), (xd, ky))
-    root.wire((157.48, scl_y), (157.48, ky + 2.54), (xd, ky + 2.54))
-    xb, wb = 266.7, 50.8
-    mpins = []
-    mat = [("ROW%d" % r, ky + 2.54 * r) for r in range(8)] + [("COL%d" % c, ky + 22.86 + 2.54 * c) for c in range(10)]
-    for net, yy in mat:
-        kpins.append((net, "bidirectional", (xd + wd, yy), "right"))
-        mpins.append((net, "bidirectional", (xb, yy), "left"))
-        root.wire((xd + wd, yy), (xb, yy))
-    top_m = 40.64
-    d.add_sheet_symbol(by["MCU"], (xm, top_m), (wm, y - top_m - 12.7), mcu_pins)
-    for name, top, h, dpins in boxes:
-        d.add_sheet_symbol(by[name], (xd, top), (wd, h), dpins)
-    d.add_sheet_symbol(by["Key_scanner"], (xd, ky - 5.08), (wd, 55.88), kpins)
-    d.add_sheet_symbol(by["Key_matrix"], (xb, ky - 5.08), (wb, 55.88), mpins)
-    d.add_sheet_symbol(by["Power"], (xm, 215.9), (wm, 15.24), [])
-    root.heading("ReBirth RP2040 sequencer with the session-style live panel", (20.32, 22.86))
+    draw_root(d, main_boxes(by, True) + panel_boxes(by), y0=48.26, max_y=270.0, col_w=96.52)
+    root = d.root
+    root.heading(SYSTEM_TITLE + ": whole system", (20.32, 22.86))
     note(root, 20.32, 30.48,
-         "Hierarchy: sheet boxes are drawn in signal order; the Pico (sheet 3) drives every other sheet. Rails VBUS, +3V3, +5V_LED and GND",
-         "are global power symbols (sheet 2). Design: docs/superpowers/specs/2026-11-16-session-panel-design.md; parts and open points: hardware/schematic/README.md.")
-    note(root, 20.32, 240.03,
-         "Power (sheet 2): USB VBUS from the laptop, +3V3 from the Pico,",
-         "+5V_LED for the RGB chain through a 234-303 mA switch.",
-         "Whole device within 500 mA at 5 V.")
-    note(root, 254.0, 50.8,
-         "GPIO map (all 26 header GPIOs used)",
-         "0  MIDI_TX  (UART0)        14-17  GATE1-4",
-         "1  MIDI_RX  (reserved)     18 19 20  ENC1 A B SW (TRACK)",
-         "2  OLED_SCK (SPI0)         21 22 26  ENC2 A B SW (VALUE)",
-         "3  OLED_MOSI               27  LED_DATA (PIO, SK6812 chain)",
-         "4  OLED_CS_N               28  PLAY_N",
-         "5  OLED_DC",
-         "6  OLED_RST_N              I2C0 400 kHz, external pull-ups:",
-         "7  JITTER_PROBE (TP301)      0x20  MCP23017 step buttons 1-7, 9-15",
-         "8  I2C_SDA                   0x21  MCP23017 step LEDs",
-         "9  I2C_SCL                   0x24  MCP23017 step buttons 8, 16",
-         "10 DAC_SCK (SPI1)            0x22, 0x23  MCP23017 key scanner",
-         "11 DAC_MOSI",
-         "12 DAC_CS1_N (U501: CV1 CV2)",
-         "13 DAC_CS2_N (U502: CV3 CV4)")
-    note(root, 254.0, 104.14,
+         "Two boards: main board (sheets 2-5, 11) on the case floor at the rear wall, panel board (sheets 6-10, 12) under the",
+         "top plate, joined by a 26-wire ribbon J1101-J1201 (sheets 11, 12). Sheet pins meet by their labels; rails are global.",
+         "Each board is its own KiCad project in hardware/pcb/ (generated from the same sheets). Parts: hardware/schematic/README.md.")
+    note(root, 330.2, 50.8, *GPIO_MAP_NOTE)
+    note(root, 330.2, 96.52,
          "Reference designators: the hundreds digit is the sheet",
-         "(U2xx power, U3xx Pico, ... D9nn RGB LED number nn in the chain).",
-         "Key matrix: SW8kk/D8kk = key number kk = 10 x row + column + 1.",
+         "(U2xx power, U3xx Pico, ... D9nn RGB LED number nn in the chain,",
+         "J1101/J1201 the cable). Key matrix: SW8kk/D8kk = key kk = 10 x row + column + 1.",
          "Sheet 10 (key scanner) belongs to the key matrix: 8xx.")
 
 
-# ------------------------------------------------------------------ project files
+def root_main(d, sheets):
+    by = {s.name: s for s in sheets}
+    draw_root(d, main_boxes(by, False), y0=48.26, max_y=190.0)
+    root = d.root
+    root.heading("Main board: Pico, power, MIDI, CV/gate, cable to the panel", (20.32, 22.86))
+    note(root, 20.32, 30.48,
+         "Generated by hardware/schematic/gen/build.py from the system schematic (hardware/schematic). Sheet numbers",
+         "are the system's. The panel board is the project hardware/pcb/panel; the ribbon joins J1101 pin n to J1201 pin n.")
+    note(root, 254.0, 50.8, *GPIO_MAP_NOTE)
 
-def write_project(d):
-    pro = {
-        "meta": {"filename": sch.PROJECT + ".kicad_pro", "version": 3},
-        "schematic": {
-            "drawing": {"intersheets_ref_show": True, "intersheets_ref_short": False,
-                        "intersheets_ref_own_page": False, "intersheets_ref_prefix": "",
-                        "intersheets_ref_suffix": ""},
-            "legacy_lib_dir": "", "legacy_lib_list": [],
-        },
-        "sheets": [[d.root.uuid, "Root"]] + [[s.sheet_uuid, s.name] for s in d.sheets],
-        "text_variables": {},
+
+def root_panel(d, sheets):
+    by = {s.name: s for s in sheets}
+    draw_root(d, panel_boxes(by), y0=48.26, max_y=190.0)
+    root = d.root
+    root.heading("Panel board: pads, scenes, mutes, steps, RGB chain, top strip", (20.32, 22.86))
+    note(root, 20.32, 30.48,
+         "Generated by hardware/schematic/gen/build.py from the system schematic (hardware/schematic). Sheet numbers",
+         "are the system's. Power and all signals come from the main board (hardware/pcb/main) over J1201.")
+
+
+# ------------------------------------------------------------------ projects
+
+PCB_DIR = os.path.join(os.path.dirname(OUT), "pcb")
+PROJECTS = {
+    # name: (output dir, root title, sheets, root drawer)
+    "rebirth_panel": (OUT, SYSTEM_TITLE, "system"),
+    "main": (os.path.join(PCB_DIR, "main"), "ReBirth sequencer: main board", "main"),
+    "panel": (os.path.join(PCB_DIR, "panel"), "ReBirth sequencer: panel board", "panel"),
+}
+
+
+def write_project(d, outdir, project, symlib_uri, fplib_uri):
+    path = os.path.join(outdir, project + ".kicad_pro")
+    pro = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            pro = json.load(f)       # keep the board settings the PCB generator stored
+    pro["meta"] = {"filename": project + ".kicad_pro", "version": 3}
+    pro["schematic"] = {
+        "drawing": {"intersheets_ref_show": True, "intersheets_ref_short": False,
+                    "intersheets_ref_own_page": False, "intersheets_ref_prefix": "",
+                    "intersheets_ref_suffix": ""},
+        "legacy_lib_dir": "", "legacy_lib_list": [],
     }
-    with open(os.path.join(OUT, sch.PROJECT + ".kicad_pro"), "w") as f:
+    pro["sheets"] = [[d.root.uuid, "Root"]] + [[s.sheet_uuid, s.name] for s in d.sheets]
+    pro.setdefault("text_variables", {})
+    with open(path, "w") as f:
         json.dump(pro, f, indent=2)
         f.write("\n")
-    with open(os.path.join(OUT, "sym-lib-table"), "w") as f:
-        f.write('(sym_lib_table\n  (version 7)\n  (lib (name "rebirth") (type "KiCad") (uri "${KIPRJMOD}/rebirth.kicad_sym") '
-                '(options "") (descr "ReBirth project symbols: TPS2553DBV, +5V_LED"))\n)\n')
+    with open(os.path.join(outdir, "sym-lib-table"), "w") as f:
+        f.write('(sym_lib_table\n  (version 7)\n  (lib (name "rebirth") (type "KiCad") (uri "%s") '
+                '(options "") (descr "ReBirth project symbols: TPS2553DBV, +5V_LED"))\n)\n' % symlib_uri)
+    with open(os.path.join(outdir, "fp-lib-table"), "w") as f:
+        f.write('(fp_lib_table\n  (version 7)\n  (lib (name "rebirth") (type "KiCad") (uri "%s") '
+                '(options "") (descr "ReBirth project footprints: DIN-5 SDS-50J"))\n)\n' % fplib_uri)
+
+
+def build_project(project):
+    outdir, title, kind = PROJECTS[project]
+    os.makedirs(outdir, exist_ok=True)
+    sch.PROJECT = project
+    project_lib = os.path.join(OUT, "rebirth.kicad_sym")
+    d = Design(outdir, project_lib, DATE, REV)
+    d.total_pages = 12
+    d.sheet("Root", project + ".kicad_sch", title, "A3", 1)
+    if kind in ("system", "main"):
+        main = [sheet_power(d), sheet_mcu(d), sheet_midi(d), sheet_cv(d), sheet_main_link(d, system=kind == "system")]
+    else:
+        main = []
+    if kind in ("system", "panel"):
+        panel = [sheet_top(d), sheet_steps(d), sheet_keys(d), sheet_rgb(d), sheet_scanner(d),
+                 sheet_panel_link(d, flags=kind == "panel")]
+    else:
+        panel = []
+    sheets = main + panel
+    {"system": root_system, "main": root_main, "panel": root_panel}[kind](d, sheets)
+    if kind == "system":
+        write_project(d, outdir, project, "${KIPRJMOD}/rebirth.kicad_sym", "${KIPRJMOD}/../pcb/rebirth.pretty")
+    else:
+        write_project(d, outdir, project, "${KIPRJMOD}/../../schematic/rebirth.kicad_sym",
+                      "${KIPRJMOD}/../rebirth.pretty")
+    d.write()
+    return d
 
 
 def build():
-    project_lib = os.path.join(OUT, "rebirth.kicad_sym")
-    d = Design(OUT, project_lib, DATE, REV)
-    sch.write_symbol_lib(project_lib, project_symbols(d.lib))
-    d.lib = sch.Library(project_lib)
-    d.sheet("Root", sch.PROJECT + ".kicad_sch", "ReBirth RP2040 sequencer with session-style live panel", "A3", 1)
-    sheets = [sheet_power(d), sheet_mcu(d), sheet_midi(d), sheet_cv(d), sheet_top(d), sheet_steps(d),
-              sheet_keys(d), sheet_rgb(d), sheet_scanner(d)]
-    root_sheet(d, sheets)
-    write_project(d)
-    d.write()
-    return d
+    sch.write_symbol_lib(os.path.join(OUT, "rebirth.kicad_sym"),
+                         project_symbols(sch.Library(os.path.join(OUT, "rebirth.kicad_sym"))))
+    return {name: build_project(name) for name in PROJECTS}
 
 
 # ------------------------------------------------------------------ checks
@@ -1211,14 +1478,19 @@ def parse_netlist(path):
     return nets
 
 
-def check(d):
-    tmp = os.path.join(OUT, ".check")
+def export_netlist(project):
+    outdir = PROJECTS[project][0]
+    tmp = os.path.join(outdir, ".check")
     os.makedirs(tmp, exist_ok=True)
-    root = os.path.join(OUT, sch.PROJECT + ".kicad_sch")
     net_path = os.path.join(tmp, "netlist.net")
-    subprocess.run([KICAD_CLI, "sch", "export", "netlist", "--format", "kicadsexpr", "-o", net_path, root],
-                   check=True, capture_output=True)
-    got = parse_netlist(net_path)
+    subprocess.run([KICAD_CLI, "sch", "export", "netlist", "--format", "kicadsexpr", "-o", net_path,
+                    os.path.join(outdir, project + ".kicad_sch")], check=True, capture_output=True)
+    return parse_netlist(net_path)
+
+
+def check(d, project):
+    outdir = PROJECTS[project][0]
+    got = export_netlist(project)
     want = d.declared_nets()
     pin_got = {}
     for name, nodes in got.items():
@@ -1248,31 +1520,58 @@ def check(d):
                 errors.append("undeclared pin %s on net %s" % (n, name))
             if n in nc_pins and len(nodes) > 1:
                 errors.append("pin %s declared unconnected but on net %s with %s" % (n, name, sorted(nodes)))
-    # every pin of every placed unit must be declared
     for s in [d.root] + d.sheets:
         for p in s.parts:
             for pin in p.sym.unit_pins(p.unit):
                 if pin.number not in p.conn and pin.etype != "no_connect":
                     errors.append("%s pin %s (%s) has no declared net" % (p.ref, pin.number, pin.name))
-    erc_path = os.path.join(tmp, "erc.json")
-    subprocess.run([KICAD_CLI, "sch", "erc", "--severity-all", "--format", "json", "-o", erc_path, root],
-                   capture_output=True)
+    erc_path = os.path.join(outdir, ".check", "erc.json")
+    subprocess.run([KICAD_CLI, "sch", "erc", "--severity-all", "--format", "json", "-o", erc_path,
+                    os.path.join(outdir, project + ".kicad_sch")], capture_output=True)
     erc = json.load(open(erc_path))
     viol = []
     for sheet in erc.get("sheets", []):
         for v in sheet.get("violations", []):
             viol.append((sheet.get("path"), v.get("severity"), v.get("type"), v.get("description"),
                          [i.get("description") for i in v.get("items", [])]))
-    print("netlist: %d declared nets, %d exported nets, %d problems" % (len(want), len(got), len(errors)))
+    print("%s: netlist: %d declared nets, %d exported nets, %d problems; ERC: %d violations"
+          % (project, len(want), len(got), len(errors), len(viol)))
     for e in errors:
         print("  NET", e)
-    print("ERC: %d violations" % len(viol))
     for v in viol:
         print("  ERC", v)
+    return not errors and not viol
+
+
+def base_name(net):
+    return net.rsplit("/", 1)[-1]
+
+
+def check_cable():
+    """J1101 pin n (main project) and J1201 pin n (panel project) carry the signal of CABLE[n];
+    in the system project they share one net."""
+    errors = []
+    side = {}
+    for project, ref in (("main", "J1101"), ("panel", "J1201")):
+        nets = export_netlist(project)
+        side[project] = {pin: name for name, nodes in nets.items() for (r, pin) in nodes if r == ref}
+    system = export_netlist("rebirth_panel")
+    sys_net = {(r, pin): name for name, nodes in system.items() for (r, pin) in nodes}
+    for pin, want in sorted(CABLE.items()):
+        m, p = side["main"].get(str(pin)), side["panel"].get(str(pin))
+        if m is None or p is None or base_name(m) != want or base_name(p) != want:
+            errors.append("pin %d: want %s, main J1101 has %s, panel J1201 has %s" % (pin, want, m, p))
+        if sys_net.get(("J1101", str(pin))) != sys_net.get(("J1201", str(pin))):
+            errors.append("pin %d: J1101 and J1201 on different nets in the system project" % pin)
+    print("cable: 26 pins, %d problems" % len(errors))
+    for e in errors:
+        print("  CABLE", e)
     return not errors
 
 
 if __name__ == "__main__":
-    design = build()
+    designs = build()
     if "--check" in sys.argv:
-        sys.exit(0 if check(design) else 1)
+        ok = all([check(d, name) for name, d in designs.items()])
+        ok = check_cable() and ok
+        sys.exit(0 if ok else 1)

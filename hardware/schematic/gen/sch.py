@@ -468,7 +468,7 @@ class Design:
         return s
 
     def title_block(self, sh):
-        total = len(self.sheets) + 1
+        total = getattr(self, "total_pages", None) or len(self.sheets) + 1
         return ("(title_block (title %s) (date %s) (rev %s) (company %s) (comment 1 %s) (comment 2 %s))"
                 % (q(sh.title), q(self.date), q(self.rev),
                    q("ReBirth RP2040 sequencer, session-style live panel"),

@@ -15,7 +15,20 @@ python3 hardware/schematic/gen/build.py --check
 `--check` needs KiCad 10 (`kicad-cli`, `KICAD_CLI` to override the path) and the
 KiCad symbol library (`KICAD_SYMBOL_DIR`). Every part in the generator declares
 the net of each of its pins; the check exports the netlist with `kicad-cli` and
-fails if the drawing connects anything differently, then runs ERC.
+fails if the drawing connects anything differently or ERC reports anything.
+
+The generator writes three projects from the same sheet functions:
+
+| Project | Folder | Contents |
+| --- | --- | --- |
+| `rebirth_panel` | `hardware/schematic/` | the whole system, both boards and the cable between them |
+| `main` | `hardware/pcb/main/` | main board: sheets 2-5 and 11 (cable header J1101) |
+| `panel` | `hardware/pcb/panel/` | panel board: sheets 6-10 and 12 (cable header J1201) |
+
+The board projects are what the PCBs are built from (`hardware/pcb/README.md`); edit the
+generator, never their sheets. `--check` checks all three and also the cable: J1101 pin n
+(main) and J1201 pin n (panel) must carry the same signal, and share a net in the system
+project.
 
 ## Sheets
 
@@ -31,6 +44,8 @@ fails if the drawing connects anything differently, then runs ERC.
 | 8 | `key_matrix.kicad_sch` | 8 x 10 key matrix: 64 pads, 8 SCENE, 8 MUTE, one BAT54J per key; ROW/COL ports |
 | 9 | `rgb_chain.kicad_sch` | U901 74AHCT1G125, 82 x SK6812MINI-E with 100 nF each, bulk C984 (A2 sheet) |
 | 10 | `key_scanner.kicad_sch` | Key scanner: U801/U802 MCP23017 at 0x22/0x23 driving the matrix columns and reading its rows |
+| 11 | `main_link.kicad_sch` | Cable header J1101 on the main board; source terminations R1101-R1106 for the OLED lines and LED_DATA |
+| 12 | `panel_link.kicad_sch` | Cable header J1201 on the panel board; +3V3 decoupling C1201/C1202, switch pull-ups R1201-R1203 |
 
 Reference designators: the hundreds digit is the sheet (sheet 10 uses 8xx, it belongs to
 the key matrix). In the key matrix SW8kk and D8kk carry the key number kk
@@ -70,7 +85,10 @@ position nn, which equals firmware logical index nn-1.
 | Keys | MX-type switches (footprint SW_Cherry_MX_1.00u_PCB) | assumption; any momentary switch works |
 | Step buttons / LEDs | 6 mm tactile, red 3 mm LEDs with 470 R (~3 mA) | unchanged hardware; values are a choice |
 | Encoders | EC11 with switch | unchanged hardware |
-| Jacks | 3.5 mm TS (PJ398SM footprint) | rear panel |
+| Jacks | 3.5 mm, CUI SJ1-3513N right angle (TRS; the mono plug shorts R to S, R left open) | rear wall, main board on the floor |
+| Jack protection | PESD5V0S1BA (bidirectional 5 V TVS, SOD-323), D501-D508 | PCB-stage choice of the owner (2026-11-16) |
+| MIDI sockets | Same Sky (CUI) SDS-50J, DIN-5 180 deg right angle | footprint `rebirth:DIN-5_180deg_SameSky_SDS-50J_Horizontal` (hardware/pcb/rebirth.pretty) |
+| Board-to-board cable | 2 x 2x13 shrouded IDC headers, right angle (J1101, J1201), 26-wire ribbon | see sheets 11/12 and hardware/pcb/README.md |
 
 Footprints are a starting point for the PCB step; no MPNs are set yet. The MIDI DIN
 sockets have no footprint: KiCad's library has none for a panel DIN-5.
@@ -144,12 +162,31 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
     2-3 ms; scanning every ~4 ms keeps press-to-event (scan + 5 ms debounce) near 10 ms.
     The I2C bus then carries the scan next to the step-row traffic.
 
+12. **Board split and cable (PCB step, 2026-11-16).** The owner chose two boards: the panel
+    board under the top plate and the main board on the case floor at the rear wall. Sheets 11
+    and 12 hold the cable headers J1101/J1201 (26-wire ribbon, pin n = wire n; table in
+    `CABLE` in `gen/build.py`). The pin order puts LED_DATA, OLED_SCK and both I2C lines between
+    ground wires and makes a ribbon crimped the wrong way round harmless for the rails (+5V_LED
+    meets GND behind U201's current limit, +3V3 meets itself on pins 13/14). Added with it:
+    R1101-R1106 source terminations at the Pico (33 R on the OLED lines, 100 R on LED_DATA),
+    R561-R564 33 R on the DAC SPI lines (they run ~170 mm across the main board), C1201/C1202 on
+    +3V3 at the panel end, R1201-R1203 10 k pull-ups for PLAY and the encoder push switches (the
+    Pico's internal pull-ups alone are weak for 100 mm of cable), a PWR_FLAG set in the panel
+    project, and the Pico-side nets renamed `*_PICO`.
+13. **LED rail enable option JP201 (owner, 2026-11-16).** U201 EN goes through a 3-pad solder
+    jumper: 1-2 bridged by copper (as before: the rail follows +3V3); cut 1-2 and bridge 2-3 to
+    let GPIO 7 switch the rail after USB enumeration, R203 100 k holding it off until then. GPIO 7
+    is then no longer the jitter probe. This is the hardware half of open point 1.
+14. **TVS diodes on all eight jacks (owner, 2026-11-16).** D501-D508 PESD5V0S1BA from each jack
+    tip to GND, behind the 1 k resistors. The CV loop takes its feedback at the jack, so their
+    leakage does not shift the pitch; the gates (<= 5.25 V) stay below their breakdown.
+
 ## Open points for the owner (design-level, not changed here)
 
-1. **LED rail before enumeration.** EN = +3V3 turns the chain on before any firmware runs;
+1. **LED rail before enumeration.** EN = +3V3 (JP201 as delivered) turns the chain on before any firmware runs;
    82 x ~1 mA idle plus the Pico exceed the 100 mA an unconfigured USB device may draw.
    If the design's fallback (minimal USB enumeration asking for 500 mA) is ever needed,
-   EN must be firmware-controlled (a spare U703 output with a pull-down). Enumeration
+   cut JP201 1-2, bridge 2-3 and switch the rail from GPIO 7 (decision 13). Enumeration
    goes through the Pico's own micro-USB (D+/D- are not on its header).
 2. **Gate level.** Gates are 5 V here; confirm that the target synths want 5 V gates
    (most do), or drop U504 for 3.3 V gates through 1 k.
@@ -165,8 +202,8 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
   KiCad's symbol and footprint; the older OPSCO spec rev. 02/04 numbers 1 VDD, 2 DOUT,
   3 GND, 4 DIN. The pad functions are the same geometrically. Order the C5149201 part
   and check the reel's drawing against the footprint before layout.
-- Fix MPNs and datasheets for the OLED module (pin order, 3.3 V, current), the DIN-5
-  sockets (no KiCad footprint) and the jacks (PJ398SM's TN contact stays unconnected).
+- Fix MPNs and datasheets for the OLED module (pin order, 3.3 V, current). The DIN-5
+  sockets (SDS-50J, own footprint) and the right-angle jacks (SJ1-3513N) are set (decision 12).
 - C984 voltage rating is in its value (10 V); keep it, a 6.3 V part is too close to VBUS.
 - Step LEDs are driven high-side by the MCP23017 (VOH = VDD - 0.7 V at 3 mA): expect
   ~1.5-3 mA each; adjust R701-R716 on the bench.
@@ -175,9 +212,10 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
 
 ## Verification
 
-- Netlist exported from the root equals the generator's declared nets (307 nets, every
-  pin of every part, 0 differences); `kicad-cli sch erc`: 0 violations (with KiCad's
-  default symbol library table installed; without it ERC reports library warnings only).
+- Netlist exported from each root equals the generator's declared nets, every pin of every
+  part, 0 differences: system 380 nets, main board 91, panel board 307; `kicad-cli sch erc`:
+  0 violations in all three (with KiCad's default symbol library table installed; without
+  it ERC reports library warnings only). Cable check: 26 of 26 pins match (decision 12).
 - `readable-schematic` lint: 0 errors. Advisories accepted: `flag_side` on the Pico's
   pin list (labels sit where the symbol's pins are), `sheet_jump` for the SPI labels
   repeated at each DAC and the I2C labels repeated at each expander, `sheet_fill` on the
@@ -202,4 +240,4 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
   +5V_LED inrush: `SIMULATION.md` (benches in `sim/`), run on the reviewed schematic.
   It changed C511-C514 from 100 pF to 1 nF; MIDI OUT/IN meet CA-033 clause by clause;
   the 470 uF LED rail needs the constant-current TPS2553, not the -1 (decision 1).
-- Not done: PCB, BOM with MPNs.
+- PCB: `hardware/pcb/` (README there). Not done: BOM with MPNs.
