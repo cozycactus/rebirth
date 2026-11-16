@@ -209,8 +209,9 @@ The ISR keeps, per track that plays a kit: the sounding mask (11 bits) with the 
 voice was sent on and one release channel. Every voice is released at the latest at the next step
 boundary, before that step's hits, so all sounding voices come from one step and share the channel
 stored at that step; a later settings edit therefore cannot strand a note (host builds check this
-invariant before a channel is stored). Then the note-off countdown, the flam mask, the flam countdown and the flam velocity (one per step, as AC is per
-step). That is under 30 bytes per track.
+invariant before a channel is stored). Then the note-off countdown, the flam mask, the flam
+countdown and the flam velocity (one per step, as AC is per step). That is under 30 bytes per
+track.
 
 ### Order of work in one pulse
 
@@ -338,8 +339,8 @@ path changes (A):
   `midi_wait_output_idle()` (used before a flash save) also waits for it and for the real-time
   bytes.
 - The UART's hardware FIFO is turned off, so nothing is committed in front of a pending Clock
-  beyond the byte being shifted out and the one in the holding register. The UART interrupt then fires once per byte on Core 0: at most
-  3,125 per second, each a few microseconds.
+  beyond the byte being shifted out and the one in the holding register. The UART interrupt then
+  fires once per byte on Core 0: at most 3,125 per second, each a few microseconds.
 - Core 0 must not keep interrupts off for longer than 100 us (a third of a byte time), or bytes
   start to have gaps and a Clock waits longer. The bench measures the longest such window (the
   shared-state lock sections, the I2C and SPI drivers); a longer one is shortened, the FIFO stays
@@ -428,9 +429,9 @@ never opens on a kit track.
 Shows the step number and the values of all 12 lanes at that step. TRACK rotation (by detents)
 moves the lane cursor, starting on the focused lane; VALUE rotation sets that lane's value (off /
 note / accent / flam; AC off / on), with the CH/OH rule applied. VALUE moves by the detent count:
-one step per click, clamped, with no acceleration (multi-model review). Step buttons select another step
-within the length; the old step editor's gestures (active toggle by long press, slide and tie) do
-not exist here. VALUE press returns to the screen it was opened from.
+one step per click, clamped, with no acceleration (multi-model review). Step buttons select
+another step within the length; the old step editor's gestures (active toggle by long press, slide
+and tie) do not exist here. VALUE press returns to the screen it was opened from.
 
 ### Lights and OLED
 

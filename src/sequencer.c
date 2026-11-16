@@ -399,7 +399,8 @@ static void commit_step(void) {
 
 // Writes a release for every voice the kit on `track` has sounding into `out`, each on
 // the note it was sent on and all on the one channel stored at their step; the voices
-// stop sounding and a pending flam is cancelled. Returns the byte count. In RAM: the timer ISR calls it on every release.
+// stop sounding and a pending flam is cancelled. Returns the byte count. In RAM: the
+// timer ISR calls it on every release.
 static uint8_t __not_in_flash_func(kit_take_release)(uint8_t track, uint8_t *out) {
     kit_runtime_t *k = &kit_runtime[track];
     uint8_t length = 0;

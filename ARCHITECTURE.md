@@ -93,10 +93,11 @@ lane order.
   bytes; every voice is still released before the next run's notes.
 - **Flam reserve.** A flam's second hits are the only kit message that may be
   dropped. Flam second hits must leave 288 TX queue bytes free
-  (`KIT_FLAM_RESERVE`); the headroom covers the releases and new first hits of an
-  immediate restart as well as scheduled playback (two kits' note-offs and the
-  worst step burst, 168 bytes as queued in one pulse). Otherwise the voices sound
-  until their note-off and `flam_drops` goes up, one per kit per flam pulse. It shows on the pattern-select screen as `FLAM DROP <n>` when
+  (`KIT_FLAM_RESERVE`); the headroom covers the releases and new first hits of
+  an immediate restart as well as scheduled playback (two kits' note-offs and
+  the worst step burst, 168 bytes as queued in one pulse). Otherwise the voices
+  sound until their note-off and `flam_drops` goes up, one per kit per flam
+  pulse. It shows on the pattern-select screen as `FLAM DROP <n>` when
   non-zero.
 
 ## Playback Rules

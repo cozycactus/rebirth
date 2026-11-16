@@ -51,27 +51,28 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
   warnings): lane helpers, prepared kit rows, the pulse order, velocity levels,
   flams at exactly `flam_pulses`, note-offs as Note On velocity 0, releases on
   mute, Stop, Panic and type change, the two-kit limit, running status and Clock
-  ahead of note bytes over a fake UART (shift and holding register, no FIFO), the
-  288-byte flam reserve (flam second hits must leave 288 TX queue bytes free; the
-  headroom covers the releases and new first hits of an immediate restart as well
-  as scheduled playback), a restart under two dense kits, save format v6
-  and loading real v4/v5 images, encoder clicks with detent-rate acceleration
-  for numbers only, and the kit OLED screens. The sanitizer build passes too.
+  ahead of note bytes over a fake UART (shift and holding register, no FIFO),
+  the 288-byte flam reserve (flam second hits must leave 288 TX queue bytes
+  free; the headroom covers the releases and new first hits of an immediate
+  restart as well as scheduled playback), a restart under two dense kits, save
+  format v6 and loading real v4/v5 images, encoder clicks with detent-rate
+  acceleration for numbers only, and the kit OLED screens. The sanitizer build
+  passes too.
 - RAM from `arm-none-eabi-size -A build/fw1/rp2040_sequencer.elf` after a fresh
-  build: `.data` 10,172 + `.bss` 104,672 = 114,844 bytes (about 112.2 KiB) of the
-  RP2040's 264 KiB; the `.heap` and the two stack sections are separate (2,048
-  bytes each). The branch base has `.data` 4,396 + `.bss` 69,876 = 74,272 bytes
-  (about 72.5 KiB). The design expected about 108,000 bytes (about 105.5 KiB) with
-  the grown flash copy buffer; the build is about 6.7 KiB above that and still
-  fits. `.bss` grew by 34,796 bytes, as estimated: the kit steps and settings in
-  `g_seq` (16,536 bytes), the save's copy buffer `pattern_buf` (14,848 to 31,232
-  bytes), the prepared rows and the kit runtime state. The estimate left out
-  `.data`, which also holds the code that runs from RAM; it grew by 5,776 bytes.
-  The kit and MIDI path the timer ISR runs is in RAM (`arm-none-eabi-nm`,
-  addresses 0x2000xxxx): the ISR itself grew from 2,736 to 6,092 bytes with
-  `kit_release()`, `play_kit_step()` and `kit_play_flam()` inlined into it;
-  `kit_take_release()` (708 bytes), `kit_voice_order` (11), the MIDI TX drain
-  `midi_tx_drain_locked()` (624), the UART interrupt handler (92),
+  build: `.data` 10,172 + `.bss` 104,672 = 114,844 bytes (about 112.2 KiB) of
+  the RP2040's 264 KiB; the `.heap` and the two stack sections are separate
+  (2,048 bytes each). The branch base has `.data` 4,396 + `.bss` 69,876 = 74,272
+  bytes (about 72.5 KiB). The design expected about 108,000 bytes (about 105.5
+  KiB) with the grown flash copy buffer; the build is about 6.7 KiB above that
+  and still fits. `.bss` grew by 34,796 bytes, as estimated: the kit steps and
+  settings in `g_seq` (16,536 bytes), the save's copy buffer `pattern_buf`
+  (14,848 to 31,232 bytes), the prepared rows and the kit runtime state. The
+  estimate left out `.data`, which also holds the code that runs from RAM; it
+  grew by 5,776 bytes. The kit and MIDI path the timer ISR runs is in RAM
+  (`arm-none-eabi-nm`, addresses 0x2000xxxx): the ISR itself grew from 2,736 to
+  6,092 bytes with `kit_release()`, `play_kit_step()` and `kit_play_flam()`
+  inlined into it; `kit_take_release()` (708 bytes), `kit_voice_order` (11), the
+  MIDI TX drain `midi_tx_drain_locked()` (624), the UART interrupt handler (92),
   `midi_send_bytes()` (200, plus a 204-byte constant-length clone),
   `midi_try_send_bytes_reserve()` (232), `midi_send_clock()` (108),
   `midi_send_note_off()` (38), `midi_output_overflowed()` (104) and the step
