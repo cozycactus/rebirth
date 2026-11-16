@@ -487,32 +487,35 @@ static void test_timer_wrap_is_normal(void) {
 
 static void test_uart_overflow_never_sends_partial_message(void) {
     fake_uart_writable = false;
-    for (unsigned note = 0; note < 84; note++) midi_send_note_on(0, note, 100);
-    midi_send_clock(); // 253 bytes: only two queue slots remain.
+    for (unsigned note = 0; note < 170; note++) midi_send_note_on(0, note & 0x7F, 100);
+    midi_send_clock(); // 510 bytes; the Clock takes none: one queue byte remains.
     midi_send_note_on(1, 100, 100);
     CHECK(midi_output_overflowed());
     CHECK(fake_midi_length == 0);
     fake_uart_writable = true;
     fake_irq_handlers[UART0_IRQ]();
-    CHECK(decode_midi() == 85);
-    for (unsigned note = 0; note < 84; note++) {
-        CHECK(msg_is(midi_msgs[note], MIDI_NOTE_ON, note, 100));
+    CHECK(decode_midi() == 171);
+    CHECK(midi_msgs[0].status == MIDI_CLOCK);
+    for (unsigned note = 0; note < 170; note++) {
+        CHECK(msg_is(midi_msgs[1 + note], MIDI_NOTE_ON, note & 0x7F, 100));
     }
-    CHECK(midi_msgs[84].status == MIDI_CLOCK);
     CHECK(message_boundary(fake_midi_length));
     CHECK(!fake_uart_tx_irq);
 }
 
 static void test_full_queue_drains_free_uart_before_dropping(void) {
     fake_uart_writable = false;
-    for (unsigned note = 0; note < 85; note++) midi_send_note_on(0, note, 100);
-    CHECK(!midi_output_overflowed()); // 255 bytes: the queue is full.
+    for (unsigned note = 0; note < 170; note++) midi_send_note_on(0, note & 0x7F, 100);
+    midi_send_clock();
+    CHECK(!midi_output_overflowed()); // 510 of 511 bytes: no room for another message.
     fake_uart_writable = true;        // The UART can take bytes before its IRQ runs.
     midi_send_note_on(1, 42, 100);
     CHECK(!midi_output_overflowed());
     fake_irq_handlers[UART0_IRQ]();
-    CHECK(decode_midi() == 86);
-    CHECK(msg_is(midi_msgs[85], MIDI_NOTE_ON | 1, 42, 100));
+    CHECK(decode_midi() == 172);
+    CHECK(midi_msgs[0].status == MIDI_CLOCK);
+    CHECK(msg_is(midi_msgs[171], MIDI_NOTE_ON | 1, 42, 100));
+    CHECK(message_boundary(fake_midi_length));
 }
 
 static void play_song_entries(unsigned entries) {
@@ -613,10 +616,207 @@ static void test_status_repeated_after_queue_ran_empty(void) {
     CHECK(midi_bytes_are(expected, sizeof(expected)));
 }
 
+// Lets the UART take one byte per TX interrupt until nothing is pending.
+static void drain_byte_by_byte(void) {
+    while (fake_uart_tx_irq) {
+        unsigned written = fake_midi_length;
+        fake_uart_budget = 1;
+        fake_irq_handlers[UART0_IRQ]();
+        CHECK(fake_midi_length == written + 1);
+    }
+    fake_uart_budget = UINT_MAX;
+}
+
+static void test_clock_with_empty_queue_goes_at_once(void) {
+    midi_send_clock();
+    const uint8_t expected[] = {MIDI_CLOCK};
+    CHECK(midi_bytes_are(expected, sizeof(expected)));
+    CHECK(!fake_uart_tx_irq);
+}
+
+static void test_clock_at_message_boundary(void) {
+    fake_uart_writable = false;
+    midi_send_note_on(0, 36, 100);
+    midi_send_note_on(0, 38, 100);
+    fake_uart_budget = 1;
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ](); // writes the first status byte
+    midi_send_clock();
+    drain_byte_by_byte();
+    const uint8_t expected[] = {0x90, 36, 100, MIDI_CLOCK, 38, 100};
+    CHECK(midi_bytes_are(expected, sizeof(expected)));
+}
+
+static void test_start_and_clock_overtake_old_notes(void) {
+    fake_uart_writable = false;
+    midi_send_note_on(0, 36, 100);
+    midi_send_stop();
+    midi_send_start();
+    midi_send_clock();
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    const uint8_t expected[] = {MIDI_STOP, MIDI_START, MIDI_CLOCK, 0x90, 36, 100};
+    CHECK(midi_bytes_are(expected, sizeof(expected)));
+    CHECK(!fake_uart_tx_irq);
+}
+
+// Review focus: Stop then Start within one step while note bytes are still queued.
+static void test_quick_restart_does_not_wait_for_old_notes(void) {
+    set_note(0, 0, 0, 60, 0);
+    transport_start();
+    tick();                       // Start, Clock and the step's Note On go out
+    unsigned sent = fake_midi_length;
+    fake_uart_writable = false;
+    pulses(4);                    // the next Clock waits on the blocked UART
+    transport_stop();
+    transport_start();
+    tick();
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    const uint8_t expected[] = {
+        MIDI_STOP, MIDI_START, MIDI_CLOCK, MIDI_NOTE_OFF, 60, 0, MIDI_NOTE_ON, 60, 100
+    };
+    CHECK(fake_midi_length == sent + sizeof(expected));
+    CHECK(memcmp(fake_midi + sent, expected, sizeof(expected)) == 0);
+}
+
+static void test_continue_before_clock(void) {
+    fake_uart_writable = false;
+    midi_send_note_on(0, 36, 100);
+    midi_send_stop();
+    midi_send_continue();
+    midi_send_clock();
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    const uint8_t expected[] = {MIDI_STOP, MIDI_CONTINUE, MIDI_CLOCK, 0x90, 36, 100};
+    CHECK(midi_bytes_are(expected, sizeof(expected)));
+}
+
+static void test_stop_cancels_pending_clock(void) {
+    fake_uart_writable = false;
+    midi_send_note_on(0, 36, 100);
+    midi_send_clock();
+    midi_send_stop();
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    const uint8_t expected[] = {MIDI_STOP, 0x90, 36, 100};
+    CHECK(midi_bytes_are(expected, sizeof(expected)));
+}
+
+static void test_panic_cancels_pending_clock(void) {
+    transport_start();
+    pulses(4);
+    unsigned sent = fake_midi_length;
+    fake_uart_writable = false;
+    tick();                       // this pulse's Clock waits on the blocked UART
+    sequencer_panic();
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(fake_midi_length > sent);
+    CHECK(fake_midi[sent] == MIDI_STOP);
+    for (unsigned i = sent; i < fake_midi_length; i++) CHECK(fake_midi[i] != MIDI_CLOCK);
+    CHECK(msg_is(last_msg(0), MIDI_CC | 15, MIDI_CC_ALL_NOTES_OFF, 0));
+}
+
+static void test_clear_queue_cancels_clock(void) {
+    fake_uart_writable = false;
+    midi_send_clock();
+    midi_clear_output_queue();
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(fake_midi_length == 0);
+    CHECK(!fake_uart_tx_irq);
+}
+
+static void test_wait_idle_sends_pending_clock(void) {
+    fake_uart_writable = false;
+    midi_send_clock();
+    fake_uart_writable = true;
+    midi_wait_output_idle();
+    const uint8_t expected[] = {MIDI_CLOCK};
+    CHECK(midi_bytes_are(expected, sizeof(expected)));
+}
+
+static void test_clock_spacing_on_empty_pattern(void) {
+    fake_uart_run_until(0);       // wire-time mode
+    transport_start();
+    for (unsigned pulse = 0; pulse < 96; pulse++) {
+        fake_uart_run_until(timer_hw->alarm[0]);
+        tick();
+    }
+    fake_uart_run_until(timer_hw->timerawl + 10000);
+    uint32_t clock_us[24];
+    unsigned clocks = 0;
+    for (unsigned i = 0; i < fake_midi_length; i++) {
+        if (fake_midi[i] != MIDI_CLOCK) continue;
+        CHECK(clocks < 24);
+        clock_us[clocks++] = fake_midi_time_us[i];
+    }
+    CHECK(clocks == 24);
+    uint32_t expected_us = 4 * pulse_interval_us;
+    for (unsigned c = 1; c < clocks; c++) {
+        uint32_t gap_us = clock_us[c] - clock_us[c - 1];
+        CHECK(gap_us + 320 >= expected_us && gap_us <= expected_us + 320);
+    }
+}
+
+static void test_clock_waits_one_message_in_long_burst(void) {
+    fake_uart_run_until(0);       // wire-time mode, at 0 us
+    // Alternate channels: 3 bytes per message on the wire, 102 bytes in all.
+    for (unsigned note = 0; note < 34; note++) midi_send_note_on(note & 1, 36 + note, 100);
+    fake_uart_run_until(5000);
+    midi_send_clock();
+    fake_uart_run_until(100000);
+    unsigned clock = 0;
+    while (clock < fake_midi_length && fake_midi[clock] != MIDI_CLOCK) clock++;
+    CHECK(clock < fake_midi_length);
+    CHECK(fake_midi_time_us[clock] <= 5960);
+    CHECK(message_boundary(clock));
+    CHECK(fake_midi_count(MIDI_NOTE_ON) + fake_midi_count(MIDI_NOTE_ON | 1) == 34);
+}
+
+// Queues `bytes` bytes of whole messages: Program Changes, then Note Ons.
+static void queue_bytes(unsigned bytes) {
+    static const uint8_t program_change[] = {0xC0, 1};
+    for (; bytes % 3; bytes -= 2) midi_send_bytes(program_change, sizeof(program_change));
+    for (; bytes; bytes -= 3) midi_send_note_on(0, 60, 100);
+}
+
+static void test_try_send_keeps_reserve(void) {
+    uint8_t burst[30];
+    for (unsigned i = 0; i < 10; i++) {
+        burst[3 * i] = MIDI_NOTE_ON | 9;
+        burst[3 * i + 1] = (uint8_t)(36 + i);
+        burst[3 * i + 2] = 100;
+    }
+    fake_uart_writable = false;
+    queue_bytes(300);             // 211 bytes free
+    CHECK(!midi_try_send_bytes_reserve(burst, sizeof(burst), 192));
+    CHECK(!midi_output_overflowed());
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(fake_midi_count(MIDI_NOTE_ON | 9) == 0);
+    fake_uart_writable = false;
+    queue_bytes(289);             // 222 bytes free: just enough
+    CHECK(midi_try_send_bytes_reserve(burst, sizeof(burst), 192));
+    midi_clear_output_queue();
+    queue_bytes(100);
+    CHECK(midi_try_send_bytes_reserve(burst, sizeof(burst), 192));
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(fake_midi_count(MIDI_NOTE_ON | 9) == 10);
+    CHECK(!midi_output_overflowed());
+}
+
+static void test_fifo_disabled(void) {
+    midi_init();
+    CHECK(!fake_uart_fifo_enabled);
+}
+
 static void test_output_overflow_stops_transport(void) {
     sound_note();
     fake_uart_writable = false;
-    for (unsigned note = 0; note < 100; note++) midi_send_note_on(0, note, 100);
+    for (unsigned note = 0; note < 200; note++) midi_send_note_on(0, note & 0x7F, 100);
     tick();
     CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
     CHECK(fake_gates == 0);
@@ -1030,6 +1230,19 @@ int main(void) {
     RUN(test_staging_overflow_never_sends_partial_message);
     RUN(test_running_status_within_burst);
     RUN(test_status_repeated_after_queue_ran_empty);
+    RUN(test_clock_with_empty_queue_goes_at_once);
+    RUN(test_clock_at_message_boundary);
+    RUN(test_start_and_clock_overtake_old_notes);
+    RUN(test_quick_restart_does_not_wait_for_old_notes);
+    RUN(test_continue_before_clock);
+    RUN(test_stop_cancels_pending_clock);
+    RUN(test_panic_cancels_pending_clock);
+    RUN(test_clear_queue_cancels_clock);
+    RUN(test_wait_idle_sends_pending_clock);
+    RUN(test_clock_spacing_on_empty_pattern);
+    RUN(test_clock_waits_one_message_in_long_burst);
+    RUN(test_try_send_keeps_reserve);
+    RUN(test_fifo_disabled);
     RUN(test_output_overflow_stops_transport);
     RUN(test_bar_launch_waits_for_bar_line);
     RUN(test_bar_launch_on_short_loop_waits_for_bar);

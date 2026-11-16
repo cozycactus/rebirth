@@ -20,7 +20,8 @@ void uart_putc_raw(void *uart, uint8_t c);
 // Buffer MIDI messages during step processing, flush all at once.
 
 #define MIDI_BUF_SIZE   160
-#define MIDI_TX_QUEUE_SIZE 256
+#define MIDI_TX_QUEUE_SIZE 512
+#define MIDI_RT_QUEUE_SIZE 4
 
 static uint8_t midi_buf[MIDI_BUF_SIZE];
 static uint8_t midi_buf_len = 0;
@@ -36,18 +37,27 @@ static volatile uint16_t midi_tx_tail;
 static uint32_t midi_tx_spinlock_num;
 static bool midi_tx_spinlock_ready;
 static volatile uint32_t midi_tx_dropped_bytes;
-// The queue keeps whole messages with their status; the drain applies running status.
+// The queue keeps whole channel messages with their status; the drain applies running status.
 static uint8_t midi_tx_message_left;    // bytes of the message being written still queued
 static uint8_t midi_tx_last_status;     // last channel status written; 0 = none
 static bool midi_tx_ran_empty;          // the queue emptied after that status was written
+// Start, Continue and Stop wait here and leave at the next message boundary, ahead of
+// the note queue, then a pending Clock. Neither changes the running status.
+static uint8_t midi_rt_queue[MIDI_RT_QUEUE_SIZE];
+static uint8_t midi_rt_head;
+static uint8_t midi_rt_count;
+static bool midi_clock_pending;         // a flag, not a count: Clocks never leave in a bunch
 
 static inline uint16_t midi_tx_next(uint16_t idx) {
     return (uint16_t)((idx + 1u) & (MIDI_TX_QUEUE_SIZE - 1u));
 }
 
 static inline uint8_t midi_message_length(uint8_t status) {
-    if (status >= 0xF8) return 1;                 // real-time
     return ((status & 0xE0u) == 0xC0u) ? 2u : 3u; // 0xC0-0xDF carry one data byte
+}
+
+static inline bool midi_tx_pending_locked(void) {
+    return midi_tx_tail != midi_tx_head || midi_rt_count != 0 || midi_clock_pending;
 }
 
 static uint32_t midi_tx_lock(void) {
@@ -60,24 +70,37 @@ static void midi_tx_unlock(uint32_t irq_state) {
     spin_unlock(spin_lock_instance(midi_tx_spinlock_num), irq_state);
 }
 
-// The FIFO check, dequeue, write and IRQ mask change share one lock across
+// The writable check, dequeue, write and IRQ mask change share one lock across
 // both cores and the UART ISR. No second consumer can overtake a byte.
-// One byte per writable check. A message whose status equals the last one
-// written goes without it, unless the queue ran empty since: the first message
-// after a gap always carries its status, so a receiver that lost a byte resyncs.
+// One byte per writable check; with the UART FIFO off nothing is committed ahead
+// of a pending Clock beyond the byte being sent. At a message boundary a queued
+// Start/Continue/Stop goes first, then a pending Clock, then the next message.
+// A message whose status equals the last one written goes without it, unless the
+// queue ran empty since: the first message after a gap always carries its status,
+// so a receiver that lost a byte resyncs.
 static void midi_tx_drain_locked(void) {
-    while (uart_is_writable(MIDI_UART) && midi_tx_tail != midi_tx_head) {
+    while (uart_is_writable(MIDI_UART)) {
         if (midi_tx_message_left == 0) {
+            if (midi_rt_count != 0) {
+                uart_putc_raw(MIDI_UART, midi_rt_queue[midi_rt_head]);
+                midi_rt_head = (uint8_t)((midi_rt_head + 1u) % MIDI_RT_QUEUE_SIZE);
+                midi_rt_count--;
+                continue;
+            }
+            if (midi_clock_pending) {
+                midi_clock_pending = false;
+                uart_putc_raw(MIDI_UART, MIDI_CLOCK);
+                continue;
+            }
+            if (midi_tx_tail == midi_tx_head) break;
             uint8_t status = midi_tx_queue[midi_tx_tail];
             midi_tx_message_left = midi_message_length(status);
-            if (status < 0xF8) {
-                if (status == midi_tx_last_status && !midi_tx_ran_empty) {
-                    midi_tx_tail = midi_tx_next(midi_tx_tail);
-                    midi_tx_message_left--;
-                } else {
-                    midi_tx_last_status = status;
-                    midi_tx_ran_empty = false;
-                }
+            if (status == midi_tx_last_status && !midi_tx_ran_empty) {
+                midi_tx_tail = midi_tx_next(midi_tx_tail); // running status
+                midi_tx_message_left--;
+            } else {
+                midi_tx_last_status = status;
+                midi_tx_ran_empty = false;
             }
         }
         uart_putc_raw(MIDI_UART, midi_tx_queue[midi_tx_tail]);
@@ -85,7 +108,32 @@ static void midi_tx_drain_locked(void) {
         midi_tx_message_left--;
         if (midi_tx_tail == midi_tx_head) midi_tx_ran_empty = true;
     }
-    uart_set_irq_enables(MIDI_UART, false, midi_tx_tail != midi_tx_head);
+    uart_set_irq_enables(MIDI_UART, false, midi_tx_pending_locked());
+}
+
+// Queues whole messages if they fit with `reserve` bytes still free afterwards.
+static bool midi_tx_enqueue_locked(const uint8_t *data, uint16_t length, uint16_t reserve) {
+    // Move bytes into a UART that has room before its TX IRQ runs.
+    midi_tx_drain_locked();
+    uint16_t free_bytes = (midi_tx_tail - midi_tx_head - 1u) & (MIDI_TX_QUEUE_SIZE - 1u);
+    if ((uint32_t)length + reserve > free_bytes) return false;
+    // Publish complete messages/batches, never a partial MIDI packet.
+    for (uint16_t i = 0; i < length; i++) {
+        midi_tx_queue[midi_tx_head] = data[i];
+        midi_tx_head = midi_tx_next(midi_tx_head);
+    }
+    midi_tx_drain_locked();
+    return true;
+}
+
+static void midi_tx_reset_locked(void) {
+    midi_tx_tail = midi_tx_head;
+    midi_tx_message_left = 0;
+    midi_tx_last_status = 0;
+    midi_tx_ran_empty = true;
+    midi_rt_head = 0;
+    midi_rt_count = 0;
+    midi_clock_pending = false;
 }
 
 static void __isr midi_uart_irq_handler(void) {
@@ -102,11 +150,8 @@ void midi_init(void) {
     if (!midi_tx_spinlock_ready) midi_tx_spinlock_num = spin_lock_claim_unused(true);
     midi_tx_spinlock_ready = true;
     midi_tx_head = 0;
-    midi_tx_tail = 0;
+    midi_tx_reset_locked();
     midi_tx_dropped_bytes = 0;
-    midi_tx_message_left = 0;
-    midi_tx_last_status = 0;
-    midi_tx_ran_empty = true;
 
     uart_init(MIDI_UART, MIDI_BAUD);
     gpio_set_function(MIDI_TX_PIN, GPIO_FUNC_UART);
@@ -114,7 +159,8 @@ void midi_init(void) {
 
     // MIDI is 8N1
     uart_set_format(MIDI_UART, 8, 1, UART_PARITY_NONE);
-    uart_set_fifo_enabled(MIDI_UART, true);
+    // One byte at a time: a Clock waits at most for the rest of one message.
+    uart_set_fifo_enabled(MIDI_UART, false);
 
     irq_set_exclusive_handler(UART0_IRQ, midi_uart_irq_handler);
     irq_set_enabled(UART0_IRQ, true);
@@ -130,23 +176,45 @@ void midi_init(void) {
 void midi_send_bytes(const uint8_t *data, uint16_t length) {
 #ifndef MOCK_HARDWARE
     uint32_t lock_state = midi_tx_lock();
-    // Move bytes into a UART FIFO that has room before its TX IRQ runs.
-    midi_tx_drain_locked();
-    uint16_t free_bytes = (midi_tx_tail - midi_tx_head - 1u) & (MIDI_TX_QUEUE_SIZE - 1u);
-    if (length > free_bytes) {
+    if (!midi_tx_enqueue_locked(data, length, 0)) {
         midi_tx_dropped_bytes += length;
         midi_overflow = true;
-    } else {
-        // Publish complete messages/batches, never a partial MIDI packet.
-        for (uint16_t i = 0; i < length; i++) {
-            midi_tx_queue[midi_tx_head] = data[i];
-            midi_tx_head = midi_tx_next(midi_tx_head);
-        }
     }
-    midi_tx_drain_locked();
     midi_tx_unlock(lock_state);
 #else
     for (uint16_t i = 0; i < length; i++) uart_putc_raw(MIDI_UART, data[i]);
+#endif
+}
+
+bool midi_try_send_bytes_reserve(const uint8_t *data, uint16_t length, uint16_t reserve) {
+#ifndef MOCK_HARDWARE
+    uint32_t lock_state = midi_tx_lock();
+    bool queued = midi_tx_enqueue_locked(data, length, reserve);
+    midi_tx_unlock(lock_state);
+    return queued;
+#else
+    (void)reserve;
+    for (uint16_t i = 0; i < length; i++) uart_putc_raw(MIDI_UART, data[i]);
+    return true;
+#endif
+}
+
+static void midi_send_realtime(uint8_t byte, bool cancel_clock) {
+#ifndef MOCK_HARDWARE
+    uint32_t lock_state = midi_tx_lock();
+    if (midi_rt_count < MIDI_RT_QUEUE_SIZE) {
+        midi_rt_queue[(midi_rt_head + midi_rt_count) % MIDI_RT_QUEUE_SIZE] = byte;
+        midi_rt_count++;
+    } else {
+        midi_tx_dropped_bytes++;
+        midi_overflow = true;
+    }
+    if (cancel_clock) midi_clock_pending = false;
+    midi_tx_drain_locked();
+    midi_tx_unlock(lock_state);
+#else
+    (void)cancel_clock;
+    uart_putc_raw(MIDI_UART, byte);
 #endif
 }
 
@@ -175,10 +243,7 @@ void midi_clear_output_queue(void) {
     midi_buf_len = 0;
 #ifndef MOCK_HARDWARE
     uint32_t lock_state = midi_tx_lock();
-    midi_tx_tail = midi_tx_head;
-    midi_tx_message_left = 0;
-    midi_tx_last_status = 0;
-    midi_tx_ran_empty = true;
+    midi_tx_reset_locked();
     midi_overflow = false;
     uart_set_irq_enables(MIDI_UART, false, false);
     midi_tx_unlock(lock_state);
@@ -204,7 +269,7 @@ void midi_wait_output_idle(void) {
     do {
         uint32_t lock_state = midi_tx_lock();
         midi_tx_drain_locked();
-        pending = midi_tx_tail != midi_tx_head;
+        pending = midi_tx_pending_locked();
         midi_tx_unlock(lock_state);
     } while (pending);
     uart_tx_wait_blocking(MIDI_UART);
@@ -237,23 +302,27 @@ void midi_send_cc(uint8_t channel, uint8_t cc, uint8_t value) {
 }
 
 void midi_send_clock(void) {
-    const uint8_t message = MIDI_CLOCK;
-    midi_send_bytes(&message, 1);
+#ifndef MOCK_HARDWARE
+    uint32_t lock_state = midi_tx_lock();
+    midi_clock_pending = true;
+    midi_tx_drain_locked();
+    midi_tx_unlock(lock_state);
+#else
+    uart_putc_raw(MIDI_UART, MIDI_CLOCK);
+#endif
 }
 
 void midi_send_start(void) {
-    const uint8_t message = MIDI_START;
-    midi_send_bytes(&message, 1);
+    midi_send_realtime(MIDI_START, false);
 }
 
+// No Clock leaves after a Stop: it is cancelled in the same lock section.
 void midi_send_stop(void) {
-    const uint8_t message = MIDI_STOP;
-    midi_send_bytes(&message, 1);
+    midi_send_realtime(MIDI_STOP, true);
 }
 
 void midi_send_continue(void) {
-    const uint8_t message = MIDI_CONTINUE;
-    midi_send_bytes(&message, 1);
+    midi_send_realtime(MIDI_CONTINUE, false);
 }
 
 void midi_send_all_notes_off(void) {

@@ -303,9 +303,15 @@ void midi_init(void);
 // Whole channel messages, each with its status byte (the drain applies running
 // status). Sets the overflow flag when they do not fit in the TX queue.
 void midi_send_bytes(const uint8_t *data, uint16_t length);
+// Queues them only if `reserve` bytes stay free afterwards; otherwise returns false
+// and leaves the overflow flag alone.
+bool midi_try_send_bytes_reserve(const uint8_t *data, uint16_t length, uint16_t reserve);
 void midi_send_note_on(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_note_off(uint8_t channel, uint8_t note);
 void midi_send_cc(uint8_t channel, uint8_t cc, uint8_t value);
+// Clock sets a pending flag (no queue byte); Start, Continue and Stop wait in a
+// small queue of their own. Both go out at the next message boundary, ahead of
+// queued note messages; Stop also cancels a pending Clock.
 void midi_send_clock(void);
 void midi_send_start(void);
 void midi_send_stop(void);
