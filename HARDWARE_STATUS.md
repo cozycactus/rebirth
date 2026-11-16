@@ -2,12 +2,29 @@
 
 Last updated: 2026-11-16
 
+## Migrating An Existing Build
+
+The Session panel changes two things an existing board must provide even
+without the new grid:
+
+- **PLAY on GPIO 28.** PLAY is now the only start/stop; the encoder presses no
+  longer start or stop the transport. Wire a momentary switch from GPIO 28 to
+  GND (the internal pull-up is enabled, 20 ms firmware debounce).
+- **External I2C pull-ups.** The RP2040's internal pull-ups on SDA (GPIO 8) and
+  SCL (GPIO 9) are now disabled. Fit 2.2-4.7 kOhm pull-ups from each line to
+  3.3 V, or the step buttons and step LEDs stop working.
+
+Without the TCA8418 the panel keys simply report nothing (recovery is retried
+every 100 ms); without the LED chain GPIO 27 drives nothing.
+
 ## Verified In This Repo
 
 - Host unit tests build and pass.
 - RP2040 firmware target builds with Pico SDK 2.2.0.
 - DIN MIDI UART output code is compiled into the firmware target.
-- CV/Gate, OLED, encoder, MCP23017, step LED, flash storage, and UI modules compile into the firmware target.
+- CV/Gate, OLED, encoder, MCP23017, step LED, flash storage, and UI modules compile into the firmware target,
+  as do the Session view (`session.c`), the LED frame builder (`led_frame.c`), the RGB LED chain
+  (`rgb_leds.c`, PIO and DMA), the TCA8418 driver (`tca8418.c`) and the panel input (`panel_input.c`).
 - GPIO 7 jitter probe and ISR jitter stats compile into the firmware target.
 - USB MIDI scaffolding has been removed by design.
 - DIN MIDI output uses a UART TX interrupt queue instead of blocking serial writes in the sequencer timer ISR.
@@ -18,9 +35,13 @@ Last updated: 2026-11-16
 - UI tests cover Panic releases, selection/edit focus, mute/config presses and
   stopped-only storage. All six OLED views render with the production framebuffer.
 - Storage tests cover CRC32, validated version-4 imports, and interrupted writes.
-- Expander tests cover failed MCP23017 reads (state kept), failed step LED
-  writes (retried) and internal pulls off on GPIO 8/9; storage tests cover
-  panel input resync after save and load.
+- Expander tests cover failed MCP23017 reads (state kept, chip reconfigured),
+  failed step LED writes (direction and mask rewritten), chip resets found by
+  config readback, retries limited to one per 100 ms on a dead bus, step
+  button and encoder resync after a flash stall, and internal pulls off on
+  GPIO 8/9. Panel input tests cover the same for the TCA8418, plus overflow
+  and incomplete reads, and keys or PLAY held through a resync. Storage tests
+  cover the input resync after save and load.
 - DAC command tests cover the 2.048 V reference, both gains and octave scaling.
 
 ## Needs Bench Verification
@@ -48,6 +69,11 @@ Last updated: 2026-11-16
 - CV/Gate noise with the LEDs animating.
 - GPIO 7 jitter and wire-level MIDI Clock unchanged while scenes launch, the
   LEDs animate, the TCA8418 is polled and the OLED refreshes.
+- SK6812MINI-E colour order (GRB as sent) and the chain order table in
+  `rgb_leds.c` against the board wiring.
+- A pad, a step button and PLAY held through a flash save/load, and through a
+  panic, do nothing once released.
+- PLAY debounce (20 ms) on the real switch: one press, one start or stop.
 
 ## Not Implemented Yet
 

@@ -58,10 +58,17 @@ Use a logic analyzer or oscilloscope:
   apart at 120 BPM. GPIO 7 measures the 96 PPQN timer, not wire-level MIDI jitter.
 - DIN messages share a serial link at 320 us per byte. Note bursts and the UART
   FIFO can delay Clock bytes; gate alignment does not prove MIDI alignment.
-- Session panel load case: repeat the measurement while scenes launch every bar,
-  the 82 LEDs animate, the TCA8418 is polled and the OLED refreshes. GPIO 7 jitter
-  and wire-level MIDI Clock must match the idle capture; Core 1 never touches
-  I2C or the LEDs, so any change points to shared-bus or lock contention.
+- Session panel load case: in pattern select, press step button 13 to reset the
+  counters, then return to the Session view (encoder 2 long press) and run the
+  load there: scenes launching every bar, the 82 LEDs animating, the TCA8418
+  polled and the OLED refreshing. Open pattern select again (encoder 2 long
+  press in the Session view) and read `J`, `P` and `I`. GPIO 7 jitter, the
+  ISR duration (`I`, and the GPIO 7 pulse width) and wire-level MIDI Clock
+  must match the idle capture. Core 1 never touches I2C or the LEDs, so a
+  change points to lock contention (launches, the per-frame transport
+  snapshot), bus contention (the LED DMA), or XIP-cache contention: only the
+  timer handler itself runs from RAM, and the functions it calls share the
+  flash cache with Core 0 code running from flash.
 - Exercise mutes, live edits, different loop lengths, Song transitions,
   tempo changes, Stop and Panic. Check that gates stay low after Stop/Panic.
 - Save/load are rejected while running. After stopping, test save/load and restart

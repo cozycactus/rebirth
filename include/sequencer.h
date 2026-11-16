@@ -230,8 +230,9 @@ bool song_move(uint16_t from, uint16_t to);
 void song_clear(void);
 void song_set_end_mode(song_end_mode_t mode);
 
-// Core 0: queue at track loop end, or select immediately while stopped.
-// Returns false for invalid locations or Song mode.
+// Core 0: queue for the configured launch quantization (default 1 BAR; see
+// launch_quant_t), or select immediately while stopped. Returns false for
+// invalid locations or Song mode.
 bool transport_queue_pattern(uint8_t pattern_index);
 bool transport_queue_track_pattern(uint8_t track, uint8_t pattern_index);
 void transport_clear_queue(void);
