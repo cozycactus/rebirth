@@ -3,6 +3,7 @@
 #include "fakes/fake_hardware.h"
 #include "hardware/flash.h"
 #include "../src/ui.c"
+#include "../src/sequencer.c"
 #include "rgb_leds.h"
 
 sequencer_state_t g_seq;
@@ -11,6 +12,8 @@ static int8_t deltas[2];
 static bool held[2];
 static step_buttons_t step_buttons;
 static uint16_t led_mask;
+static rgb_t shown[LED_COUNT];      // last frame sent to the RGB chain
+static unsigned rgb_inits;
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%d: %s\n", __LINE__, #x); exit(1); } } while (0)
 
@@ -30,8 +33,24 @@ void step_leds_init(void) {}
 bool step_leds_available(void) { return true; }
 void step_leds_set_mask(uint16_t mask) { led_mask = mask; }
 void step_leds_clear(void) { led_mask = 0; }
-void rgb_leds_init(void) {}
-bool rgb_leds_show(const rgb_t frame[LED_COUNT]) { (void)frame; return true; }
+void rgb_leds_init(void) { rgb_inits++; }
+bool rgb_leds_show(const rgb_t frame[LED_COUNT]) {
+    memcpy(shown, frame, sizeof(shown));
+    return true;
+}
+
+static void tick(void) {
+    timer_hw->timerawl = timer_hw->alarm[0];
+    sequencer_timer_isr();
+}
+
+static void pulses(unsigned count) {
+    while (count--) tick();
+}
+
+static bool rgb_is(rgb_t c, uint8_t r, uint8_t g, uint8_t b) {
+    return c.r == r && c.g == g && c.b == b;
+}
 
 // Scripted panel input: push_panel() queues a press and its release.
 #define PANEL_QUEUE 32
@@ -73,6 +92,9 @@ static void reset(void) {
     memset(deltas, 0, sizeof(deltas));
     memset(held, 0, sizeof(held));
     panel_head = panel_tail = panel_resyncs = 0;
+    memset(shown, 0, sizeof(shown));
+    rgb_inits = 0;
+    timer_hw->alarm[0] = pulse_interval_us;
     ui_init();
 }
 
@@ -419,6 +441,112 @@ static void test_track_config_edit_reaches_all_locations(void) {
     }
 }
 
+static void test_session_lights_reach_the_chain(void) {
+    CHECK(rgb_inits == 1);
+    pattern_set_step(&g_seq.patterns[0], 0, 0, 60, 100, STEP_FLAG_ACTIVE);
+    sequencer_refresh_track_playback(0, 0);
+    transport_start();
+    tick();
+    ui_render();
+    CHECK(rgb_is(shown[LED_PAD(0, 0)], LED_LEVEL_FULL, 0, 0));
+    CHECK(rgb_is(shown[LED_PAD(1, 0)], LED_LEVEL_DIM, LED_LEVEL_DIM, LED_LEVEL_DIM));
+    CHECK(rgb_is(shown[LED_PAD(1, 1)], 0, 0, 0));
+    CHECK(shown[LED_PLAY].g > 0);
+    // The grid is global: other screens keep the lights going.
+    ui.mode = UI_PATTERN_VIEW;
+    memset(shown, 0, sizeof(shown));
+    ui_render();
+    CHECK(shown[LED_PLAY].g > 0);
+}
+
+static void test_stopped_lights_blink_on_a_120_bpm_clock(void) {
+    // Bank B shown while every track plays bank A: MUTE blinks on half notes,
+    // which while stopped means one second on, one second off.
+    press_encoder(0, BTN_LONG_PRESS);
+    CHECK(session_bank() == 1);
+    ui_render();
+    CHECK(shown[LED_MUTE(1)].r > 0);
+    sleep_ms(1000);
+    ui_render();
+    CHECK(rgb_is(shown[LED_MUTE(1)], 0, 0, 0));
+    sleep_ms(1000);
+    ui_render();
+    CHECK(shown[LED_MUTE(1)].r > 0);
+}
+
+static void test_session_step_leds_show_focus_steps(void) {
+    pattern_set_step(&g_seq.patterns[3], 2, 0, 60, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[3], 2, 4, 60, 100, STEP_FLAG_ACTIVE);
+    sequencer_refresh_track_playback(2, 3);
+    push_panel(PANEL_PAD, 2, 3);
+    ui_update();
+    CHECK(led_mask == 0x0011);
+    // Steps beyond the cell's length stay dark.
+    pattern_set_track_length(&g_seq.patterns[3], 2, 4);
+    sequencer_refresh_track_playback(2, 3);
+    ui_update();
+    CHECK(led_mask == 0x0001);
+}
+
+static void test_session_step_leds_blink_playhead(void) {
+    // The focus (track 0, location 0) plays with length 3, so its step 2 comes
+    // round at global step 2 (8th-note phase off) and again at 5 (phase on).
+    pattern_set_step(&g_seq.patterns[0], 0, 0, 60, 100, STEP_FLAG_ACTIVE);
+    pattern_set_track_length(&g_seq.patterns[0], 0, 3);
+    sequencer_refresh_track_playback(0, 0);
+    transport_start();
+    pulses(2 * PULSES_PER_STEP + 1);
+    CHECK(g_seq.transport.current_track_step[0] == 2);
+    CHECK((g_seq.transport.pulse_count / (PPQN / 2)) % 2 == 1);
+    ui_update();
+    uint16_t phase_off = led_mask;
+    pulses(3 * PULSES_PER_STEP);
+    CHECK(g_seq.transport.current_track_step[0] == 2);
+    CHECK((g_seq.transport.pulse_count / (PPQN / 2)) % 2 == 0);
+    ui_update();
+    uint16_t phase_on = led_mask;
+    CHECK(phase_off == 0x0001);
+    CHECK((phase_off ^ phase_on) == (1u << 2));
+    // A focused cell that is not playing on its track shows no playhead.
+    push_panel(PANEL_PAD, 1, 1);
+    ui_update();
+    CHECK(session_get_focus().track == 1 && session_get_focus().location == 1);
+    CHECK(led_mask == 0);
+}
+
+static bool oled_blank(void) {
+    const uint8_t *frame = ssd1309_get_framebuffer();
+    for (unsigned i = 0; i < OLED_BUF_SIZE; i++) {
+        if (frame[i]) return false;
+    }
+    return true;
+}
+
+static void test_session_oled_renders(void) {
+    uint8_t rendered[OLED_BUF_SIZE];
+    CHECK(ui.mode == UI_SESSION);
+    display_clear();
+    ui_render();
+    CHECK(!oled_blank());
+    // Stopped, every track on A1, focus T1 A1 of length 16: no bar step.
+    memcpy(rendered, ssd1309_get_framebuffer(), sizeof(rendered));
+    display_clear();
+    display_draw_session_view(0, 0, 0, 0, 16, DEFAULT_BPM, LAUNCH_QUANT_TRACK_LOOP, 0xFF);
+    CHECK(memcmp(rendered, ssd1309_get_framebuffer(), sizeof(rendered)) == 0);
+    // Track 1 moved to A2 (stopped: at once), then playing at global step 5.
+    panel(PANEL_PAD, 1, 1);
+    pattern_set_track_length(&g_seq.patterns[1], 1, 7);
+    sequencer_refresh_track_playback(1, 1);
+    transport_start();
+    pulses(5 * PULSES_PER_STEP + 1);
+    display_clear();
+    ui_render();
+    memcpy(rendered, ssd1309_get_framebuffer(), sizeof(rendered));
+    display_clear();
+    display_draw_session_view(0, 0xFF, 1, 1, 7, DEFAULT_BPM, LAUNCH_QUANT_TRACK_LOOP, 5);
+    CHECK(memcmp(rendered, ssd1309_get_framebuffer(), sizeof(rendered)) == 0);
+}
+
 static void render_views(const char *path) {
     uint8_t image[6][OLED_HEIGHT][OLED_WIDTH / 8];
     for (unsigned entry = 0; entry < MAX_SONG_ENTRIES; entry++) CHECK(song_append(0, 255));
@@ -480,6 +608,11 @@ int main(int argc, char **argv) {
     RUN(test_song_editor_lights_its_three_buttons);
     RUN(test_nonplaying_editor_hides_playhead);
     RUN(test_track_config_edit_reaches_all_locations);
+    RUN(test_session_lights_reach_the_chain);
+    RUN(test_stopped_lights_blink_on_a_120_bpm_clock);
+    RUN(test_session_step_leds_show_focus_steps);
+    RUN(test_session_step_leds_blink_playhead);
+    RUN(test_session_oled_renders);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS all six OLED views render");

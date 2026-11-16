@@ -10,6 +10,8 @@
 #include "step_leds.h"
 #include "session.h"
 #include "panel_input.h"
+#include "led_frame.h"
+#include "rgb_leds.h"
 
 // ─── Tempo LED ─────────────────────────────────────────────────
 #define TEMPO_LED_PIN   25
@@ -201,13 +203,6 @@ static void handle_tempo_led(void) {
 
 // ─── Session Handler ───────────────────────────────────────────
 
-static const char *const launch_quant_names[LAUNCH_QUANT_COUNT] = {
-    [LAUNCH_QUANT_TRACK_LOOP] = "TRACK LOOP",
-    [LAUNCH_QUANT_BAR]        = "1 BAR",
-    [LAUNCH_QUANT_BEAT]       = "1 BEAT",
-    [LAUNCH_QUANT_STEP]       = "NEXT STEP",
-};
-
 // Points the editing screens (selected_track, active_pattern) at the focus.
 static void target_focus(session_focus_t focus) {
     ui.selected_track = focus.track;
@@ -252,7 +247,7 @@ static void handle_session_view(int8_t e1d, int8_t e2d,
                                             LAUNCH_QUANT_COUNT);
         transport_set_launch_quant(q);
         char msg[17];
-        snprintf(msg, sizeof(msg), "QUANT %s", launch_quant_names[q]);
+        snprintf(msg, sizeof(msg), "QUANT %s", display_launch_quant_name(q));
         show_notify(msg);
     }
 
@@ -551,43 +546,28 @@ static uint16_t build_step_activity_mask(const pattern_t *pat, uint8_t track) {
     return mask;
 }
 
-// Interim Session step LEDs (replaced by the session lights in Task 9):
-// buttons 1-8 show mutes with the focused track blinking, buttons 9-16 the
-// focused track's slots in the shown bank.
-static uint16_t build_performance_mask(void) {
-    uint16_t mask = 0;
-    uint8_t mutes = seq_get_track_mutes();
-    uint8_t focus_track = session_get_focus().track;
-    uint8_t bank = session_bank();
-    uint8_t current_pattern;
-    uint8_t queued_pattern;
+// On for the first 8th note of every quarter, like the panel's fast blink.
+static bool eighth_blink_on(uint32_t pulse) {
+    return (pulse / (PPQN / 2)) % 2 == 0;
+}
 
-    uint32_t lock_state = seq_lock();
-    current_pattern = g_seq.transport.current_pattern[focus_track];
-    queued_pattern = g_seq.transport.queued_pattern[focus_track];
-    seq_unlock(lock_state);
+// Session step LEDs: the focused cell's active steps within its length. While
+// the cell is the playing location of its track, its playhead blinks on 8th
+// notes of the transport. Takes the locks itself: call with none held.
+static uint16_t build_session_mask(void) {
+    session_focus_t focus = session_get_focus();
+    const pattern_t *pat = &g_seq.patterns[focus.location];
+    uint16_t mask = build_step_activity_mask(pat, focus.track);
 
-    // Buttons 1-8 show tracks; lit means audible, focused track blinks.
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        bool lit = (mutes & (1u << track)) == 0;
-        if (track == focus_track && ui.led_anim_phase) {
-            lit = !lit;
-        }
-        if (lit) {
-            mask |= (uint16_t)(1u << track);
-        }
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    uint8_t playhead = snap.track_step[focus.track];
+    if (snap.state == TRANSPORT_PLAYING &&
+        snap.current[focus.track] == focus.location &&
+        playhead < clamp_pattern_length(pattern_get_track_length(pat, focus.track)) &&
+        eighth_blink_on(snap.pulse_count)) {
+        mask ^= (uint16_t)(1u << playhead);
     }
-
-    // Buttons 9-16 show slots in the shown bank.
-    if (pattern_bank(current_pattern) == bank) {
-        mask |= (uint16_t)(1u << (NUM_TRACKS + pattern_slot(current_pattern)));
-    }
-    if (queued_pattern != NO_QUEUED_PATTERN &&
-        pattern_bank(queued_pattern) == bank &&
-        ui.led_anim_phase) {
-        mask ^= (uint16_t)(1u << (NUM_TRACKS + pattern_slot(queued_pattern)));
-    }
-
     return mask;
 }
 
@@ -622,7 +602,7 @@ static void update_step_leds(void) {
 
     switch (ui.mode) {
         case UI_SESSION:
-            mask = build_performance_mask();
+            mask = build_session_mask();
             break;
 
         case UI_PATTERN_VIEW: {
@@ -890,16 +870,58 @@ static void render_notify(void) {
     ui.notify_ticks--;
 }
 
+// ─── Panel lights (RGB chain) ──────────────────────────────────
+
+// Builds the 82-LED frame from the frame's transport snapshot and starts
+// sending it; a frame the chain is still busy with is skipped. Called with no
+// lock held: sequencer_clip_mask takes seq_lock itself.
+static void update_panel_lights(const transport_snapshot_t *snap) {
+    led_state_t state;
+    state.bank = session_bank();
+    state.clip_mask = sequencer_clip_mask(state.bank);
+    memcpy(state.current, snap->current, sizeof(state.current));
+    memcpy(state.queued, snap->queued, sizeof(state.queued));
+    state.muted = snap->live_mutes | snap->stored_mutes;
+    state.focus_track = session_get_focus().track;
+    state.playing = snap->state == TRANSPORT_PLAYING;
+    if (state.playing) {
+        state.pulse = snap->pulse_count;
+    } else {
+        // Blinks keep a 120 BPM clock while stopped.
+        uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+        state.pulse = (uint32_t)(((uint64_t)now_ms * 2 * PPQN) / 1000);
+    }
+
+    rgb_t frame[LED_COUNT];
+    led_frame_build(&state, frame);
+    led_frame_apply_budget(frame, LED_RGB_BUDGET_MA);
+    rgb_leds_show(frame);
+}
+
+static void render_session_view(const transport_snapshot_t *snap) {
+    session_focus_t focus = session_get_focus();
+    uint8_t length = clamp_pattern_length(
+        pattern_get_track_length(&g_seq.patterns[focus.location], focus.track));
+    uint8_t bar_step = snap->state == TRANSPORT_PLAYING
+        ? (uint8_t)((snap->pulse_count / PULSES_PER_STEP) % STEPS_PER_PATTERN)
+        : STEPS_PER_PATTERN;    // none
+    display_draw_session_view(session_bank(), session_common_row(),
+                              focus.track, focus.location, length,
+                              g_seq.transport.bpm, transport_get_launch_quant(),
+                              bar_step);
+}
+
 // ─── UI Render (dispatches to display functions) ───────────────
 
 void ui_render(void) {
+    // One copy of the transport per frame, taken with no lock held.
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    update_panel_lights(&snap);
+
     switch (ui.mode) {
         case UI_SESSION:
-            // Interim: the performance screen on the focused track.
-            display_draw_performance_view(
-                session_get_focus().track,
-                session_bank(),
-                seq_get_track_mutes());
+            render_session_view(&snap);
             break;
 
         case UI_PATTERN_VIEW:
@@ -949,6 +971,7 @@ void ui_init(void) {
     mcp23017_init();
     panel_input_init();     // TCA8418 shares I2C0, set up by mcp23017_init
     step_leds_init();
+    rgb_leds_init();        // Sends an all-off frame
 
     // Tempo LED
     gpio_init(TEMPO_LED_PIN);

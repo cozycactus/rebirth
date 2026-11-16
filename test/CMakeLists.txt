@@ -78,7 +78,6 @@ add_test(NAME storage_tests COMMAND test_storage)
 add_executable(test_ui
     test_ui.c
     fakes/fake_hardware.c
-    ${REBIRTH_SRC}/sequencer.c
     ${REBIRTH_SRC}/pattern.c
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/shared_state.c

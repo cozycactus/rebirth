@@ -298,8 +298,12 @@ void cv_gate_all_off(void);
 void display_init(void);
 void display_clear(void);
 void display_update(void);
-void display_draw_performance_view(uint8_t selected_track, uint8_t bank,
-                                   uint8_t mutes);
+// common_row: session_common_row(), 0xFF = MIXED. bar_step: global step in the
+// bar (0-15); 16 or more lights none (stopped).
+void display_draw_session_view(uint8_t bank, uint8_t common_row,
+                               uint8_t focus_track, uint8_t focus_location, uint8_t focus_length,
+                               float bpm, launch_quant_t quant, uint8_t bar_step);
+const char *display_launch_quant_name(launch_quant_t quant);
 void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step);
 void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step);
 void display_draw_pattern_select(uint8_t pattern,
