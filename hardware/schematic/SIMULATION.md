@@ -1,8 +1,9 @@
 # SPICE simulation of the analog parts
 
 Benches for the CV outputs, gate outputs, encoder RC filters, MIDI OUT/IN and the
-+5V_LED inrush of the schematic in this folder (generator `gen/build.py`). The values
-in the benches are the schematic's. ngspice 46, 2026-11-16.
++5V_LED inrush of the schematic in this folder (generator `gen/build.py`), as it stands
+after the multi-model review (MIDI OUT open collector, C984 470 uF, the added pull-downs).
+The values in the benches are the schematic's. ngspice 46, 2026-11-16.
 
 ```bash
 python3 hardware/schematic/sim/run.py            # every bench, under a minute
@@ -25,11 +26,11 @@ and decoupling (last section).
 | --- | --- | --- |
 | CV buffer, C51x **1 nF** (changed) | OK | DC error = MCP6004 offset only; PM >= 94 deg for any cable C (Microchip model; >= 73 deg with the pessimistic generic one); overshoot 6 % into 1 nF, 28 % into 10 nF; short 4.8 mA |
 | CV buffer, C51x 100 pF (as drawn before) | stable, badly damped | 31-38 % overshoot and +3.4-4.4 dB peaking into 1 nF, 64-68 % / +10-12 dB into 10 nF |
-| Gate outputs | OK | high 4.95 V (100 k) / 4.53 V (10 k), 4.07 V worst; rise 2.1-2.3 us into 1 nF, 21-23 us into 10 nF |
+| Gate outputs | OK | high 4.90 V (100 k) / 4.49 V (10 k), 4.03 V worst; rise 2.1-2.2 us into 1 nF, 21-22 us into 10 nF |
 | Encoder RC filters | OK | GPIO follows the contact in <= 0.2 ms; spikes shorter than 30 us (worst-case thresholds) to 100 us (mid) rejected; fast turn with bounce decodes 24 of 24 |
-| MIDI OUT | OK | loop current 6.5 mA (4.5 mA worst) into a MIDI 1.0 receiver; edges 50 ns over 15 m |
-| MIDI IN (H11L1) | OK | 1.7-4.7x the H11L1 turn-on current for 5 V, CA-033 and old 3.3 V senders; bit width error <= 1.2 % |
-| +5V_LED inrush (U201) | OK | charged in 1.7-3.0 ms at the current limit, below the 5 ms minimum FAULT deglitch |
+| MIDI OUT (open collector) | OK, meets CA-033 | loop current 6.7 mA, 4.3 mA at CA-033's worst corner (spec: 4.47 mA); RA short 109 mA / 0.375 W; bit width error <= 1.2 % |
+| MIDI IN (H11L1) | OK, meets CA-033 | 1.7-4.8x the H11L1 turn-on current for 5 V, CA-033 and old 3.3 V senders; bit width error <= 3.2 % |
+| +5V_LED inrush (U201) | OK, TP201 pulses at power-up | charged in 6.8-12.7 ms at the current limit (C984 470 uF): longer than the 5 ms minimum FAULT deglitch, so TP201 goes low briefly at power-up |
 
 **One design change:** C511-C514 100 pF -> **1 nF C0G** (`gen/build.py`, `cv_stage`).
 With R511 1 k inside the loop and the feedback taken from the jack through R521 10 k,
@@ -78,16 +79,17 @@ The generic models are in `sim/models.lib` with the datasheet numbers next to th
   more pessimistic than Microchip's (PM 74 deg vs 91 deg at G = +1). kicad-happy's
   generated `OPAMP_MCP6004` (single pole, ideal output) gives the same CV peaking within
   0.3 dB as well.
-- **74AHCT125, 74LVC1G17 (`CMOSBUF`)**: threshold, 2-3 ns edge, output resistance from
-  the VOH/VOL limits (AHCT at 4.5 V: <= 70 R / 45 R; LVC1G17 at 3 V: <= 23 R sinking).
-- **Opto LEDs**: diodes fitted to VF = 1.4 V typ / 1.7 V max at 1.6 mA (6N138) and
-  1.2 V typ / 1.5 V max at 10 mA (H11L1). **H11L1 output**: LED current -> 0.2 us
+- **74AHCT125 (`CMOSBUF`), 74LVC1G14 (`CMOSINV`)**: threshold, 2-3 ns edge, output
+  resistance from the VOH/VOL limits (AHCT at 4.5 V: <= 70 R / 45 R; LVC at 3 V: <= 23 R
+  sinking). **MMBT3904**: the classic 2N3904 model (same die).
+- **Opto LEDs**: diodes fitted to VF = 1.4 V typ / 1.7 V max at 1.6 mA (6N138),
+  1.2 V typ / 1.5 V max at 10 mA (H11L1), and CA-033's worst receiver, 1.9 V. **H11L1 output**: LED current -> 0.2 us
   detector low-pass -> delay (1.2 us typ, 4 us max) -> Schmitt at IF(on) 1.2 mA typ /
   1.6 mA max with IF(off)/IF(on) 0.75 typ / 0.5 worst -> open collector.
 - **MIDI cable**: 15 m as three 5 m LC sections (0.5 uH/m loop, 80 pF/m, 0.17 R/m), no
   loss beyond DC resistance, so it rings more than a real cable.
 - **TPS2553**: behavioural: soft-start ramp (tr 1.1 ms typ), then constant current at
-  IOS = 234 / 267 / 303 mA (R201 = 100 k, datasheet equations), rDS(on) 85 mR.
+  IOS = 232 / 267 / 306 mA (R201 = 100 k 1 %, datasheet equations), rDS(on) 85 mR.
 - **RP2040 inputs**: VIH 2.0 V, VIL 0.8 V, Schmitt hysteresis >= 0.2 V, pull-up 50-80 k
   (RP2040 datasheet, "Pin specifications"). The real thresholds lie anywhere inside these
   limits, so the encoder bench checks the extremes.
@@ -99,6 +101,7 @@ Vbus  vbus 0 5                        ; also 4.5 V
 Vdac  dac 0 ...                       ; MCP4822 output, ideal, slew 0.55 V/us for large steps
 Xu503 dac fb vbus 0 amp MCP6001       ; U503A-D, Microchip model (cvv)
 *     dac fb amp vbus 0 MCP6004G      ; generic model (cv)
+R515  dac 0 100k                      ; input pull-down (no effect on an ideal DAC source)
 R511  amp jack 1k
 R521  fb jack 10k
 C511  fb amp 1n                       ; 100p before the change
@@ -192,14 +195,15 @@ Vgpio gpio 0 PWL(0 -> 3.3 V, 2 ns edges, 200 us high)
 R531  gpio 0 100k
 Xu504 gpio buf vbus 0 CMOSBUF VTH=1.5 TE=3n ROUT=40 | 70   ; 74AHCT125 on VBUS
 R541  buf jack 1k
+R551  jack 0 100k
 Rload jack 0 100k | 10k ; Ccable jack 0 0 | 1n | 10n
 ```
 
 | VBUS | Load | Cable | Gate high | Rise 10-90 % | Up to 2.5 V | Down to 1 V |
 | --- | --- | --- | --- | --- | --- | --- |
-| 5.0 V | 100 k | 0 / 1 nF / 10 nF | 4.95 V | ns / 2.3 us / 22.6 us | ns / 0.7 us / 7.3 us | ns / 1.7 us / 16.5 us |
-| 5.0 V | 10 k | 0 / 1 nF / 10 nF | 4.53 V | ns / 2.1 us / 20.7 us | ns / 0.8 us / 7.6 us | ns / 1.4 us / 14.2 us |
-| 4.5 V, ROUT 70 R | 10 k | 0 / 10 nF | 4.07 V | ns / 21.3 us | ns / 9.2 us | ns / 13.6 us |
+| 5.0 V | 100 k | 0 / 1 nF / 10 nF | 4.90 V | ns / 2.2 us / 22.4 us | ns / 0.7 us / 7.3 us | ns / 1.6 us / 16.2 us |
+| 5.0 V | 10 k | 0 / 1 nF / 10 nF | 4.49 V | ns / 2.1 us / 20.5 us | ns / 0.8 us / 7.6 us | ns / 1.4 us / 14.0 us |
+| 4.5 V, ROUT 70 R | 10 k | 0 / 10 nF | 4.03 V | ns / 21.1 us | ns / 9.3 us | ns / 13.4 us |
 
 Shorted jack: 4.8 mA. Gate inputs switch at 1-3 V; triggers are >= 1 ms. OK.
 
@@ -240,23 +244,38 @@ simulated vs 1.592 kHz calculated, tau 100 us.
 
 ## 4. MIDI (sheet `midi`)
 
-**MIDI OUT** into a receiver drawn as in the MIDI 1.0 specification (220 R, opto LED,
-1N4148 across it), UART byte 0x55 (alternating bits) at 31 250 baud:
+**MIDI OUT** (open collector, as drawn after the review) into a receiver drawn as in
+CA-033 Figure 2 (220 R, opto LED, 1N4148 across it), UART byte 0x55 (alternating bits)
+at 31 250 baud:
 
 ```
-Xu401 tx txb v33 0 CMOSBUF VTH=1.65 TE=2n ROUT=12 | 25   ; 74LVC1G17
-R402 txb o5 10 ; Xfb401 o5 p5 FB1K       ; pin 5
-R403 v33 o4 33 ; Xfb402 o4 p4 FB1K       ; pin 4
-cable 15 m ; Rd r4 la 220 ; Dled la r5 LED6N138 ; Dprot r5 la D1N4148
+R401  tx v33 10k
+Xu401 tx txn v33 0 CMOSINV VTH=1.65 TE=2n ROUT=20   ; 74LVC1G14
+R406  txn base 470 ; R407 base 0 10k
+Q401  sink base 0 Q2N3904                          ; MMBT3904
+R402  sink o5 10 ; Xfb401 o5 p5 FB1K               ; pin 5 (RC)
+R403  v33 o4 33  ; Xfb402 o4 p4 FB1K               ; pin 4 (RA)
+cable 15 m ; Rd r4 la 220 ; Dled la r5 LED... ; Dprot r5 la D1N4148
 ```
 
-| Case | LED current on | Peak | Rise / fall 10-90 % | Bit width error | LED reverse |
+| Case | LED current on | Peak | Rise / fall 10-90 % | Delay on / off | Bit width error |
 | --- | --- | --- | --- | --- | --- |
-| 3.3 V, VF typ, 15 m | 6.54 mA | 9.1 mA | 50 / 44 ns | 23 ns | -0.57 V |
-| 3.3 V, VF typ, no cable | 6.60 mA | 6.6 mA | 12 / 8 ns | 1 ns | -0.27 V |
-| 3.135 V, VF max, resistors +5 %, ROL 25 R, 15 m | 4.53 mA | 6.2 mA | 57 / 41 ns | 24 ns | -0.50 V |
+| 3.3 V, 6N138 VF typ, 15 m | 6.67 mA | 9.9 mA | 49 / 505 ns | 0.14 / 0.41 us | 0.27 us (0.9 %) |
+| 3.3 V, 6N138 VF typ, no cable | 6.73 mA | 6.8 mA | 14 / 16 ns | 0.01 / 0.27 us | 0.26 us (0.8 %) |
+| 3.135 V, R +5 %, 6N138 VF max 1.7 V, 15 m | 4.79 mA | 7.8 mA | 54 / 619 ns | 0.13 / 0.53 us | 0.40 us (1.2 %) |
+| CA-033 worst: 3.135 V, R +5 %, VF 1.9 V, 15 m | 4.27 mA | 7.3 mA | 54 / 628 ns | 0.13 / 0.53 us | 0.40 us (1.2 %) |
 
-4.5 mA worst case is 2.8x the 1.6 mA that 6N138/H11L1-type receivers need. Off current 0.
+The turn-off delay is Q401's storage time (base overdriven: ~5 mA base for ~7 mA
+collector); the slower fall with a cable is the cable capacitance discharging through
+the receiver once the open collector lets go. No reverse voltage reaches the LED.
+
+**MIDI OUT faults** (DC, TX low so Q401 conducts; CA-033's corner: 3.465 V, resistors -5 %):
+
+| Fault | Current | Power |
+| --- | --- | --- |
+| pin 4 to GND | 109 mA in RA | RA 0.375 W (R403 is 0.5 W) |
+| pins 4 and 5 shorted | 79 mA | RA 0.195 W, RC 0.059 W (R402 0.25 W), Q401 15 mW at Vce 0.19 V |
+| pin 5 to GND | ~0 | nothing |
 
 **MIDI IN** (J402 - FB403 - R404 220 R - H11L1 - FB404, D401 across the LED,
 R405 1 k pull-up, 15 m cable from the sender):
@@ -264,35 +283,69 @@ R405 1 k pull-up, 15 m cable from the sender):
 | Sender | LED current | vs 1.6 mA | Delay fall / rise | Bit width error |
 | --- | --- | --- | --- | --- |
 | 5 V, 220 R / 220 R (MIDI 1.0) | 5.56 mA | 3.5x | 1.4 / 1.6 us | 0.6 % |
-| 3.3 V CA-033, 33 R / 10 R (this board's MIDI OUT) | 7.55 mA | 4.7x | 1.2 / 1.6 us | 1.2 % |
+| 3.3 V CA-033, this board's MIDI OUT | 7.72 mA | 4.8x | 1.2 / 2.2 us | 3.2 % |
 | 3.3 V with old 220 R / 220 R | 3.14 mA | 2.0x | 1.6 / 1.4 us | 0.4 % |
 | same, VF max, IF(on) 1.6 mA, ratio 0.5, 4 us delay | 2.77 mA | 1.7x | 4.6 / 4.2 us | 1.0 % |
 
-MIDI_RX low level 0.10 V (VIL 0.8 V). The lossless cable model rings at the first
-edge: the LED current dips to 0.3-0.5 mA for 100-200 ns. Without the 0.2 us detector
-bandwidth in the H11L1 model the output toggled three times on each edge; the real
-part (1 MHz class) and the UART's mid-bit sampling both ignore it, but this is a model
-assumption to look at on the bench with a long cable.
+MIDI_RX low level 0.10 V (VIL 0.8 V), edges at MIDI_RX 9 / 35 ns in the model (the
+H11L1 datasheet: 0.1 us typ). With this board's own MIDI OUT as the sender the slower
+release (Q401 storage plus the cable tail, reaching the H11L1's lower off threshold
+later) stretches the current-on bits by 1 us, 3.2 % of a bit: the UART samples
+mid-bit. The lossless cable model rings at the first edge: the LED current dips to
+0.3-0.5 mA for 100-200 ns. Without the 0.2 us detector bandwidth in the H11L1 model the
+output toggled three times on each edge; the real part (1 MHz class) and the UART's
+mid-bit sampling both ignore it, but this is a model assumption to look at on the bench
+with a long cable.
+
+### Against CA-033 (MIDI 1.0 Electrical Specification Update, 2014)
+
+| CA-033 says | This board | Status |
+| --- | --- | --- |
+| 31.25 kbaud +-1 %, 8-N-1, LSB first; logical 0 = current on | UART0 at 31 250 baud; TX low -> U401 high -> Q401 on -> current on | OK (baud and format are firmware) |
+| 3.3 V +-5 % transmitter: RA 33 R 5 % 0.5 W, RC 10 R 5 % 0.25 W | R403 33 R 0.5 W (1210), R402 10 R 0.25 W (1206) | OK |
+| Buffer before RC optional, "IC gate or transistor"; at 3.3 V assumed open collector/drain, and its short-circuit current must be safe | U401 + Q401 open collector; 79 mA with pins 4-5 shorted (MMBT3904 200 mA) | OK |
+| RA short to GND: 111 mA, 0.383 W at 3.465 V and -5 % resistors | 109 mA, 0.375 W (ferrite DC resistance in series) | OK |
+| Worst-case loop current 4.472 mA (3.135 V, +5 % resistors, VF 1.9 V, ideal buffer) | 4.27 mA (Q401 Vce(sat) and ferrites) | OK, 0.2 mA below the spec's own figure; PC900V needs 4 mA in its worst case |
+| Typical ~7.2 mA (3.3 V, VF 1.4 V) | 6.67-6.73 mA | OK |
+| Pin 2 to GND on the transmitter only; pins 1, 3 open | J401 pin 2 GND; J402 pin 2 open; pins 1/3 open on both | OK |
+| MIDI IN: no pin and no shield with a DC path to ground; optional 0.1 uF from pin 2 / shield | J402 pin 2 and shell open; the optional capacitor is not fitted | OK (option not used) |
+| MIDI OUT shield: N/C or ground | open | OK |
+| Optional ferrite beads 1 k at 100 MHz (MMZ1608Y102BT) close to the jacks | FB401-FB404 1k@100MHz | OK; place at the jacks on the PCB |
+| Receiver: opto, reverse diode (1N914), RB 220 R, RD by opto and VRX | H11L1, D401 1N4148W, R404 220 R, R405 1 k at 3.3 V | OK |
+| Receiver must need < 5 mA to turn on | H11L1 IF(on) <= 1.6 mA | OK |
+| Rise and fall times < 2 us | MIDI_RX 9 / 35 ns (model; datasheet 0.1 us); LED current at a receiver <= 0.63 us | OK |
+| One output drives one input; cable <= 15 m | one MIDI OUT; benches use 15 m | OK |
+| DIN-5 180 deg female jacks labelled MIDI OUT / MIDI IN | J401 / J402 DIN-5_180degree; labels on the panel | OK; footprint still missing (README) |
+| MIDI THRU optional | none | not required |
+
+Nothing on this board departs from CA-033. Two limits come from the specification
+itself: at its worst corner (4.3-4.5 mA) a receiver that really needs 5 mA would not be
+guaranteed, and receivers that take power from pin 4 or are not opto-isolated may not
+work with any 3.3 V sender (CA-033, "Low-Voltage Signaling Interoperability Issues").
 
 ## 5. +5V_LED inrush through U201 (sheets `power`, `rgb_chain`)
 
 ```
-Vusb usb 0 5 | 4.75 ; Rcab usb vbus 0.25 ; Cvbus vbus 0 11u      ; C201 + the Pico's
-Bu201 vbus led   ; soft-start ramp, then IOS 234 | 267 | 303 mA, 85 mR
-C202 10u ; C983 100n ; 82 x 100n (C901-C982) ; C984 100u (ESR 0.3 R)
+Vusb usb 0 5 | 4.75 ; Rcab usb vbus 0.25 ; Cvbus vbus 0 21u   ; C201 1u + C507 10u + the Pico's (~10u)
+Bu201 vbus led    ; soft-start ramp, then IOS 232 | 267 | 306 mA, 85 mR
+C202 10u ; C983 100n ; 82 x 100n (C901-C982) ; C984 470u (ESR 0.1 R)
 Bidle led 0 82 mA | 0 (82 x SK6812MINI-E idle, assumed 1 mA each)
 ```
 
 | IOS | Rail at 90 % after EN | Time in current limit | VBUS dip (0.25 R cable) | Switch energy / peak power |
 | --- | --- | --- | --- | --- |
-| 234 mA | 2.1-3.0 ms | 2.3-3.3 ms | 59 mV | 1.3-1.8 mJ / 1.1 W |
-| 267 mA | 1.9-2.5 ms | 2.0-2.8 ms | 67 mV | 1.3-1.7 mJ / 1.3 W |
-| 303 mA | 1.7-2.1 ms | 1.8-2.3 ms | 76 mV | 1.3-1.7 mJ / 1.5 W |
+| 232 mA | 9.0-12.7 ms | 9.8-14.0 ms | 58 mV | 5.3-7.4 mJ / 1.1 W |
+| 267 mA | 7.8-10.5 ms | 8.5-11.6 ms | 67 mV | 5.3-7.1 mJ / 1.3 W |
+| 306 mA | 6.8-8.8 ms | 7.4-9.7 ms | 77 mV | 5.3-6.9 mJ / 1.5 W |
 
-VBUS never supplies more than IOS to the chain. The longest stay in current limit,
-3.3 ms, is below the TPS2553's 5 ms minimum overcurrent deglitch, so LED_FAULT_N (TP201)
-does not flag a normal power-up; a chain that already draws much more than 82 mA when
-the rail comes up (the firmware lighting LEDs before U201 is on) would.
+VBUS never supplies more than IOS to the chain. With C984 at 470 uF the rail now spends
+7.4-14 ms in current limit at power-up: longer than the TPS2553's minimum overcurrent
+FAULT deglitch (5 ms) in every case, than the typical 8 ms in all but the fastest, and
+than the maximum 11 ms at the low limit with the chain's idle load. So LED_FAULT_N
+(TP201) goes low for a few milliseconds at (almost) every power-up. It is a test point only, so nothing reacts; read it on
+the bench as "charging", not as a fault. The 5-7 mJ the switch absorbs is far below what
+trips its thermal limit (an estimate, the model has no thermal part). With the earlier
+100 uF the rail was up in 2-3 ms, inside the deglitch.
 
 ## kicad-happy automatic pass
 
@@ -309,7 +362,8 @@ a generic soft-start without U201's current limit; the benches above replace bot
   into the real synth with a 1-2 m cable, MIDI IN with a long cable, and TP201 at
   power-up.
 - The MCP4822's own errors (offset, gain, INL, 10 mV floor) beyond the note above.
-- PCB parasitics, ground bounce from the LED chain into the CV ground, temperature.
+- PCB parasitics, ground bounce from the LED chain into the CV ground, temperature,
+  the TPS2553's junction temperature during the inrush.
 - The firmware's encoder poll interval: the benches show that the hardware needs no
   more than 0.25 ms polling for a very fast turn; the main loop's gaps while it
   redraws the OLED were not measured.
