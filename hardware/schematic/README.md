@@ -82,7 +82,11 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
    (EN threshold 0.66-1.1 V: it follows the regulator, not the firmware). The LED data
    buffer U901 runs from the same switched rail, so it never drives a data pin above an
    unpowered chain. R201 must stay >= 82 k (limit max 369 mA); if the bench raises the
-   firmware budget, recompute R201 from TPS2553 eq. 1-3.
+   firmware budget, recompute R201 from TPS2553 eq. 1-3. With C984 at 470 uF the rail
+   charges at the limit for 7-14 ms (SIMULATION.md), longer than U201's 3-11 ms FAULT
+   deglitch: TP201 goes low briefly at power-up; that is charging, not a fault. The
+   TPS2553 keeps limiting after the deglitch; a latch-off TPS2553-1 would switch the rail
+   off at power-up, so the BOM must say TPS2553DBV without -1.
 2. **CV buffers keep the 1 k output resistor inside the loop** (R52x feedback from the
    jack side, C51x 1 nF C0G closing the loop at HF): no DC error from the load, damped
    into cable capacitance (6 % overshoot at 1 nF, 28 % at 10 nF; with 100 pF it rang at
@@ -181,6 +185,7 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
   checked against the datasheets. A reported reversed SK6812 pinout was a documentation
   numbering difference, not a wiring error.
 - SPICE simulation of the CV outputs, gates, encoder filters, MIDI OUT/IN and the
-  +5V_LED inrush: `SIMULATION.md` (benches in `sim/`). It changed C511-C514 from 100 pF
-  to 1 nF.
+  +5V_LED inrush: `SIMULATION.md` (benches in `sim/`), run on the reviewed schematic.
+  It changed C511-C514 from 100 pF to 1 nF; MIDI OUT/IN meet CA-033 clause by clause;
+  the 470 uF LED rail needs the constant-current TPS2553, not the -1 (decision 1).
 - Not done: PCB, BOM with MPNs.

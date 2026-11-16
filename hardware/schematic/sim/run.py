@@ -206,7 +206,8 @@ CF_CASES = (C51X, C51X_BEFORE)
 
 # sheet cv_gate, build.py cv_stage(): U503 (MCP6004) unity buffer on VBUS, R51x 1 k
 # from the op-amp output to the jack, R52x 10 k from the jack back to the
-# inverting input, C51x from the op-amp output to the inverting input.
+# inverting input, C51x from the op-amp output to the inverting input, R515-R518
+# 100 k pull-down at the + input (the DAC is an ideal source here).
 def cv_stage(vbus, vos, ro, fp2, rl, cl, fb_pin="fb", cf=None, vendor=False):
     cf = C51X if cf is None else cf
     if vendor:  # Microchip subckt pins: +in -in V+ V- out
@@ -215,6 +216,7 @@ def cv_stage(vbus, vos, ro, fp2, rl, cl, fb_pin="fb", cf=None, vendor=False):
         amp = "Xu503 dac %s amp vbus 0 MCP6004G params: VOS=%g RO=%g FP2=%g" % (fb_pin, vos, ro, fp2)
     lines = [
         "Vbus vbus 0 %g" % vbus,
+        "R515 dac 0 100k",
         amp,
         "R511 amp jack 1k",
         "R521 fb jack 10k",
@@ -501,7 +503,8 @@ def bench_cv_vendor():
 
 # ------------------------------------------------------------------ 2. gate outputs
 
-# sheet cv_gate: GPIO -> U504 74AHCT125 on VBUS -> R54x 1 k -> jack; R53x 100 k pull-down at the input.
+# sheet cv_gate: GPIO -> U504 74AHCT125 on VBUS -> R54x 1 k -> jack; R53x 100 k pull-down at the
+# input, R55x 100 k pull-down at the jack.
 def bench_gate():
     res = []
     decks = []
@@ -516,6 +519,7 @@ def bench_gate():
             "R531 gpio 0 100k",
             "Xu504 gpio buf vbus 0 CMOSBUF params: VTH=1.5 TE=3n ROUT=%g" % rout,
             "R541 buf jack 1k",
+            "R551 jack 0 100k",
             "Rload jack 0 %g" % rl,
         ] + (["Ccable jack 0 %g" % cl] if cl else []))
         ctl = "tran 1n 405u 0 5n\nlet igate = (v(buf)-v(jack))/1k\nwrdata %s.dat v(jack) v(buf) igate" % n
@@ -708,13 +712,17 @@ def cable(n_sections, a4, a5, b4, b5):
     return "\n".join(lines)
 
 
-def midi_tx_ours(v33, rol, r403=33, r402=10):
-    """sheet midi: U401 74LVC1G17 on +3V3 -> R402 10R -> FB401 -> J401 pin 5; +3V3 -> R403 33R -> FB402 -> pin 4."""
+def midi_tx_ours(v33, r403=33, r402=10, rol=20):
+    """sheet midi: GPIO 0 (R401 10 k pull-up) -> U401 74LVC1G14 inverter -> R406 470 -> Q401 MMBT3904
+    base (R407 10 k to GND); collector -> R402 10R -> FB401 -> J401 pin 5; +3V3 -> R403 33R -> FB402 -> pin 4."""
     return "\n".join([
         "V33 v33 0 %g" % v33,
         "R401 tx v33 10k",
-        "Xu401 tx txb v33 0 CMOSBUF params: VTH=1.65 TE=2n ROUT=%g" % rol,
-        "R402 txb o5 %g" % r402,
+        "Xu401 tx txn v33 0 CMOSINV params: VTH=1.65 TE=2n ROUT=%g" % rol,
+        "R406 txn base 470",
+        "R407 base 0 10k",
+        "Q401 sink base 0 Q2N3904",
+        "R402 sink o5 %g" % r402,
         "Xfb401 o5 p5 FB1K",
         "R403 v33 o4 %g" % r403,
         "Xfb402 o4 p4 FB1K",
@@ -773,15 +781,16 @@ def bench_midi():
     pwl, t_end = uart_pwl(0x55, 3.3)
     pwl5, _ = uart_pwl(0x55, 5.0)
     out_cases = [
-        ("nominal, 15 m", 3.3, 12, 33, 10, 220, "LED6N138", 3),
-        ("nominal, no cable", 3.3, 12, 33, 10, 220, "LED6N138", 0),
-        ("worst: 3.135 V, VF max, R +5 %, ROL 25", 3.135, 25, 33 * 1.05, 10 * 1.05, 220 * 1.05, "LED6N138MAX", 3),
+        ("3.3 V, 6N138 VF typ, 15 m", 3.3, 33, 10, 220, "LED6N138", 3),
+        ("3.3 V, 6N138 VF typ, no cable", 3.3, 33, 10, 220, "LED6N138", 0),
+        ("3.135 V, R +5 %, 6N138 VF max (1.7 V), 15 m", 3.135, 33 * 1.05, 10 * 1.05, 220 * 1.05, "LED6N138MAX", 3),
+        ("CA-033 worst: 3.135 V, R +5 %, VF 1.9 V, 15 m", 3.135, 33 * 1.05, 10 * 1.05, 220 * 1.05, "LEDVF19", 3),
     ]
-    for k, (label, v33, rol, ra, rc, rd, led, ncab) in enumerate(out_cases):
+    for k, (label, v33, ra, rc, rd, led, ncab) in enumerate(out_cases):
         n = "midi_out_%d" % k
         body = "\n".join([
             "Vtx tx 0 PWL(%s)" % pwl,
-            midi_tx_ours(v33, rol, ra, rc),
+            midi_tx_ours(v33, ra, rc),
             cable(ncab, "p4", "p5", "r4", "r5"),
             rx_spec(led, rd),
         ])
@@ -789,7 +798,7 @@ def bench_midi():
         decks.append((n, body, ctl))
     in_cases = [
         ("5 V sender (MIDI 1.0: 220R/220R)", "generic", (5.0, 220, 220), "LEDH11L1", 1.2e-3, 0.9e-3, 1.2e-6),
-        ("3.3 V CA-033 sender (this board's MIDI OUT)", "ours", (3.3, 12), "LEDH11L1", 1.2e-3, 0.9e-3, 1.2e-6),
+        ("3.3 V CA-033 sender (this board's MIDI OUT)", "ours", (3.3,), "LEDH11L1", 1.2e-3, 0.9e-3, 1.2e-6),
         ("3.3 V sender with old 220R/220R", "generic", (3.3, 220, 220), "LEDH11L1", 1.2e-3, 0.9e-3, 1.2e-6),
         ("worst: old 3.3 V sender, VF max, IF(on) 1.6 mA, ratio 0.5, 4 us",
          "generic", (3.3, 220, 220), "LEDH11L1MAX", 1.6e-3, 0.8e-3, 4e-6),
@@ -806,6 +815,19 @@ def bench_midi():
                           rx_ours(led, ifon, ifoff, dly)])
         ctl = "tran 5n %g 0 10n\nwrdata %s.dat i(Vif) v(rx) v(tx)" % (t_end, n)
         decks.append((n, body, ctl))
+    # MIDI OUT faults (DC, TX low = Q401 on): CA-033 sizes RA for a short to GND at +5 % supply, -5 % resistors.
+    short_cases = [
+        ("pin 4 to GND", "Vf4 p4 0 0"),
+        ("pins 4 and 5 shorted", "Vf45 p4 p5 0"),
+        ("pin 5 to GND", "Vf5 p5 0 0"),
+    ]
+    for k, (label, fault) in enumerate(short_cases):
+        n = "midi_fault_%d" % k
+        body = "\n".join(["Vtx tx 0 0", midi_tx_ours(3.465, 33 * 0.95, 10 * 0.95), fault])
+        ctl = "\n".join(["op", "let ira = (v(v33)-v(o4))/%g" % (33 * 0.95), "let irc = (v(sink)-v(o5))/%g" % (10 * 0.95),
+                          "let pra = ira*ira*%g" % (33 * 0.95), "let prc = irc*irc*%g" % (10 * 0.95),
+                          "let pq = v(sink)*i(Vq)", "print ira irc pra prc pq v(sink)"])
+        decks.append((n, body.replace("Q401 sink base 0 Q2N3904", "Q401 sinkq base 0 Q2N3904\nVq sink sinkq 0"), ctl))
     run_all(decks)
 
     def bits_of(t, y, thr, t0, t1):
@@ -817,16 +839,28 @@ def bench_midi():
         d = read_dat(n + ".dat")
         t, i, vl, tx = d["time"], d["i(vif)"], d["vled"], d["v(tx)"]
         ion = interp(t, i, 20e-6 + 0.5 * BIT)
-        widths, cs = bits_of(t, i, ion / 2, 15e-6, t_end)
-        txw, _ = bits_of(t, tx, 1.65, 15e-6, t_end)
+        # receiver threshold at half the on-current, +-10 % hysteresis so cable ringing does not count
+        sw = [ts for ts, _ in schmitt(t, i, 0.6 * ion, 0.4 * ion, 0) if ts > 15e-6]
+        cs = sw
+        widths = [y - x for x, y in zip(sw, sw[1:])]
+        _, cs_tx = bits_of(t, tx, 1.65, 15e-6, t_end)
+        lag = [b - a for a, b in zip(cs_tx, cs)]
         res["out"].append({
             "case": case[0], "i_on_mA": round(ion * 1e3, 2), "i_peak_mA": round(max(i) * 1e3, 2),
+            "delay_on_ns": round(lag[0] * 1e9, 1), "delay_off_ns": round(lag[1] * 1e9, 1),
             "i_rise_10_90_ns": round(edge_10_90(t, i, 0, ion, True, 15e-6, 40e-6) * 1e9, 1),
             "i_fall_90_10_ns": round(edge_10_90(t, i, 0, ion, False, 40e-6, 70e-6) * 1e9, 1),
             "led_reverse_min_V": round(min(vl), 3),
             "pulse_width_error_ns": round(max(abs(w - BIT) for w in widths[:9]) * 1e9, 1),
             "i_off_uA": round(interp(t, i, t_end - 5e-6) * 1e6, 3),
         })
+    res["fault"] = []
+    for k, (label, _) in enumerate(short_cases):
+        v = op_values(open(os.path.join(OUT, "midi_fault_%d.log" % k)).read())
+        res["fault"].append({"case": label + " (3.465 V, R -5 %, TX low)", "i_RA_mA": round(v["ira"] * 1e3, 1),
+                             "p_RA_W": round(v["pra"], 3), "i_RC_mA": round(v["irc"] * 1e3, 1),
+                             "p_RC_W": round(v["prc"], 3), "p_Q401_mW": round(v["pq"] * 1e3, 1),
+                             "vce_V": round(v["v(sink)"], 3)})
     for k, case in enumerate(in_cases):
         n = "midi_in_%d" % k
         d = read_dat(n + ".dat")
@@ -841,6 +875,8 @@ def bench_midi():
             "if_peak_first_edge_mA": round(max(first) * 1e3, 2),
             "if_ring_dip_mA": round(min(window(t, i, t[next(k for k, v in enumerate(i) if t[k] > 20e-6 and v > 0.3e-3)], 21.5e-6)) * 1e3, 2),
             "rx_low_V": round(interp(t, rx, 20e-6 + 0.5 * BIT), 3),
+            "rx_fall_90_10_ns": round(edge_10_90(t, rx, interp(t, rx, 36e-6), 3.3, False, 15e-6, 50e-6) * 1e9, 1),
+            "rx_rise_10_90_ns": round(edge_10_90(t, rx, interp(t, rx, 36e-6), 3.3, True, 50e-6, 80e-6) * 1e9, 1),
             "rx_edges": len(cs_rx), "tx_edges": len(cs_tx),
             "delay_fall_us": us(delays[0]) if delays else None,
             "delay_rise_us": us(delays[1]) if len(delays) > 1 else None,
@@ -852,18 +888,19 @@ def bench_midi():
 
 # ------------------------------------------------------------------ 5. +5V_LED inrush
 
-# sheet power: VBUS - U201 TPS2553 (R201 100 k: IOS 234/267/303 mA) - +5V_LED with
-# C202 10 uF; sheet rgb_chain: C983 100 nF, C901-C982 82 x 100 nF, C984 100 uF.
+# sheet power: VBUS - U201 TPS2553 (R201 100 k 1 %: IOS 232/267/306 mA) - +5V_LED with
+# C202 10 uF; sheet rgb_chain: C983 100 nF, C901-C982 82 x 100 nF, C984 470 uF low-ESR;
+# on VBUS: C201 1 uF, C507 10 uF and the Pico's own (~10 uF assumed).
 def bench_inrush():
     res = []
     decks = []
-    cases = [(ios, vb, idle) for ios in (0.234, 0.267, 0.303) for vb in (5.0, 4.75) for idle in (0.082, 0.0)]
+    cases = [(ios, vb, idle) for ios in (0.232, 0.267, 0.306) for vb in (5.0, 4.75) for idle in (0.082, 0.0)]
     for ios, vb, idle in cases:
         n = tag("inrush", ios, vb, idle)
         body = "\n".join([
             "Vusb usb 0 %g" % vb,
             "Rcab usb vbus 0.25",
-            "Cvbus vbus 0 11u",
+            "Cvbus vbus 0 21u",
             "Ven en 0 PWL(0 0 0.5m 0 0.501m 3.3)",
             "Vsen vbus vsw 0",
             "* U201: soft-start ramp (tr 1.1 ms typ, ~1.4 ms 0-100 %), then the current limit IOS, rDS(on) 85 mR",
@@ -873,19 +910,19 @@ def bench_inrush():
             "C983 led 0 100n",
             "Cchain led nch 8.2u",
             "Rchain nch 0 2m",
-            "C984 led n984 100u",
-            "R984 n984 0 0.3",
+            "C984 led n984 470u",
+            "R984 n984 0 0.1",
             "* 82 SK6812MINI-E idle (assumed 1 mA each above 3 V)",
             "Bidle led 0 I='%g*min(max(V(led),0)/3,1)'" % idle,
         ])
-        ctl = "tran 1u 12m 0 2u\nlet pd = (v(vsw)-v(led))*i(Vsen)\nwrdata %s.dat v(led) i(Vsen) v(vbus) pd" % n
+        ctl = "tran 5u 40m 0 5u\nlet pd = (v(vsw)-v(led))*i(Vsen)\nwrdata %s.dat v(led) i(Vsen) v(vbus) pd" % n
         decks.append((n, body, ctl))
     run_all(decks)
     for ios, vb, idle in cases:
         n = tag("inrush", ios, vb, idle)
         d = read_dat(n + ".dat")
         t, v, i, vbus, pd = d["time"], d["v(led)"], d["i(vsen)"], d["v(vbus)"], d["pd"]
-        c = crossings(t, v, 0.9 * vb * 0.99, True)
+        c = crossings(t, v, 0.9 * vb, True)
         lim = [tt for tt, ii in zip(t, i) if ii >= 0.97 * ios]
         energy = sum((t[k] - t[k - 1]) * (pd[k] + pd[k - 1]) / 2 for k in range(1, len(t)))
         res.append({"ios_mA": ios * 1e3, "vbus": vb, "idle_mA": idle * 1e3,
@@ -893,7 +930,16 @@ def bench_inrush():
                     "i_peak_mA": round(max(i) * 1e3, 1),
                     "t_in_limit_ms": round((lim[-1] - lim[0]) * 1e3, 2) if lim else 0.0,
                     "vbus_min_V": round(min(vbus), 3), "e_switch_mJ": round(energy * 1e3, 2),
-                    "p_switch_peak_W": round(max(pd), 2)})
+                    "p_switch_peak_W": round(max(pd), 2),
+                    "p_switch_avg_in_limit_W": round(energy / (lim[-1] - lim[0]), 2) if lim else 0.0,
+                    # TPS2553 (SLVS841G) overcurrent FAULT deglitch 3 / 7.5 / 11 ms (min / typ / max): the
+                    # TPS2553 only flags FAULT and keeps limiting; a TPS2553-1 would latch off at that point
+                    "fault_flag_if_deglitch_min_typ_max": [bool(lim) and lim[-1] - lim[0] > dg
+                                                           for dg in (3e-3, 7.5e-3, 11e-3)],
+                    # junction rise: <= peak power x RthJB (29.4 C/W) with the board copper at ambient
+                    # for these few ms; x RthJA (182.6 C/W) would apply only to a charge lasting seconds
+                    "tj_rise_bound_RthJB_C": round(max(pd) * 29.4, 1),
+                    "tj_rise_if_steady_RthJA_C": round((energy / (lim[-1] - lim[0]) if lim else 0) * 182.6, 1)})
     return res
 
 
