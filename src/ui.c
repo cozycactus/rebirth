@@ -40,6 +40,7 @@ typedef struct {
     uint16_t grid_tap_pending;                  // Subset that still toggles on release
     uint32_t grid_press_ms[NUM_STEP_BUTTONS];   // When each held step was pressed
     uint16_t grid_enc_target[NUM_ENCODERS];     // Steps held while that encoder's button was down
+    uint16_t grid_enc_long_done[NUM_ENCODERS];  // Targets that already got that button's long press
 
     // STEP_EDIT
     uint8_t edit_step;              // 0–15
@@ -100,7 +101,10 @@ static void toggle_transport(void) {
 static void clear_grid_gesture(void) {
     ui.grid_hold = 0;
     ui.grid_tap_pending = 0;
-    for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) ui.grid_enc_target[enc] = 0;
+    for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
+        ui.grid_enc_target[enc] = 0;
+        ui.grid_enc_long_done[enc] = 0;
+    }
 }
 
 static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
@@ -314,8 +318,22 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
             ui.grid_tap_pending &= (uint16_t)~ui.grid_hold;
         }
     }
-    uint16_t e1_targets = ui.grid_enc_target[0] | ui.grid_hold;
-    uint16_t e2_targets = ui.grid_enc_target[1] | ui.grid_hold;
+    // A button event belongs only to the steps that were held while its
+    // button was down.
+    uint16_t e1_targets = ui.grid_enc_target[0];
+    uint16_t e2_targets = ui.grid_enc_target[1];
+
+    // A long press that already fired reaches, once, each step that joined
+    // its button after it fired.
+    uint16_t long_late[NUM_ENCODERS];
+    for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
+        long_late[enc] = 0;
+        if (ui.grid_enc_long_done[enc] && encoder_button_held(enc)) {
+            long_late[enc] = ui.grid_enc_target[enc] &
+                             (uint16_t)~ui.grid_enc_long_done[enc];
+            ui.grid_enc_long_done[enc] |= long_late[enc];
+        }
+    }
     bool gesture = ui.grid_hold || ui.grid_enc_target[0] || ui.grid_enc_target[1];
 
     // 5. Dispatch. With a gesture active, input edits its targets or is
@@ -324,8 +342,14 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
     bool e1_edit = (e1b == BTN_PRESS || e1b == BTN_LONG_PRESS) && e1_targets;
     bool e2_edit = e2b == BTN_LONG_PRESS && e2_targets;
     if (turn_edit) ui.grid_tap_pending &= (uint16_t)~turn_targets;
+    // A turn in the same update as a first press does not edit that step,
+    // but its order relative to the press is unknown: cancel the tap.
+    if (e1d != 0 || e2d != 0) ui.grid_tap_pending &= (uint16_t)~steps->pressed;
     if (e1_edit) ui.grid_tap_pending &= (uint16_t)~e1_targets;
     if (e2_edit) ui.grid_tap_pending &= (uint16_t)~e2_targets;
+    if (e1_edit && e1b == BTN_LONG_PRESS) ui.grid_enc_long_done[0] |= e1_targets;
+    if (e2_edit) ui.grid_enc_long_done[1] |= e2_targets;
+    bool late_edit = long_late[0] || long_late[1];
 
     if (!gesture) {
         // Enc1 rotate: select track
@@ -373,7 +397,7 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
         }
     }
 
-    if (turn_edit || e1_edit || e2_edit || taps) {
+    if (turn_edit || e1_edit || e2_edit || late_edit || taps) {
         bool changed = false;
         uint8_t track = ui.selected_track;
         uint8_t pattern_index;
@@ -390,6 +414,14 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
         }
         if (e2_edit &&
             edit_held_steps(pat, track, e2_targets, 0, 0, BTN_NONE, e2b)) {
+            changed = true;
+        }
+        if (long_late[0] &&
+            edit_held_steps(pat, track, long_late[0], 0, 0, BTN_LONG_PRESS, BTN_NONE)) {
+            changed = true;
+        }
+        if (long_late[1] &&
+            edit_held_steps(pat, track, long_late[1], 0, 0, BTN_NONE, BTN_LONG_PRESS)) {
             changed = true;
         }
         for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
@@ -411,7 +443,10 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
     // 8. An encoder whose button is up gives up its targets. This runs after
     //    the dispatch because a short press arrives once the button is up.
     for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
-        if (!encoder_button_held(enc)) ui.grid_enc_target[enc] = 0;
+        if (!encoder_button_held(enc)) {
+            ui.grid_enc_target[enc] = 0;
+            ui.grid_enc_long_done[enc] = 0;
+        }
     }
 }
 
