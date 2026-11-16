@@ -29,6 +29,8 @@ static uint8_t chip_pointer;
 static int chip_fail_count;  // next N transactions fail with a timeout
 static int chip_txn;         // transactions since chip_reset
 static int chip_fail_txn;    // 1-based transaction number that fails once (0 = none)
+static int chip_fail_from;   // this transaction and every later one fail (0 = none)
+static unsigned cfg_writes;  // writes to CFG (0x01): one per tca8418_init
 
 static void chip_reset(void) {
     memset(chip_regs, 0, sizeof(chip_regs));
@@ -37,11 +39,14 @@ static void chip_reset(void) {
     chip_fail_count = 0;
     chip_txn = 0;
     chip_fail_txn = 0;
+    chip_fail_from = 0;
+    cfg_writes = 0;
 }
 
 static bool chip_should_fail(void) {
     chip_txn++;
     if (chip_fail_txn != 0 && chip_txn == chip_fail_txn) return true;
+    if (chip_fail_from != 0 && chip_txn >= chip_fail_from) return true;
     if (chip_fail_count > 0) { chip_fail_count--; return true; }
     return false;
 }
@@ -76,6 +81,7 @@ int i2c_write_timeout_us(i2c_inst_t *i2c, uint8_t addr, const uint8_t *src, size
     if (len == 2) {
         if (chip_pointer == 0x02) chip_regs[0x02] &= (uint8_t)~src[1];  // write 1 to clear
         else chip_regs[chip_pointer] = src[1];
+        if (chip_pointer == 0x01) cfg_writes++;
     }
     return (int)len;
 }
@@ -295,31 +301,33 @@ static void test_failed_flush_stays_in_recovery(void) {
     }
     CHECK(chip_fifo_count == 2);
     chip_fail_count = 0;
-    for (uint32_t t = 40; t < 80; t++) {
+    // The failed attempt at t=0 is retried PANEL_RETRY_MS later, not every poll.
+    for (uint32_t t = 40; t < 140; t++) {
         panel_input_poll(t);
         CHECK(drain(e, 8) == 0);
     }
     CHECK(chip_fifo_count == 0);
     key_press(2, 2);
-    for (uint32_t t = 80; t < 100; t++) panel_input_poll(t);
+    for (uint32_t t = 140; t < 160; t++) panel_input_poll(t);
     int n = drain(e, 8);
     CHECK(n == 1 && e[0].track == 2 && e[0].row == 2 && e[0].down);
 }
 
 static void test_overflow_survives_a_failed_transaction(void) {
     // Fail each transaction of the overflowing poll in turn; the overflow must
-    // still be acted on, leaving no stuck key and no stale event.
+    // still be acted on, leaving no stuck key and no stale event. A failed
+    // recovery attempt is retried PANEL_RETRY_MS later.
     for (int k = 1; k <= 30; k++) {
         reset();
         panel_event_t e[16];
         for (int i = 0; i < 12; i++) key_press(i % 8, i % 10);
         chip_fail_txn = chip_txn + k;
-        for (uint32_t t = 0; t <= 40; t++) panel_input_poll(t);
+        for (uint32_t t = 0; t <= 140; t++) panel_input_poll(t);
         CHECK(drain(e, 16) == 0);
         CHECK(chip_fifo_count == 0);
         CHECK(!(chip_regs[0x02] & 0x08));
         key_press(3, 3);
-        for (uint32_t t = 41; t <= 70; t++) panel_input_poll(t);
+        for (uint32_t t = 141; t <= 170; t++) panel_input_poll(t);
         CHECK(drain(e, 16) == 1);
         CHECK(e[0].kind == PANEL_PAD && e[0].track == 3 && e[0].row == 3 && e[0].down);
     }
@@ -404,6 +412,150 @@ static void test_overflow_keeps_play_events_in_a_wrapped_ring(void) {
     CHECK(e[1].kind == PANEL_PLAY && !e[1].down);
 }
 
+static void poll_range(uint32_t from, uint32_t to) {
+    for (uint32_t t = from; t <= to; t++) panel_input_poll(t);
+}
+
+static void test_failed_status_read_after_overflow_emits_nothing(void) {
+    reset();
+    panel_event_t e[16];
+    for (int i = 0; i < 12; i++) key_press(i % 8, i % 10);
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    // Count and ten events read, then INT_STAT fails and the bus stays down:
+    // the batch may hide an overflow, so none of it may become a press.
+    chip_fail_from = chip_txn + 12;
+    poll_range(0, 30);
+    int n = drain(e, 16);                   // the UI drains on every pass
+    CHECK(n == 1 && e[0].kind == PANEL_PLAY && e[0].down);   // PLAY keeps working
+    chip_fail_from = 0;
+    poll_range(31, 300);
+    CHECK(drain(e, 16) == 0);
+    CHECK(chip_fifo_count == 0);
+    CHECK(!(chip_regs[0x02] & 0x08));
+}
+
+static void test_failed_event_read_emits_nothing(void) {
+    reset();
+    panel_event_t e[8];
+    key_press(0, 0);
+    key_press(1, 1);
+    chip_fail_txn = chip_txn + 3;           // the second event read fails
+    poll_range(0, 200);
+    CHECK(drain(e, 8) == 0);
+    CHECK(chip_fifo_count == 0);
+}
+
+static void test_play_held_through_resync_needs_a_stable_release(void) {
+    reset();
+    panel_event_t e[8];
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    poll_range(0, 30);
+    CHECK(drain(e, 8) == 1);
+    panel_input_resync();
+    poll_range(31, 40);
+    fake_gpio_level[PLAY_BUTTON_PIN] = true;    // one bounce sample
+    panel_input_poll(41);
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    poll_range(42, 100);
+    CHECK(drain(e, 8) == 0);
+    fake_gpio_level[PLAY_BUTTON_PIN] = true;    // a stable release ends it silently
+    poll_range(101, 130);
+    CHECK(drain(e, 8) == 0);
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    poll_range(131, 160);
+    CHECK(drain(e, 8) == 1 && e[0].kind == PANEL_PLAY && e[0].down);
+}
+
+static void test_key_held_through_resync_ignores_a_re_reported_press(void) {
+    reset();
+    panel_event_t e[8];
+    key_press(5, 2);
+    poll_range(0, 20);
+    CHECK(drain(e, 8) == 1);
+    panel_input_resync();
+    key_press(5, 2);                        // the chip reports the held key again
+    poll_range(21, 60);
+    CHECK(drain(e, 8) == 0);
+    key_release(5, 2);                      // a bounce: up, then down again
+    panel_input_poll(61);
+    key_press(5, 2);
+    poll_range(62, 100);
+    CHECK(drain(e, 8) == 0);
+    key_release(5, 2);                      // a stable release ends it silently
+    poll_range(101, 120);
+    CHECK(drain(e, 8) == 0);
+    key_press(5, 2);
+    poll_range(121, 140);
+    int n = drain(e, 8);
+    CHECK(n == 1 && e[0].kind == PANEL_PAD && e[0].track == 2 && e[0].row == 5 && e[0].down);
+}
+
+static void test_key_held_through_overflow_ignores_a_re_reported_press(void) {
+    reset();
+    panel_event_t e[16];
+    key_press(7, 7);
+    poll_range(0, 20);
+    CHECK(drain(e, 16) == 1);
+    for (int i = 0; i < 12; i++) key_press(i % 7, i % 7);   // overflow
+    poll_range(21, 40);
+    CHECK(drain(e, 16) == 0);
+    key_press(7, 7);                        // re-reported after the overflow
+    poll_range(41, 80);
+    CHECK(drain(e, 16) == 0);
+}
+
+static void test_resync_flushes_without_reinit(void) {
+    reset();
+    unsigned writes = cfg_writes;
+    key_press(0, 0);
+    panel_input_resync();
+    CHECK(cfg_writes == writes);            // a working chip is only flushed
+    CHECK(chip_fifo_count == 0);
+    key_press(1, 1);
+    chip_fail_count = 1;                    // the flush fails: re-init and flush
+    panel_input_resync();
+    panel_input_poll(0);
+    CHECK(cfg_writes == writes + 1);
+    CHECK(chip_fifo_count == 0);
+}
+
+static void test_i2c_error_reconfigures_before_reading(void) {
+    reset();
+    panel_event_t e[8];
+    unsigned writes = cfg_writes;
+    key_press(0, 1);
+    chip_fail_count = 1;
+    panel_input_poll(0);                    // the read fails: the chip may have reset
+    poll_range(1, 9);
+    CHECK(cfg_writes == writes + 1);
+    CHECK(drain(e, 8) == 1 && e[0].kind == PANEL_PAD && e[0].track == 1 && e[0].down);
+}
+
+static void test_reset_chip_is_reconfigured(void) {
+    reset();
+    panel_event_t e[8];
+    key_press(4, 4);
+    poll_range(0, 20);
+    CHECK(drain(e, 8) == 1);
+    memset(chip_regs, 0, sizeof(chip_regs));    // brown-out: registers at defaults
+    poll_range(21, 1100);
+    CHECK(chip_regs[0x01] == 0xA9);             // noticed within about a second
+    key_press(4, 4);                            // the reconfigured chip sees it again
+    poll_range(1101, 1150);
+    CHECK(drain(e, 8) == 0);
+}
+
+static void test_dead_bus_is_retried_at_most_every_100_ms(void) {
+    reset();
+    panel_event_t e[8];
+    chip_fail_from = chip_txn + 1;
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    int before = chip_txn;
+    poll_range(0, 999);
+    CHECK(chip_txn - before <= 12);
+    CHECK(drain(e, 8) == 1 && e[0].kind == PANEL_PLAY && e[0].down);
+}
+
 int main(void) {
     RUN(test_init_configures_keypad);
     RUN(test_key_codes_map_to_controls);
@@ -423,5 +575,14 @@ int main(void) {
     RUN(test_init_failure_at_boot_recovers);
     RUN(test_full_ring_keeps_changes_pending);
     RUN(test_overflow_keeps_play_events_in_a_wrapped_ring);
+    RUN(test_failed_status_read_after_overflow_emits_nothing);
+    RUN(test_failed_event_read_emits_nothing);
+    RUN(test_play_held_through_resync_needs_a_stable_release);
+    RUN(test_key_held_through_resync_ignores_a_re_reported_press);
+    RUN(test_key_held_through_overflow_ignores_a_re_reported_press);
+    RUN(test_resync_flushes_without_reinit);
+    RUN(test_i2c_error_reconfigures_before_reading);
+    RUN(test_reset_chip_is_reconfigured);
+    RUN(test_dead_bus_is_retried_at_most_every_100_ms);
     return 0;
 }

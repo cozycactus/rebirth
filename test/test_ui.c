@@ -26,8 +26,11 @@ button_event_t encoder_get_button(uint8_t encoder) {
     button_event_t value = buttons[encoder]; buttons[encoder] = BTN_NONE; return value;
 }
 bool encoder_button_held(uint8_t encoder) { return held[encoder]; }
+static unsigned encoder_resyncs, mcp_resyncs;
+void encoder_resync(void) { encoder_resyncs++; }
 void mcp23017_init(void) {}
 void mcp23017_poll(void) {}
+void mcp23017_resync(void) { mcp_resyncs++; }
 step_buttons_t *mcp23017_get_buttons(void) { return &step_buttons; }
 void step_leds_init(void) {}
 bool step_leds_available(void) { return true; }
@@ -52,12 +55,22 @@ static bool rgb_is(rgb_t c, uint8_t r, uint8_t g, uint8_t b) {
     return c.r == r && c.g == g && c.b == b;
 }
 
-// Scripted panel input: push_panel() queues a press and its release.
+// Scripted panel input: push_panel() queues a press and its release;
+// debounce_panel() makes one appear only after a number of polls (a press
+// still in its debounce time), unless a resync comes first.
 #define PANEL_QUEUE 32
 static panel_event_t panel_queue[PANEL_QUEUE];
 static unsigned panel_head, panel_tail, panel_resyncs;
+static panel_event_t debouncing;
+static unsigned debounce_polls;
+static void push_panel(panel_kind_t kind, uint8_t track, uint8_t row);
 void panel_input_init(void) {}
-void panel_input_poll(uint32_t now_ms) { (void)now_ms; }
+void panel_input_poll(uint32_t now_ms) {
+    (void)now_ms;
+    if (debounce_polls > 0 && --debounce_polls == 0) {
+        push_panel(debouncing.kind, debouncing.track, debouncing.row);
+    }
+}
 bool panel_input_next(panel_event_t *out) {
     if (panel_head == panel_tail) return false;
     *out = panel_queue[panel_head++];
@@ -65,12 +78,17 @@ bool panel_input_next(panel_event_t *out) {
 }
 void panel_input_resync(void) {
     panel_head = panel_tail = 0;
+    debounce_polls = 0;
     panel_resyncs++;
 }
 static void push_panel(panel_kind_t kind, uint8_t track, uint8_t row) {
     CHECK(panel_tail + 2 <= PANEL_QUEUE);
     panel_queue[panel_tail++] = (panel_event_t){kind, track, row, true};
     panel_queue[panel_tail++] = (panel_event_t){kind, track, row, false};
+}
+static void debounce_panel(panel_kind_t kind, uint8_t track, uint8_t row, unsigned polls) {
+    debouncing = (panel_event_t){kind, track, row, true};
+    debounce_polls = polls;
 }
 
 static void reset(void) {
@@ -92,6 +110,8 @@ static void reset(void) {
     memset(deltas, 0, sizeof(deltas));
     memset(held, 0, sizeof(held));
     panel_head = panel_tail = panel_resyncs = 0;
+    debounce_polls = 0;
+    encoder_resyncs = mcp_resyncs = 0;
     memset(shown, 0, sizeof(shown));
     rgb_inits = 0;
     timer_hw->alarm[0] = pulse_interval_us;
@@ -477,6 +497,49 @@ static void test_second_held_step_does_not_toggle_in_the_editor(void) {
     CHECK(!(g_seq.patterns[0].steps[0][2].flags & STEP_FLAG_ACTIVE));
 }
 
+static void test_play_pressed_during_panic_does_not_fire_after_it(void) {
+    held[0] = held[1] = true;
+    press_encoder(0, BTN_LONG_PRESS);
+    CHECK(ui.panic_latched);
+    unsigned panel_before = panel_resyncs;
+    // PLAY pressed while the combo is held is still in its debounce time when
+    // both encoder buttons are let go: it would be reported on the next poll.
+    debounce_panel(PANEL_PLAY, 0, 0, 2);
+    held[0] = held[1] = false;
+    ui_update();                            // the latch clears
+    CHECK(!ui.panic_latched);
+    CHECK(panel_resyncs == panel_before + 1);
+    CHECK(mcp_resyncs == 1);                // step buttons too
+    ui_update();
+    ui_update();
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    panel(PANEL_PLAY, 0, 0);                // a press after the panic works
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+}
+
+static void test_step_held_through_save_or_load_does_not_mute(void) {
+    press_encoder(1, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    press_step(1);                          // step 2 held: mutes track 2 on release
+    step_buttons.pressed = 1u << 8;         // step 9: save
+    step_buttons.held |= 1u << 8;
+    ui_update();
+    CHECK(strcmp(ui.notify_msg, "SAVED OK") == 0);
+    CHECK(panel_resyncs == 1 && mcp_resyncs == 1 && encoder_resyncs == 1);
+    release_step(1);
+    CHECK(g_seq.track_mutes == 0);
+    press_step(2);                          // step 3 held through a load
+    step_buttons.pressed = 1u << 9;
+    step_buttons.held |= 1u << 9;
+    ui_update();
+    CHECK(strcmp(ui.notify_msg, "LOADED OK") == 0);
+    release_step(2);
+    CHECK(g_seq.track_mutes == 0);
+    press_step(3);                          // a press after them still mutes
+    release_step(3);
+    CHECK(g_seq.track_mutes == 1u << 3);
+}
+
 static void test_track_config_edit_reaches_all_locations(void) {
     uint8_t old = g_seq.patterns[0].tracks[0].midi_channel;
     press_encoder(1, BTN_LONG_PRESS);
@@ -752,6 +815,8 @@ int main(int argc, char **argv) {
     RUN(test_step_long_press_opens_the_cell_focused_at_press);
     RUN(test_long_press_begun_on_another_screen_is_dropped);
     RUN(test_second_held_step_does_not_toggle_in_the_editor);
+    RUN(test_play_pressed_during_panic_does_not_fire_after_it);
+    RUN(test_step_held_through_save_or_load_does_not_mute);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS all six OLED views render");

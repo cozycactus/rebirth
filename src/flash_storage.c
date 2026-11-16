@@ -9,6 +9,8 @@
 #include "sequencer.h"
 #include "flash_storage.h"
 #include "panel_input.h"
+#include "mcp23017.h"
+#include "encoder.h"
 
 // ─── Flash layout ──────────────────────────────────────────────
 //
@@ -63,6 +65,14 @@ _Static_assert(sizeof(store_header_t) == FLASH_PAGE,
 // ─── API ───────────────────────────────────────────────────────
 
 #ifndef MOCK_HARDWARE
+// Panel keys, step buttons and encoder buttons held or changed during the
+// stall must not fire afterwards.
+static void resync_inputs(void) {
+    panel_input_resync();
+    mcp23017_resync();
+    encoder_resync();
+}
+
 static uint32_t crc32_update(uint32_t crc, const void *data, size_t length) {
     const uint8_t *bytes = data;
     for (size_t i = 0; i < length; i++) {
@@ -176,9 +186,8 @@ bool flash_storage_save(void) {
 
     restore_interrupts(ints);
     multicore_lockout_end_blocking();
-    // Keys held through the stall must not fire afterwards, whether or not
-    // the new save validates.
-    panel_input_resync();
+    // Whether or not the new save validates.
+    resync_inputs();
     return flash_storage_is_valid();
 #else
     return false;
@@ -200,7 +209,7 @@ bool flash_storage_load(void) {
             sequencer_refresh_track_playback(track, pattern);
         }
     }
-    panel_input_resync();
+    resync_inputs();
     return true;
 #else
     return false;

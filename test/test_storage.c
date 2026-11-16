@@ -7,36 +7,43 @@
 sequencer_state_t g_seq;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%d: %s\n", __LINE__, #x); exit(1); } } while (0)
 
-static unsigned resync_calls;
+static unsigned resync_calls, mcp_resync_calls, encoder_resync_calls;
 void panel_input_resync(void) { resync_calls++; }
+void mcp23017_resync(void) { mcp_resync_calls++; }
+void encoder_resync(void) { encoder_resync_calls++; }
+
+// Every input is resynced together: panel keys, step buttons, encoder buttons.
+static bool all_inputs_resynced(unsigned times) {
+    return resync_calls == times && mcp_resync_calls == times && encoder_resync_calls == times;
+}
 
 static void test_save_resyncs_panel_input(void) {
-    resync_calls = 0;
+    resync_calls = mcp_resync_calls = encoder_resync_calls = 0;
     CHECK(flash_storage_save());
-    CHECK(resync_calls == 1);
+    CHECK(all_inputs_resynced(1));
     // A refused save (playing) must not resync.
     transport_start();
     CHECK(!flash_storage_save());
     transport_stop();
-    CHECK(resync_calls == 1);
+    CHECK(all_inputs_resynced(1));
     // A save that reached the lockout resyncs even if it fails validation.
-    resync_calls = 0;
+    resync_calls = mcp_resync_calls = encoder_resync_calls = 0;
     fake_flash_programs = 0;
     fake_flash_program_limit = 2;
     CHECK(!flash_storage_save());
     fake_flash_program_limit = UINT32_MAX;
-    CHECK(resync_calls == 1);
+    CHECK(all_inputs_resynced(1));
     CHECK(flash_storage_save());
 }
 
 static void test_load_resyncs_panel_input(void) {
-    resync_calls = 0;
+    resync_calls = mcp_resync_calls = encoder_resync_calls = 0;
     CHECK(flash_storage_load());
-    CHECK(resync_calls == 1);
+    CHECK(all_inputs_resynced(1));
     fake_flash[STORE_OFFSET + PAT_OFFSET] ^= 1;
     CHECK(!flash_storage_load());
     fake_flash[STORE_OFFSET + PAT_OFFSET] ^= 1;
-    CHECK(resync_calls == 1);
+    CHECK(all_inputs_resynced(1));
 }
 
 // Core 1's timer ISR clears a MIDI overflow with a panic even while stopped.

@@ -29,16 +29,24 @@ static const key_control_t key_map[PANEL_ROWS][PANEL_COLS] = {
     { ROW_KEYS(4) }, { ROW_KEYS(5) }, { ROW_KEYS(6) }, { ROW_KEYS(7) },
 };
 
+// One debounced control: a matrix key or PLAY.
 typedef struct {
-    bool raw;
-    bool accepted;
+    bool raw;           // last state seen
+    bool accepted;      // last state reported
+    bool suppressed;    // down at a resync: silent until seen up for the debounce time
     uint32_t since_ms;  // when raw last changed
 } debounce_t;
 
 static debounce_t keys[PANEL_KEYS];
 static debounce_t play;
-static bool play_suppressed;  // held across a resync; ignored until seen released
-static bool recovering;       // chip FIFO flush failed; emit nothing until it works
+
+// Key events are read only while the chip is configured and in sync.
+static bool chip_configured;  // tca8418_init accepted and no I2C error since
+static bool chip_synced;      // FIFO drained since the key state was last unknown
+static bool retry_armed;      // the last recovery attempt failed
+static uint32_t retry_from_ms;
+static bool check_started;    // the CFG readback clock runs from the first poll
+static uint32_t check_ms;
 
 static panel_event_t ring[EVENT_RING_SIZE];
 static uint8_t ring_head;
@@ -56,9 +64,34 @@ static bool play_pin_down(void) {
     return !gpio_get(PLAY_BUTTON_PIN);
 }
 
-// Releases every key silently and drops queued key events; PLAY events stay.
-static void clear_keys(void) {
-    memset(keys, 0, sizeof(keys));
+static void see(debounce_t *d, bool down, uint32_t now_ms) {
+    if (d->raw == down) return;
+    d->raw = down;
+    d->since_ms = now_ms;
+}
+
+// True when a control has a change that held for window_ms and is to be
+// reported. A suppressed control reports nothing; it is let go once it has
+// been seen up for window_ms, so a bounce or a re-reported press is ignored.
+static bool settle(debounce_t *d, uint32_t now_ms, uint32_t window_ms) {
+    if (d->raw == d->accepted && !d->suppressed) return false;
+    if ((uint32_t)(now_ms - d->since_ms) < window_ms) return false;
+    if (d->suppressed) {
+        if (!d->raw) d->suppressed = false;
+        return false;
+    }
+    return true;
+}
+
+// The key state is unknown (events lost, or a resync): nothing is reported
+// down any more, a key that was down stays suppressed, and queued key events
+// are dropped. Queued PLAY events stay.
+static void forget_keys(void) {
+    for (uint8_t i = 0; i < PANEL_KEYS; i++) {
+        debounce_t *key = &keys[i];
+        key->suppressed = key->suppressed || key->raw || key->accepted;
+        key->accepted = false;
+    }
     panel_event_t kept_events[EVENT_RING_SIZE];
     uint8_t kept = 0;
     for (uint8_t i = 0; i < ring_count; i++) {
@@ -70,48 +103,84 @@ static void clear_keys(void) {
     ring_count = kept;
 }
 
-static void clear_play(void) {
-    memset(&play, 0, sizeof(play));
-    play_suppressed = play_pin_down();
+static void forget_play(void) {
+    play.suppressed = play.suppressed || play.raw || play.accepted || play_pin_down();
+    play.accepted = false;
 }
 
-static bool chip_recover(void) {
-    return tca8418_init() && tca8418_flush();
+// Brings the chip back after an I2C error, a lost sync or a resync: re-init
+// when it may have lost its configuration, then drain the FIFO. An attempt
+// after a failed one waits PANEL_RETRY_MS, so a dead bus costs one timeout
+// per 100 ms instead of one per pass.
+static bool chip_ready(uint32_t now_ms) {
+    if (chip_configured && chip_synced) return true;
+    if (retry_armed && (uint32_t)(now_ms - retry_from_ms) < PANEL_RETRY_MS) return false;
+    if (!chip_configured) chip_configured = tca8418_init();
+    if (chip_configured && !chip_synced) {
+        chip_synced = tca8418_flush();
+        if (!chip_synced) chip_configured = false;  // re-init on the next attempt
+    }
+    retry_armed = !(chip_configured && chip_synced);
+    retry_from_ms = now_ms;
+    return !retry_armed;
 }
 
-static void resync_chip(void) {
-    recovering = !chip_recover();
-    clear_keys();
-    ring_count = 0;
-    clear_play();
+static void lose_sync(uint32_t now_ms) {
+    chip_synced = false;
+    forget_keys();
+    chip_ready(now_ms);
+}
+
+// About once a second: a chip that reset (brown-out, ESD) still answers but
+// has CFG back at its default and scans nothing.
+static bool check_due(uint32_t now_ms) {
+    if (!check_started) {
+        check_started = true;
+        check_ms = now_ms;
+        return false;
+    }
+    if ((uint32_t)(now_ms - check_ms) < PANEL_CHECK_MS) return false;
+    check_ms = now_ms;
+    return true;
 }
 
 void panel_input_init(void) {
     gpio_init(PLAY_BUTTON_PIN);
     gpio_set_dir(PLAY_BUTTON_PIN, GPIO_IN);
     gpio_pull_up(PLAY_BUTTON_PIN);
-    resync_chip();
+    memset(keys, 0, sizeof(keys));
+    memset(&play, 0, sizeof(play));
+    ring_head = 0;
+    ring_count = 0;
+    forget_play();              // PLAY held at power-up does nothing
+    check_started = false;
+    retry_armed = false;        // a failed boot init is retried by the first poll
+    chip_configured = tca8418_init();
+    chip_synced = chip_configured && tca8418_flush();
+    if (!chip_synced) chip_configured = false;
 }
 
 void panel_input_resync(void) {
-    resync_chip();
+    forget_keys();
+    forget_play();
+    ring_count = 0;             // PLAY events too: nothing from the stall is a command
+    // A working chip only needs its FIFO drained; it is re-initialised (next
+    // poll) only when that fails.
+    chip_synced = chip_configured && tca8418_flush();
+    if (!chip_synced) chip_configured = false;
+    retry_armed = false;
 }
 
 static void apply_chip_event(uint8_t event, uint32_t now_ms) {
     uint8_t code = event & KEY_CODE_MASK;
     if (code < 1 || code > PANEL_KEYS) return;
-    debounce_t *key = &keys[code - 1];
-    bool down = (event & KEY_PRESS_BIT) != 0;
-    if (key->raw == down) return;
-    key->raw = down;
-    key->since_ms = now_ms;
+    see(&keys[code - 1], (event & KEY_PRESS_BIT) != 0, now_ms);
 }
 
 static void emit_stable_keys(uint32_t now_ms) {
     for (uint8_t i = 0; i < PANEL_KEYS; i++) {
         debounce_t *key = &keys[i];
-        if (key->raw == key->accepted) continue;
-        if ((uint32_t)(now_ms - key->since_ms) < PANEL_DEBOUNCE_MS) continue;
+        if (!settle(key, now_ms, PANEL_DEBOUNCE_MS)) continue;
         const key_control_t *control = &key_map[i / PANEL_COLS][i % PANEL_COLS];
         // A full ring leaves the change pending; it is retried on the next poll.
         if (ring_push(control->kind, control->track, control->row, key->raw)) {
@@ -121,41 +190,46 @@ static void emit_stable_keys(uint32_t now_ms) {
 }
 
 static void poll_play(uint32_t now_ms) {
-    bool down = play_pin_down();
-    if (play_suppressed) {
-        if (down) return;
-        play_suppressed = false;
+    see(&play, play_pin_down(), now_ms);
+    if (settle(&play, now_ms, PLAY_DEBOUNCE_MS) && ring_push(PANEL_PLAY, 0, 0, play.raw)) {
+        play.accepted = play.raw;
     }
-    if (down != play.raw) {
-        play.raw = down;
-        play.since_ms = now_ms;
-    }
-    if (play.raw == play.accepted) return;
-    if ((uint32_t)(now_ms - play.since_ms) < PLAY_DEBOUNCE_MS) return;
-    if (ring_push(PANEL_PLAY, 0, 0, play.raw)) play.accepted = play.raw;
 }
 
 void panel_input_poll(uint32_t now_ms) {
-    // PLAY is a plain GPIO and is sampled even while the chip is recovering.
-    if (recovering) {
-        if (chip_recover()) {
-            recovering = false;
-            clear_keys();
-        }
-    } else {
-        uint8_t events[CHIP_READ_MAX];
-        bool overflow = false;
-        int count = tca8418_read_events(events, CHIP_READ_MAX, &overflow);
-        if (overflow) {
-            // Events were lost, so key state is unknown: release everything silently.
-            recovering = !tca8418_flush();
-            clear_keys();
-        } else {
-            for (int i = 0; i < count; i++) apply_chip_event(events[i], now_ms);
-        }
-        if (!recovering) emit_stable_keys(now_ms);
-    }
+    // PLAY is a plain GPIO: sampled first, whatever the bus does.
     poll_play(now_ms);
+    if (!chip_ready(now_ms)) return;
+
+    if (check_due(now_ms)) {
+        bool configured;
+        if (!tca8418_read_config(&configured)) {
+            chip_configured = false;
+            return;
+        }
+        if (!configured) {
+            // The chip reset: its FIFO and the key state it reported are gone.
+            chip_configured = false;
+            lose_sync(now_ms);
+            return;
+        }
+    }
+
+    uint8_t events[CHIP_READ_MAX];
+    bool overflow = false;
+    int count = tca8418_read_events(events, CHIP_READ_MAX, &overflow);
+    if (count == TCA8418_READ_FAILED) {
+        // Nothing was consumed: re-init (the chip may have reset), then read again.
+        chip_configured = false;
+    } else if (count == TCA8418_READ_UNCERTAIN || overflow) {
+        // Events were lost or the batch is incomplete: none of it is reported.
+        if (count == TCA8418_READ_UNCERTAIN) chip_configured = false;
+        lose_sync(now_ms);
+        return;
+    } else {
+        for (int i = 0; i < count; i++) apply_chip_event(events[i], now_ms);
+    }
+    emit_stable_keys(now_ms);
 }
 
 bool panel_input_next(panel_event_t *out) {

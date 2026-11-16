@@ -59,6 +59,11 @@ void encoder_init(void);
 // Poll all encoders — call as often as possible from ui_update()
 void encoder_poll(void);
 
+// After a flash stall: each button's state now becomes its debounced state.
+// A button released during the stall reports nothing; one held through it
+// never becomes BTN_PRESS or BTN_LONG_PRESS (its release is BTN_RELEASE).
+void encoder_resync(void);
+
 // Read and consume accumulated rotation delta
 // Positive = clockwise, negative = counter-clockwise
 // Applies acceleration: fast turns yield larger deltas

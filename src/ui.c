@@ -137,6 +137,10 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
     if (ui.panic_latched) {
         if (!encoder_button_held(0) && !encoder_button_held(1)) {
             ui.panic_latched = false;
+            // A pad, PLAY or step pressed during the panic and still in its
+            // debounce time must not fire once commands are accepted again.
+            panel_input_resync();
+            mcp23017_resync();
         }
         return true; // Consume both releases, including a late short press.
     }
@@ -500,6 +504,7 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
             show_notify("STOP TO SAVE");
         } else {
             show_notify(flash_storage_save() ? "SAVED OK" : "SAVE FAILED");
+            drop_step_gestures();   // steps held through the stall do nothing
         }
     }
 
@@ -509,6 +514,7 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
             show_notify("STOP TO LOAD");
         } else {
             show_notify(flash_storage_load() ? "LOADED OK" : "LOAD FAILED");
+            drop_step_gestures();
         }
     }
 

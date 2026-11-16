@@ -125,6 +125,7 @@ add_executable(test_expanders
     fakes/fake_hardware.c
     ${REBIRTH_SRC}/mcp23017.c
     ${REBIRTH_SRC}/step_leds.c
+    ${REBIRTH_SRC}/encoder.c
 )
 target_include_directories(test_expanders PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME expanders_tests COMMAND test_expanders)
