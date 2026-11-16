@@ -439,8 +439,8 @@ static void handle_kit_step_edit(int8_t e1d, int8_t e2d,
                                           KIT_LANES - 1);
     }
 
-    // VALUE rotate: one value step per event in its direction, whatever its
-    // size (off/note/accent/flam; AC off/on), with the CH/OH rule.
+    // VALUE rotate (detents): one value step per event in its direction,
+    // whatever its size (off/note/accent/flam; AC off/on), with the CH/OH rule.
     if (e2d != 0) {
         bool changed = false;
         uint8_t lane = ui.kit_cursor;
@@ -940,12 +940,12 @@ static void handle_track_config(int8_t e1d, int8_t e2d,
                        : (config.type == TRACK_TYPE_DRUM ? TRACK_PARAM_NOTE : TRACK_PARAM_GATE);
     if (ui.config_param > last) ui.config_param = last;
 
-    // Enc1 rotate: select parameter
+    // Enc1 rotate (detents): select parameter
     if (e1d != 0) {
         ui.config_param = (uint8_t)clamp_i8((int16_t)ui.config_param + e1d, 0, last);
     }
 
-    // Enc2 rotate: adjust value (TYPE is the first row of both lists)
+    // Enc2 rotate: adjust value (TYPE, the first row of both lists, by detents)
     if (e2d != 0) {
         if (ui.config_param == TRACK_PARAM_TYPE) {
             step_track_type(edited_track, config, e2d);
@@ -1253,19 +1253,33 @@ void ui_init(void) {
 
 // ─── Main Update Loop ──────────────────────────────────────────
 
+// Encoders read whole detents (one click, one step, no acceleration) where
+// they pick among choices; numbers (tempo, velocities, notes, channel, gate,
+// flam) keep the accelerated delta. On the panel each quadrature edge arrives
+// in its own pass of this loop, so a choice read by edges would move several
+// times per click.
+static bool track_reads_detents(void) {
+    // Focus stops, the kit editor's lanes and the track config rows.
+    return ui.mode == UI_SESSION || ui.mode == UI_PATTERN_VIEW ||
+           ui.mode == UI_KIT_STEP_EDIT || ui.mode == UI_TRACK_CONFIG;
+}
+
+static bool value_reads_detents(void) {
+    // A kit lane's value, and TYPE (the first row of every config list).
+    return ui.mode == UI_KIT_STEP_EDIT ||
+           (ui.mode == UI_TRACK_CONFIG && ui.config_param == TRACK_PARAM_TYPE);
+}
+
 void ui_update(void) {
     // 1. Poll inputs: the panel on every pass, then encoders and step buttons
     panel_input_poll(to_ms_since_boot(get_absolute_time()));
     encoder_poll();
     mcp23017_poll();
 
-    // 2. Read encoder events. TRACK walks whole detents where it walks the
-    // focus stops or the kit editor's lanes (one detent, one stop); elsewhere it
-    // keeps acceleration.
-    int8_t e1d = (ui.mode == UI_SESSION || ui.mode == UI_PATTERN_VIEW ||
-                  ui.mode == UI_KIT_STEP_EDIT)
-                     ? encoder_get_detents(0) : encoder_get_delta(0);
-    int8_t e2d = encoder_get_delta(1);
+    // 2. Read encoder events, once per pass: whole detents for choices, the
+    // accelerated delta for numbers.
+    int8_t e1d = track_reads_detents() ? encoder_get_detents(0) : encoder_get_delta(0);
+    int8_t e2d = value_reads_detents() ? encoder_get_detents(1) : encoder_get_delta(1);
     button_event_t e1b = encoder_get_button(0);
     button_event_t e2b = encoder_get_button(1);
     step_buttons_t *steps = mcp23017_get_buttons();

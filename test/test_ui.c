@@ -10,6 +10,11 @@ sequencer_state_t g_seq;
 static button_event_t buttons[2];
 static int8_t deltas[2];
 static int8_t delta_scale = 1;   // encoder_get_delta returns deltas * delta_scale
+// Edges the way the panel delivers them (turn_edges): one per encoder_poll,
+// i.e. one per UI pass. As in encoder.c, get_delta returns the edges since the
+// last read and clears the detent count; get_detents returns whole detents of
+// ENC_EDGES_PER_DETENT edges, keeps the rest and clears the delta.
+static int16_t edges_to_come[2], edge_delta[2], edge_count[2];
 static bool held[2];
 static step_buttons_t step_buttons;
 static uint16_t led_mask;
@@ -19,12 +24,28 @@ static unsigned rgb_inits;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%d: %s\n", __LINE__, #x); exit(1); } } while (0)
 
 void encoder_init(void) {}
-void encoder_poll(void) {}
+void encoder_poll(void) {
+    for (unsigned e = 0; e < 2; e++) {
+        if (edges_to_come[e] == 0) continue;
+        int16_t edge = edges_to_come[e] > 0 ? 1 : -1;
+        edges_to_come[e] -= edge;
+        edge_delta[e] += edge;
+        edge_count[e] += edge;
+    }
+}
 int8_t encoder_get_delta(uint8_t encoder) {
-    int8_t value = deltas[encoder] * delta_scale; deltas[encoder] = 0; return value;
+    int8_t value = (int8_t)(deltas[encoder] * delta_scale + edge_delta[encoder]);
+    deltas[encoder] = 0;
+    edge_delta[encoder] = edge_count[encoder] = 0;
+    return value;
 }
 int8_t encoder_get_detents(uint8_t encoder) {
-    int8_t value = deltas[encoder]; deltas[encoder] = 0; return value;
+    int16_t whole = edge_count[encoder] / ENC_EDGES_PER_DETENT;
+    edge_count[encoder] -= whole * ENC_EDGES_PER_DETENT;
+    edge_delta[encoder] = 0;
+    int8_t value = (int8_t)(deltas[encoder] + whole);
+    deltas[encoder] = 0;
+    return value;
 }
 button_event_t encoder_get_button(uint8_t encoder) {
     button_event_t value = buttons[encoder]; buttons[encoder] = BTN_NONE; return value;
@@ -113,6 +134,9 @@ static void reset(void) {
     memset(buttons, 0, sizeof(buttons));
     memset(deltas, 0, sizeof(deltas));
     delta_scale = 1;
+    memset(edges_to_come, 0, sizeof(edges_to_come));
+    memset(edge_delta, 0, sizeof(edge_delta));
+    memset(edge_count, 0, sizeof(edge_count));
     memset(held, 0, sizeof(held));
     panel_head = panel_tail = panel_resyncs = 0;
     debounce_polls = 0;
@@ -1103,7 +1127,7 @@ static void test_long_press_on_kit_lane_opens_kit_editor(void) {
     CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_OFF);       // the long press sets nothing
 
     // VALUE: one step per event, whatever its size, clamped at flam and off.
-    delta_scale = 4;                                    // VALUE accelerates, TRACK does not
+    delta_scale = 4;                                    // the editor reads detents
     const uint8_t expected[3] = {KIT_NOTE, KIT_ACCENT, KIT_FLAM};
     for (unsigned i = 0; i < 3; i++) {
         turn_value(1);
@@ -1424,6 +1448,91 @@ static void test_pattern_select_shows_flam_drops(void) {
     CHECK(frames_differ(none, one));
 }
 
+// ─── Clicks, the way the panel delivers them ───────────────────
+
+// `count` edges of encoder `e`, one per UI pass, as the panel's loop sees them.
+static void turn_edges(uint8_t e, int16_t count) {
+    edges_to_come[e] = count;
+    while (edges_to_come[e] != 0) ui_update();
+}
+
+// `detents` clicks of encoder `e`: ENC_EDGES_PER_DETENT edges each.
+static void click(uint8_t e, int8_t detents) {
+    turn_edges(e, (int16_t)(detents * ENC_EDGES_PER_DETENT));
+}
+
+static void test_kit_editor_value_click_is_one_step(void) {
+    make_kit(1);
+    focus_lane(1, 0, LANE_SD);
+    press_step(5);
+    long_step(5);
+    release_step(5);
+    CHECK(ui.mode == UI_KIT_STEP_EDIT && ui.kit_cursor == LANE_SD);
+    turn_edges(1, ENC_EDGES_PER_DETENT - 1);            // not a whole click yet
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_OFF);
+    turn_edges(1, 1);
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_NOTE);
+    click(1, 1);
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_ACCENT);
+    click(1, -1);
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_NOTE);
+    click(0, 1);
+    CHECK(ui.kit_cursor == LANE_LT);
+    click(1, 1);
+    CHECK(lane_at(0, 1, LANE_LT, 5) == KIT_NOTE);
+}
+
+static void test_track_config_type_click_is_one_type(void) {
+    open_track_config(2);                               // a SYNTH track, no kits
+    turn_edges(1, 2);                                   // half a click: no change
+    CHECK(type_everywhere(2, TRACK_TYPE_SYNTH));
+    turn_edges(1, ENC_EDGES_PER_DETENT - 2);
+    CHECK(type_everywhere(2, TRACK_TYPE_DRUM));
+    click(1, 1);
+    CHECK(type_everywhere(2, TRACK_TYPE_KIT));
+    click(1, 1);
+    CHECK(type_everywhere(2, TRACK_TYPE_SYNTH));
+    click(1, -1);
+    CHECK(type_everywhere(2, TRACK_TYPE_KIT));
+    click(1, 1);
+    CHECK(type_everywhere(2, TRACK_TYPE_SYNTH));
+
+    // Kits on two other tracks: one click from SYNTH is DRUM, the next skips
+    // KIT once with one message.
+    make_kit(1);
+    make_kit(4);
+    ui.notify_msg[0] = '\0';
+    click(1, 1);
+    CHECK(type_everywhere(2, TRACK_TYPE_DRUM));
+    CHECK(ui.notify_msg[0] == '\0');
+    click(1, 1);
+    CHECK(type_everywhere(2, TRACK_TYPE_SYNTH));
+    CHECK(strcmp(ui.notify_msg, "MAX 2 KITS") == 0);
+}
+
+static void test_track_config_rows_move_by_clicks(void) {
+    make_kit(1);
+    open_track_config(1);
+    click(0, 1);
+    CHECK(ui.config_param == KIT_PARAM_CHANNEL);
+    click(0, KIT_PARAM_VEL_NORMAL - KIT_PARAM_CHANNEL);
+    CHECK(ui.config_param == KIT_PARAM_VEL_NORMAL);
+    delta_scale = 4;                                    // a fast turn
+    deltas[0] = 1;
+    ui_update();
+    CHECK(ui.config_param == KIT_PARAM_VEL_ACCENT);     // rows: one per detent
+    deltas[0] = -1;
+    ui_update();
+    CHECK(ui.config_param == KIT_PARAM_VEL_NORMAL);
+    // Numbers keep the accelerated delta.
+    uint8_t vel = g_seq.kit_config[1].vel_normal;
+    turn_value(1);
+    CHECK(g_seq.kit_config[1].vel_normal == vel + 4);
+    delta_scale = 1;
+    turn_edges(1, 3);                                   // three edges, three steps
+    CHECK(g_seq.kit_config[1].vel_normal == vel + 7);
+}
+
 #define RUN(test) do { reset(); test(); printf("PASS %s\n", #test); } while (0)
 int main(int argc, char **argv) {
     seq_lock_init();
@@ -1481,6 +1590,9 @@ int main(int argc, char **argv) {
     RUN(test_render_kit_editor_and_lane_view);
     RUN(test_render_kit_config);
     RUN(test_pattern_select_shows_flam_drops);
+    RUN(test_kit_editor_value_click_is_one_step);
+    RUN(test_track_config_type_click_is_one_type);
+    RUN(test_track_config_rows_move_by_clicks);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS all six OLED views render");
