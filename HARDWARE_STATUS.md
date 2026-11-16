@@ -127,7 +127,7 @@ measured first with the same densest pattern load.
   every step, flams on) within +20 us of the baseline.
 - `NOT VERIFIED` ISR base-commit callees still in flash: the SDK divider wrapper
   (`pulse_count % 24` and `/ 24` on every pulse), `load_prepared_track()` (every
-  step), `seq_lock()`/`seq_unlock()`, `gate_commit()`/`cv_set_note()`,
+  step), `gate_commit()`/`cv_set_note()`,
   `send_note_off_if_active()` and `prepare_note_off()` run from flash through
   the XIP cache, as on the base commit, while the kit and MIDI path runs from
   RAM. With two dense kits and Core 0 busy (OLED, LEDs, panel scans), the GPIO 7

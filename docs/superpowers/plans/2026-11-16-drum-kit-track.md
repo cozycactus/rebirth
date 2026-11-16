@@ -395,7 +395,7 @@ UI rules: `ui_update` reads `e1d` with `encoder_get_detents(0)` in `UI_SESSION` 
     - `test_pattern_view_on_kit_edits_lane`: TRACK press from the Session view on a kit -> Pattern view; press/release a step -> the lane cycles, `step_t` unchanged; one detent moves the lane.
     - `test_step_leds_show_focused_lane`: Session and Pattern view masks equal the lane's non-zero steps within the length.
     - `test_mixed_type_track_uses_cell_type`: track 1 SYNTH in location 0 and KIT in location 31 -> the Session view on location 0 toggles `step_t` and walks one stop; on location 31 it edits lanes.
-    - `test_synth_cell_unchanged`: on a SYNTH cell the Session view toggles `step_t` on release, the Pattern view on press, `kit_steps` untouched, LEDs from `step_t`.
+    - `test_synth_cell_unchanged`: on a SYNTH cell the Session view toggles `step_t` on release, the Pattern view on press (on release since the merge with hold-step editing), `kit_steps` untouched, LEDs from `step_t`.
 - [ ] **Step 2:** they fail.
 - [ ] **Step 3: Implement.**
 - [ ] **Step 4:** host and sanitizer tests pass.
