@@ -1409,12 +1409,25 @@ static void sound_kit(void) {
     CHECK(count_kit_hits() == 2);
 }
 
-static void test_kit_stop_releases_before_stop_byte(void) {
+// Stop queues the kit releases before the Stop byte. On a busy wire the Stop, a
+// real-time byte, overtakes them at the next message boundary; every voice is still
+// released before the next run's hits.
+static void test_kit_stop_queues_releases_before_stop_byte(void) {
     sound_kit();
+    unsigned sent = fake_midi_length;
+    fake_uart_writable = false;             // the wire is busy
     transport_stop();
-    CHECK(msg_is(last_msg(2), KIT_STATUS, 36, 0));
-    CHECK(msg_is(last_msg(1), KIT_STATUS, 38, 0));
-    CHECK(msg_is(last_msg(0), MIDI_STOP, 0, 0));
+    CHECK(fake_midi_length == sent);
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    const uint8_t expected[] = {MIDI_STOP, KIT_STATUS, 36, 0, 38, 0};
+    CHECK(fake_midi_length == sent + sizeof(expected));
+    CHECK(memcmp(fake_midi + sent, expected, sizeof(expected)) == 0);
+    transport_start();
+    tick();                                 // the new run's first hits
+    CHECK(msg_is(last_msg(1), KIT_STATUS, 36, 80));
+    CHECK(msg_is(last_msg(0), KIT_STATUS, 38, 80));
+    CHECK(count_kit(36, 0) == 1 && count_kit(38, 0) == 1);
     CHECK(fake_midi_count(MIDI_NOTE_OFF | KIT_CHANNEL) == 0);
 }
 
@@ -1428,6 +1441,40 @@ static void test_kit_panic_releases(void) {
     CHECK(msg_is(midi_msgs[count - 33], MIDI_STOP, 0, 0));
     CHECK(msg_is(midi_msgs[count - 32], MIDI_CC, MIDI_CC_ALL_SOUND_OFF, 0));
     CHECK(count_kit(36, 0) == 1 && count_kit(38, 0) == 1);
+}
+
+// A panic in the middle of a message cuts it: the drain starts again at a message
+// boundary, so the bytes after the cut decode on their own, the Stop goes first and a
+// Start queued behind the cut message is dropped. The cut message has the status of the
+// kit's releases, so a running status kept across the cut would show.
+static void test_panic_mid_message_resets_the_drain(void) {
+    sound_kit();
+    fake_uart_writable = false;
+    midi_send_note_on(KIT_CHANNEL, 40, 100);
+    unsigned cut = fake_midi_length + 1;
+    fake_uart_budget = 1;
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();         // its status byte only
+    CHECK(fake_midi_length == cut && fake_midi[cut - 1] == KIT_STATUS);
+    midi_send_start();                      // waits for the message boundary
+    sequencer_panic();
+    CHECK(fake_midi_length == cut);
+    fake_uart_budget = UINT_MAX;
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(!fake_uart_tx_irq);
+    CHECK(fake_midi_length > cut && fake_midi[cut] == MIDI_STOP);
+    for (unsigned i = cut; i < fake_midi_length; i++) CHECK(fake_midi[i] != MIDI_START);
+    // Decode what follows the cut on its own: a data byte without a status would abort.
+    fake_midi_length -= cut;
+    memmove(fake_midi, fake_midi + cut, fake_midi_length);
+    CHECK(message_boundary(fake_midi_length));
+    unsigned count = decode_midi();
+    CHECK(count == 1 + 2 + 32);             // the Stop, the releases, the 32 CCs
+    CHECK(msg_is(midi_msgs[0], MIDI_STOP, 0, 0));
+    CHECK(msg_is(midi_msgs[1], KIT_STATUS, 36, 0));
+    CHECK(msg_is(midi_msgs[2], KIT_STATUS, 38, 0));
+    CHECK(msg_is(midi_msgs[3], MIDI_CC, MIDI_CC_ALL_SOUND_OFF, 0));
+    CHECK(msg_is(midi_msgs[count - 1], MIDI_CC | 15, MIDI_CC_ALL_NOTES_OFF, 0));
 }
 
 static void test_kit_restart_releases(void) {
@@ -1482,8 +1529,9 @@ static void test_kit_channel_edit_releases_on_old_channel(void) {
     CHECK(msg_is(msg[2], MIDI_NOTE_ON | 3, 36, 80));
 }
 
-// Voices still sounding at a step boundary (left by a kind change, whose countdown is 0)
-// are released first, before the step's hits.
+// Voices still sounding at a step boundary with no release due (countdown 0) are
+// released first, before the step's hits. No path leaves voices so today (a kind change
+// releases them at the load); the test sets the countdown to 0 itself.
 static void test_kit_step_releases_leftover_voices_first(void) {
     make_kit(1, KIT_CHANNEL);
     set_gate(1, 100);
@@ -1492,7 +1540,7 @@ static void test_kit_step_releases_leftover_voices_first(void) {
     set_kit(0, 1, 1, KIT_LANE_BD, KIT_NOTE);
     transport_start();
     tick();
-    kit_runtime[1].countdown = 0;           // no release due: as after a kind change
+    kit_runtime[1].countdown = 0;           // no release due
     pulses(PULSES_PER_STEP - 1);
     CHECK(msgs() == 2);
     tick();
@@ -1523,8 +1571,12 @@ static void test_flam_second_hit(void) {
     CHECK(msgs() == 3);
     CHECK(msg_is(msg[1], KIT_STATUS, 0x24, 0x00));
     CHECK(msg_is(msg[2], KIT_STATUS, 0x24, 0x6E));
-    pulses(PULSES_PER_STEP - 4);            // gate 50 % + flam 3: the release at pulse 15
+    pulses(11);                             // pulses 4-14
+    CHECK(msgs() == 3);
+    tick();                                 // gate 50 % + flam 3: the release at pulse 15
     CHECK(msgs() == 4 && msg_is(msg[3], KIT_STATUS, 0x24, 0x00));
+    pulses(PULSES_PER_STEP - 16);           // pulses 16-23
+    CHECK(msgs() == 4);
     tick();                                 // pulse 24: step 1, AC
     CHECK(msgs() == 5 && msg_is(msg[4], KIT_STATUS, 0x24, 0x6E));
     pulses(3);
@@ -1711,8 +1763,13 @@ static uint32_t play_load(const load_case_t *c) {
     }
     transport_start();
     unsigned steps = c->bars * 16u;
+    // The pulse time of each Clock (every PPQN / MIDI_PPQN pulses from the first).
+    static uint32_t clock_due[16 * 16 * PULSES_PER_STEP / (PPQN / MIDI_PPQN)];
+    unsigned clocks = 0;
+    CHECK(steps * PULSES_PER_STEP / (PPQN / MIDI_PPQN) <= sizeof(clock_due) / sizeof(clock_due[0]));
     for (unsigned pulse = 0; pulse < steps * PULSES_PER_STEP; pulse++) {
         fake_uart_run_until(timer_hw->alarm[0]);
+        if (pulse % (PPQN / MIDI_PPQN) == 0) clock_due[clocks++] = timer_hw->alarm[0];
         tick();
     }
     // A TX overflow would have stopped the transport (the ISR panics and clears the flag).
@@ -1720,6 +1777,16 @@ static uint32_t play_load(const load_case_t *c) {
     CHECK(!midi_output_overflowed());
     fake_uart_run_until(timer_hw->timerawl + 1000000); // the queue drains
     CHECK(!fake_uart_tx_irq);
+    // Each Clock starts on the wire within 3 byte times (960 us) of its pulse: at most
+    // the rest of the byte on the line and of the message it belongs to.
+    unsigned clock = 0;
+    for (unsigned i = 0; i < fake_midi_length; i++) {
+        if (fake_midi[i] != MIDI_CLOCK) continue;
+        CHECK(clock < clocks);
+        CHECK(fake_midi_time_us[i] - clock_due[clock] <= 3u * 320u);
+        clock++;
+    }
+    CHECK(clock == clocks);
     unsigned total = msgs();
     unsigned first_hits[2] = {0, 0};
     for (unsigned i = 0; i < total; i++) {
@@ -2126,8 +2193,9 @@ int main(void) {
     RUN(test_kit_flam_first_hit_at_note_level);
     RUN(test_kit_stored_mute_and_clip_mask);
     RUN(test_kit_live_mute_releases_next_pulse);
-    RUN(test_kit_stop_releases_before_stop_byte);
+    RUN(test_kit_stop_queues_releases_before_stop_byte);
     RUN(test_kit_panic_releases);
+    RUN(test_panic_mid_message_resets_the_drain);
     RUN(test_kit_restart_releases);
     RUN(test_kit_mode_change_releases);
     RUN(test_kit_settings_edit_keeps_sounding_note);
