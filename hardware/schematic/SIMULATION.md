@@ -5,23 +5,26 @@ Benches for the CV outputs, gate outputs, encoder RC filters, MIDI OUT/IN and th
 in the benches are the schematic's. ngspice 46, 2026-11-16.
 
 ```bash
-python3 hardware/schematic/sim/run.py            # every bench, about a minute
-python3 hardware/schematic/sim/run.py cv midi    # some: cv gate enc midi inrush
+python3 hardware/schematic/sim/run.py            # every bench, under a minute
+python3 hardware/schematic/sim/run.py cv midi    # some: cv cvv gate enc midi inrush
+MCP6001_LIB=/path/to/MCP6001.txt python3 hardware/schematic/sim/run.py cvv
 ```
 
 `sim/run.py` writes each deck to `sim/out/*.cir`, runs `ngspice -b` (set `NGSPICE` for
 another binary) and prints the measured numbers; `sim/out/results.json` keeps them.
-`sim/models.lib` holds the models. The benches are built by hand from the sheets: the
-kicad-happy analyzer does not see the MCP6004 units' pins and reads C51x/R51x as RC
-filters, so its automatic pass covers only the encoder filters and decoupling (last
-section).
+`sim/models.lib` holds the generic models. `cvv` repeats the CV benches with
+Microchip's own MCP6001/2/4 macro-model, which is not in the repository (see Models);
+it runs only when `MCP6001_LIB` names the unzipped `MCP6001.txt`. The benches are built
+by hand from the sheets: the kicad-happy analyzer does not see the MCP6004 units' pins
+and reads C51x/R51x as RC filters, so its automatic pass covers only the encoder filters
+and decoupling (last section).
 
 ## Result
 
 | Circuit | Verdict | Key numbers |
 | --- | --- | --- |
-| CV buffer, C51x **1 nF** (changed) | OK | DC error = MCP6004 offset only; PM >= 73 deg for any load (63 deg with a pessimistic second pole); overshoot <= 6 % into 1 nF, 28 % into 10 nF; short 4.5 mA |
-| CV buffer, C51x 100 pF (as drawn before) | stable, badly damped | 31-38 % overshoot and +4.4 dB peaking into 1 nF, 68 % / +11.8 dB into 10 nF |
+| CV buffer, C51x **1 nF** (changed) | OK | DC error = MCP6004 offset only; PM >= 94 deg for any cable C (Microchip model; >= 73 deg with the pessimistic generic one); overshoot 6 % into 1 nF, 28 % into 10 nF; short 4.8 mA |
+| CV buffer, C51x 100 pF (as drawn before) | stable, badly damped | 31-38 % overshoot and +3.4-4.4 dB peaking into 1 nF, 64-68 % / +10-12 dB into 10 nF |
 | Gate outputs | OK | high 4.95 V (100 k) / 4.53 V (10 k), 4.07 V worst; rise 2.1-2.3 us into 1 nF, 21-23 us into 10 nF |
 | Encoder RC filters | OK | GPIO follows the contact in <= 0.2 ms; spikes shorter than 30 us (worst-case thresholds) to 100 us (mid) rejected; fast turn with bounce decodes 24 of 24 |
 | MIDI OUT | OK | loop current 6.5 mA (4.5 mA worst) into a MIDI 1.0 receiver; edges 50 ns over 15 m |
@@ -34,24 +37,47 @@ the jack sees a second-order response with natural frequency 1/sqrt(R52x C51x R5
 C_cable) and damping 0.5 sqrt(R52x C51x / (R51x C_cable)). With 100 pF the damping is
 0.5 at 1 nF of cable and 0.16 at 10 nF, so the stage, stable as an amplifier, rings.
 1 nF gives 1.6 and 0.5. The cost is a slow tail: a 2 V step into 10 k settles to
-1 LSB (0.5 mV) in 72 us instead of 9 us, far below any musical time. A sweep of
-100 p / 330 p / 470 p / 1 n / 2.2 n is in the CV section. Check after the change:
-`build.py --check` 0 netlist problems, 0 ERC violations; the schematic diff is the
-four values and the sheet note.
+1 LSB (0.5 mV) in 73 us instead of 11 us, far below any musical time. A sweep of
+100 p / 330 p / 470 p / 1 n / 2.2 n is in the CV section. Microchip's model, run after
+the change, gives the same overshoot within 1 % and confirms the choice. Check after
+the change: `build.py --check` 0 netlist problems, 0 ERC violations; the schematic diff
+is the four values and the sheet note.
 
 ## Models
 
-None is a vendor model; all are in `sim/models.lib` with the datasheet numbers next to them.
+The generic models are in `sim/models.lib` with the datasheet numbers next to them.
 
-- **MCP6004 (`MCP6004G`)**: a generic rail-to-rail macro-model built from the MCP6001/2/4
-  datasheet: GBW 1 MHz, slew 0.6 V/us (current-limited input stage), AOL 112 dB,
-  VOS a parameter (+-4.5 mV max), input C 6 pF / 3 pF, ESD diodes on the inputs and output,
-  output limited to 5 mV from either rail, +-23 mA short-circuit current. The
-  second pole FP2 (4 MHz; 2 MHz as a stress case) and the open-loop output resistance
-  RO (100 R and 1 k) are not in the datasheet and are swept. Microchip publishes an
-  MCP6001 SPICE model; it was not downloaded. A second, independent model (kicad-happy's
-  generated `OPAMP_MCP6004`: single pole, ideal output) gives the same CV peaking within
-  0.3 dB (100 pF, 10 nF: 10.1 dB vs 10.4 dB; 1 nF, 1 nF: 0.44 dB vs 0.48 dB).
+- **MCP6004, Microchip model (`cvv`)**: `MCP6001_MM_F.zip` (Rev F, 2012, `MCP6001.txt`,
+  for MCP6001/1R/1U/2/4) from `https://ww1.microchip.com/downloads/en/DeviceDoc/`,
+  SHA-256 `bb024a6252252cc3876fd92f30598fafbd1e8c787eb7f9844747656508a68b9f`. Its
+  licence allows use with Microchip parts only, so it stays out of this GPL repository:
+  download it and point `MCP6001_LIB` at it. It is written for PSpice; ngspice runs it
+  with `set ngbehavior=ps` (run.py writes that `.spiceinit`). Two output-clamp tables
+  (G35, G36) have unbalanced parentheses; run.py repairs them in its copy, and the
+  as-published file gives the same short-circuit recovery to the microsecond. Checked
+  against the datasheet at 5 V:
+
+  | | Model | Datasheet |
+  | --- | --- | --- |
+  | Open-loop gain | 112.1 dB | 112 dB typ |
+  | Unity-gain frequency / PM (G = +1, 10 k, 60 pF) | 1.07 MHz / 91 deg | 1 MHz / 90 deg typ |
+  | Slew rate up / down | 0.61 / 0.72 V/us | 0.6 V/us typ |
+  | Swing, 10 k to VDD/2 | 9.6 mV from VSS, 9.8 mV from VDD | <= 25 mV |
+  | Output at 0 V input, 10 k or 100 k to GND | 0.21 mV | not given |
+  | Short-circuit current | 20.9 mA | 23 mA typ at 5.5 V |
+  | Offset | -0.6 mV (its typical) | +-4.5 mV max |
+
+  The model does not clamp the inverting input to VSS (its header: no behaviour outside
+  the normal operating region), so the back-drive input currents below come from the
+  generic model.
+- **MCP6004, generic (`MCP6004G`, `cv`)**: rail-to-rail macro-model built from the
+  datasheet: GBW 1 MHz, slew 0.6 V/us, AOL 112 dB, VOS a parameter (+-4.5 mV max),
+  input C 6 pF / 3 pF, ESD diodes on the inputs and output, output limited to 5 mV from
+  either rail, +-23 mA short-circuit current. The second pole FP2 (4 MHz; 2 MHz as a
+  stress case) and the open-loop output resistance RO (100 R and 1 k) are swept. It is
+  more pessimistic than Microchip's (PM 74 deg vs 91 deg at G = +1). kicad-happy's
+  generated `OPAMP_MCP6004` (single pole, ideal output) gives the same CV peaking within
+  0.3 dB as well.
 - **74AHCT125, 74LVC1G17 (`CMOSBUF`)**: threshold, 2-3 ns edge, output resistance from
   the VOH/VOL limits (AHCT at 4.5 V: <= 70 R / 45 R; LVC1G17 at 3 V: <= 23 R sinking).
 - **Opto LEDs**: diodes fitted to VF = 1.4 V typ / 1.7 V max at 1.6 mA (6N138) and
@@ -69,66 +95,69 @@ None is a vendor model; all are in `sim/models.lib` with the datasheet numbers n
 ## 1. CV output stage (sheet `cv_gate`, `cv_stage`)
 
 ```
-Vbus  vbus 0 5                     ; also 4.5 V
-Vdac  dac 0 ...                    ; MCP4822 output, ideal, slew 0.55 V/us for large steps
-Xu503 dac fb amp vbus 0 MCP6004G   ; U503A-D
+Vbus  vbus 0 5                        ; also 4.5 V
+Vdac  dac 0 ...                       ; MCP4822 output, ideal, slew 0.55 V/us for large steps
+Xu503 dac fb vbus 0 amp MCP6001       ; U503A-D, Microchip model (cvv)
+*     dac fb amp vbus 0 MCP6004G      ; generic model (cv)
 R511  amp jack 1k
 R521  fb jack 10k
-C511  fb amp 1n                    ; 100p before the change
+C511  fb amp 1n                       ; 100p before the change
 Rload jack 0 100k | 10k
 Ccable jack 0 0 | 1n | 10n | 100n
 ```
 
-**DC** (DAC swept 0-2.048 V in 0.5 mV steps; VBUS 5 V and 4.5 V give the same numbers
-to 1 uV):
+**DC** (DAC swept 0-2.048 V in 0.5 mV steps):
 
-| Load | VOS | Jack at code 0 | Jack follows the DAC from | Error at 1.000 V | Error at 2.048 V | Op-amp output at 2.048 V |
-| --- | --- | --- | --- | --- | --- | --- |
-| 100 k | 0 | 4.9 mV | 5 mV | +0.004 mV | +0.001 mV | 2.069 V |
-| 10 k | 0 | 4.5 mV | 4.5 mV | +0.003 mV | +0.001 mV | 2.253 V |
-| either | -4.5 mV | 4.5-4.9 mV | 9-9.5 mV | -4.50 mV | -4.50 mV | |
-| either | +4.5 mV | 4.5-4.9 mV | 0-0.5 mV | +4.50 mV | +4.50 mV | |
+| Model | Load | Offset | Jack at code 0 | Jack follows the DAC from | Error at 1.000 V | Error at 2.048 V | Op-amp output at 2.048 V |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| Microchip, 5 V | 100 k / 10 k | -0.50 mV | 0.21 / 0.20 mV | 1.0 mV | -0.50 mV | -0.59 mV | 2.068 / 2.252 V |
+| Microchip, 4.5 V | 100 k / 10 k | -0.53 mV | 0.21 / 0.19 mV | 1.0 mV | -0.53 mV | -0.61 mV | 2.068 / 2.252 V |
+| generic, VOS 0 | 100 k / 10 k | 0 | 4.9 / 4.5 mV | 5 / 4.5 mV | +0.004 mV | +0.001 mV | 2.069 / 2.253 V |
+| generic, VOS -4.5 mV | either | -4.5 mV | 4.5-4.9 mV | 9-9.5 mV | -4.50 mV | -4.50 mV | |
+| generic, VOS +4.5 mV | either | +4.5 mV | 4.5-4.9 mV | 0-0.5 mV | +4.50 mV | +4.50 mV | |
 
 The load does not move the pitch: the error is the op-amp's offset (a constant, removed
-by calibration; 4.5 mV = 5.4 cents) and nothing else. Near 0 V the model's 5 mV output
-limit sets the floor; the datasheet gives only "25 mV at 10 k to VDD/2", which is a
-sinking load, not ours. The MCP4822 itself swings down to 10 mV (typ, and is accurate
-to 1 LSB only above it), so the floor is the DAC's: with the offset, notes near note 24
-read up to ~17 cents (14.5 mV) sharp. The sheet note now says so (it said ~25 mV from the MCP6004).
+by calibration; 4.5 mV max = 5.4 cents) plus 0.09 mV of gain error across the range.
+Near 0 V the op-amp is not the limit: with the load to ground it sinks nothing, and
+Microchip's model reaches 0.21 mV (the generic model's 5 mV limit was a pessimistic
+guess; the datasheet's "25 mV at 10 k to VDD/2" is a sinking load). The MCP4822 swings
+down to 10 mV (typ, and is accurate to 1 LSB only above it), so the floor is the DAC's:
+with the offset, notes near note 24 read up to ~17 cents (14.5 mV) sharp. The sheet
+note now says so (it said ~25 mV from the MCP6004).
 
-**Loop gain** (loop broken at the inverting input, op-amp input C kept on the
-feedback node; RL 100 k, 10 k gives the same within 3 deg):
+**Loop gain** (loop broken at the inverting input with 1 MH / 1 F, op-amp input C kept
+on the feedback node; RL 100 k, 10 k gives the same within 3 deg):
 
-| Cable C | RO | PM, C51x 1 nF | PM, 100 pF | GM, 1 nF |
-| --- | --- | --- | --- | --- |
-| 0 | 100 R | 76 deg | 76 deg | 46 dB |
-| 0 | 1 k | 74 deg | 74 deg | 28 dB |
-| 1 nF | 1 k | 74 deg | 87 deg | 39 dB |
-| 10 nF | 1 k | 83 deg | 101 deg | 39 dB |
-| 100 nF | 1 k | 84 deg | 21 deg (three crossovers) | 39 dB |
-| 0, FP2 2 MHz | 1 k | 63 deg | 64 deg | 26 dB |
+| Cable C | PM, Microchip, C51x 1 nF | PM, Microchip, 100 pF | PM, generic 1 nF (RO 100 R / 1 k) | PM, generic 100 pF (RO 1 k) | GM, Microchip 1 nF |
+| --- | --- | --- | --- | --- | --- |
+| 0 | 106 deg | 105 deg | 76 / 74 deg | 74 deg | 32 dB |
+| 1 nF | 95 deg | 105 deg | 77 / 74 deg | 87 deg | 39 dB |
+| 10 nF | 101 deg | 114 deg | 78 / 83 deg | 101 deg | 39 dB |
+| 100 nF | 102 deg | 26 deg (three crossovers) | 79 / 84 deg | 21 deg (three crossovers) | 39 dB |
 
-The amplifier loop is stable with either capacitor; the problem with 100 pF is the
+Generic with FP2 = 2 MHz, no cable: 63 deg (1 nF) / 64 deg (100 pF). The amplifier
+loop is stable with either capacitor up to 10 nF; the problem with 100 pF is the
 closed-loop response at the jack:
 
-**Steps and AC response at the jack** (RL 100 k, RO 1 k; semitone = 83.3 mV step with a
-50 ns edge; full scale = 0 -> 2.048 V at the DAC's 0.55 V/us; settle = to +-0.5 mV, 1 LSB):
+**Steps and AC response at the jack** (RL 100 k; Microchip model, generic RO 1 k in
+brackets; semitone = 83.3 mV step with a 50 ns edge; full scale = 0 -> 2.048 V at the
+DAC's 0.55 V/us; settle = to +-0.5 mV, 1 LSB):
 
 | Cable C | C51x | AC peaking | Semitone overshoot | Semitone settle | Full-scale overshoot | Full-scale settle |
 | --- | --- | --- | --- | --- | --- | --- |
-| 0 | **1 nF** | 0 dB | 0 % | 0.6 us | 0 mV | 32 us |
-| 0 | 100 pF | 0.2 dB | 3 % | 2.7 us | 29 mV | 9 us |
-| 1 nF | **1 nF** | 0.5 dB | 6 % | 29 us | 121 mV | 65 us |
-| 1 nF | 100 pF | 4.4 dB | 38 % | 12 us | 394 mV | 24 us |
-| 10 nF | **1 nF** | 3.0 dB | 28 % | 82 us | 558 mV | 157 us |
-| 10 nF | 100 pF | 11.8 dB | 68 % | 129 us | 510 mV | 207 us |
+| 0 | **1 nF** | 0 dB (0) | 0 % (0) | 1.2 us (0.6) | 0 mV (0) | 34 us (32) |
+| 0 | 100 pF | 0.1 dB (0.2) | 2 % (3) | 2.6 us (2.7) | 17 mV (29) | 11 us (9) |
+| 1 nF | **1 nF** | 0.5 dB (0.5) | 6 % (6) | 29 us (29) | 118 mV (121) | 75 us (65) |
+| 1 nF | 100 pF | 3.9 dB (4.4) | 34 % (38) | 12 us (12) | 363 mV (394) | 27 us (24) |
+| 10 nF | **1 nF** | 3.0 dB (3.0) | 28 % (28) | 82 us (82) | 558 mV (558) | 179 us (157) |
+| 10 nF | 100 pF | 11.2 dB (11.8) | 66 % (68) | 124 us (129) | 916 mV (510) | 216 us (207) |
 
-Into 10 k with 1 nF: 0 % overshoot up to 1 nF of cable, 23 % at 10 nF; up to 1 nF of
-cable the slowest settle is 72 us (full scale, no cable), at 10 nF 131 us. VBUS 4.5 V changes nothing (the output stays
->= 2.2 V below the rail). A 3.5 mm patch cable is ~0.1 nF/m, so 1 nF is ~10 m and 10 nF
-is a stress case.
+Into 10 k with 1 nF (Microchip): 0 % overshoot up to 1 nF of cable, 23 % at 10 nF; up
+to 1 nF of cable the slowest settle is 73 us (full scale, no cable), at 10 nF 153 us.
+VBUS 4.5 V changes nothing (the output stays >= 2.2 V below the rail). A 3.5 mm patch
+cable is ~0.1 nF/m, so 1 nF is ~10 m and 10 nF is a stress case.
 
-The C51x sweep (RL 100 k, RO 100 R / 1 k):
+The C51x sweep (generic model, RL 100 k, RO 100 R / 1 k):
 
 | C51x | Overshoot, 1 nF cable | Overshoot, 10 nF | Full-scale settle, no cable | Full-scale settle, 1 nF |
 | --- | --- | --- | --- | --- |
@@ -138,18 +167,19 @@ The C51x sweep (RL 100 k, RO 100 R / 1 k):
 | **1 nF** | **6 %** | **27-28 %** | **32 us** | **64-65 us** |
 | 2.2 nF | 3 % | 17-18 % | 83 us | 119-120 us |
 
-**Shorted jack** (DAC at 2.048 V, 200 us short): 4.54 mA through R511 (20.6 mW in the
-0603), op-amp output at 4.54 V; MCP6004 short-circuit current is 23 mA, so the 1 k
-limits it. After the short opens the jack jumps to 4.7 V for a few microseconds and
-is back within 1 LSB in 100 us. Four shorted outputs draw 18 mA from VBUS.
+**Shorted jack** (DAC at 2.048 V, 200 us short, Microchip model): 4.81 mA through R511
+(23 mW in the 0603), op-amp output at 4.81 V; the MCP6004's own limit is ~21 mA, so the
+1 k sets the current. After the short opens the jack jumps to 4.93 V for a few
+microseconds and is back within 1 LSB in 101 us (37 us with 100 pF). Four shorted
+outputs draw 19 mA from VBUS. The generic model: 4.54 mA, 100 us.
 
-**Another module's output patched into a CV jack** (DC, DAC at 1 V):
+**Another module's output patched into a CV jack** (DC, DAC at 1 V; Microchip / generic):
 
-| Source | R511 current / power | Inverting input current |
+| Source | R511 current / power | Inverting input current (generic) |
 | --- | --- | --- |
-| +-10 V or +-12 V through 1 k | <= 7.9 mA / 63 mW | <= 0.31 mA |
-| -12 V stiff (0 R) | 15.2 mA / 230 mW | 1.13 mA |
-| +12 V stiff (0 R) | 10.8 mA / 117 mW | 0.63 mA |
+| +-10 V or +-12 V through 1 k | <= 8.3 / 7.9 mA, <= 69 / 63 mW | <= 0.31 mA |
+| -12 V stiff (0 R) | 16.3 / 15.2 mA, 267 / 230 mW | 1.13 mA |
+| +12 V stiff (0 R) | 11.6 / 10.8 mA, 134 / 117 mW | 0.63 mA |
 
 Within the MCP6004 maximum ratings (+-2 mA into the inputs, +-30 mA at the output).
 A stiff +-12 V rail patched in by mistake overloads the 0603 R51x (0.1 W); an 0805/1206
@@ -274,7 +304,7 @@ a generic soft-start without U201's current limit; the benches above replace bot
 
 ## Not covered
 
-- Vendor models (Microchip MCP6001, TI TPS2553, Vishay/onsemi H11L1, the DAC). The
+- Vendor models for TPS2553, H11L1 and the MCP4822 (the MCP6004 has Microchip's). The
   generic models carry the datasheet limits; the bench should confirm the CV step
   into the real synth with a 1-2 m cable, MIDI IN with a long cable, and TP201 at
   power-up.
