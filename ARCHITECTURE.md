@@ -160,12 +160,15 @@ so every input chip has a canary register: a value that differs from the
 power-on value, written first in the chip's configuration and read back after the
 data it vouches for (IODIR on 0x22 and 0x23, IPOL on 0x20 and 0x24). A reset at
 any moment after the canary write clears it. The scanner checks both of its chips
-at the start of every scan; the step row reads IPOL back after every sample and
-uses the ports only if it holds. A chip that failed either check is configured
-again, and the step row's next good read becomes its baseline without events. The
-step-LED expander still has its IODIR read back about once a second. A failed
-button read keeps the last accepted state and makes no long press; the step LED
-mask is cached only after a successful write. GPA7 and GPB7 of every expander are
+at the start of every scan, and again right after any sample that would settle a
+key, which counts only if that check passes; the step row reads IPOL back after
+every sample and uses the ports only if it holds. A chip that failed either check
+is configured again, and the step row's next good read becomes its baseline
+without events. The step-LED expander still has its IODIR read back about once a
+second. A failed button read keeps the last accepted state and makes no long
+press. A step long-presses only in a pass that just took a good sample of its
+chip, so up to 20 ms late and never on a sample from before its release; the
+step LED mask is cached only after a successful write. GPA7 and GPB7 of every expander are
 outputs (output-only on current MCP23017 datasheets; a level change on them
 during a read can corrupt SDA). Core 1 never touches I2C or the LEDs.
 
@@ -175,8 +178,15 @@ waits for a whole scan (2.7-3 ms) and the encoders keep their rate. At most one
 column is low when the rows are read. A key's state changes only in the pass that
 sampled its column, and only at a sample at least 5 ms (`PANEL_DEBOUNCE_MS`)
 after the sample that first saw the change, with every sample between agreeing.
-Press to event is about 7-10 ms typical and about 14 ms worst by estimate, target
-15 ms (bench item). Contract: the scan has no event FIFO. A tap shorter than the
+A sample that would settle a key (report it, or end its suppression) is followed
+in the same pass by the configuration check and counts only if the check passes,
+so a chip that resets after the scan's check never supplies it; such a pass makes
+at most 8 transfers (the column, then the check), any other at most 4.
+Press to event is about 7-10 ms typical and about 14.3 ms worst by estimate for a
+key changing alone, target 15 ms (bench item); each other key settling in the same
+scans adds its check (0.27 ms). The host loop model, which counts wire bytes only
+(no START/STOP or SDK call overhead) and is not a device measurement, gives 14.44
+ms worst with a key change about every 0.19 ms. Contract: the scan has no event FIFO. A tap shorter than the
 debounce, or one that starts and ends while the bus is down or the scanner is
 being reconfigured, is lost. On any I2C error, failed check or mismatch the
 scanner is configured again before any further sample; every pending key change

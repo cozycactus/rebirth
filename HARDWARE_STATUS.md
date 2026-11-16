@@ -5,7 +5,7 @@ Last updated: 2026-11-16
 ## Migrating An Existing Build
 
 The Session panel changes two things an existing board must provide even
-without the new grid, and the key scanner changes three more:
+without the new grid, and the key scanner changes two more:
 
 - **PLAY on GPIO 28.** PLAY is now the only start/stop; the encoder presses no
   longer start or stop the transport. Wire a momentary switch from GPIO 28 to
@@ -13,19 +13,17 @@ without the new grid, and the key scanner changes three more:
 - **External I2C pull-ups.** The RP2040's internal pull-ups on SDA (GPIO 8) and
   SCL (GPIO 9) are now disabled. Fit 2.2-4.7 kOhm pull-ups from each line to
   3.3 V, or the step buttons and step LEDs stop working.
-
 - **Key scanner.** The TCA8418 (0x34) is replaced by two MCP23017, U801 at 0x22
   and U802 at 0x23, scanning the diode matrix (pin map in
-  `hardware/schematic/README.md`). Without them the panel keys simply report
-  nothing (the configuration is retried every 100 ms); the TCA8418 is no longer
-  read.
+  `hardware/schematic/README.md`); the TCA8418 is no longer read.
 - **Steps 8 and 16 on U703 (0x24), GPA0 and GPA1.** They were on GPA7 and GPB7
   of 0x20, which are output-only on current MCP23017 datasheets. An existing
   board with those two buttons on 0x20 loses steps 8 and 16: the firmware now
   drives those pins low (a button to GND there is harmless). Add U703 at 0x24,
   or live with 14 steps; a missing U703 costs only those two.
 
-Without the LED chain GPIO 27 drives nothing.
+Without U801 and U802 the panel keys simply report nothing (the configuration is
+retried every 100 ms); without the LED chain GPIO 27 drives nothing.
 
 ## Verified In This Repo
 
@@ -50,15 +48,18 @@ Without the LED chain GPIO 27 drives nothing.
   config readback, retries limited to one per 100 ms on a dead bus, step
   button and encoder resync after a flash stall, and internal pulls off on
   GPIO 8/9, and a reset button expander (0x20 or 0x24) whose idle lines read
-  as pressed, reads only when a sample is due, steps 8 and 16 from 0x24 and a
-  missing 0x24. Key scan tests run the driver over a fake key matrix: register
-  values, one column low at every row read, a fault at every transfer, a reset
-  of either chip before any transfer or inside a read. Panel input tests cover
-  the same for the scanner, plus a chord of all 80 keys without ghosts, keys or
-  PLAY held through a resync, keys released during a stall, a tap lost during
-  an outage, and press-to-event within 15 ms in a host loop model (11.44 ms
-  worst; the device is not measured). Storage tests cover the input resync
-  after save and load.
+  as pressed, reads only when a sample is due, steps 8 and 16 from 0x24, a
+  missing 0x24, and a long press only at a fresh good sample (a 499 ms hold
+  never long-presses). Key scan tests run the driver over a fake key matrix:
+  register values, one column low at every row read, a fault at every
+  transfer, a reset of either chip before any transfer or inside a read. Panel
+  input tests cover the same for the scanner, plus a chord of all 80 keys
+  without ghosts, keys or PLAY held through a resync, keys released during a
+  stall, a tap lost during an outage, a chip reset after the scan's check that
+  would settle a tap, a chatter or the end of a suppression, and press-to-event
+  within 15 ms in a host loop model (14.44 ms worst; the model counts wire
+  bytes only, with no START/STOP or SDK call overhead, and is not a device
+  measurement). Storage tests cover the input resync after save and load.
 - DAC command tests cover the 2.048 V reference, both gains and octave scaling.
 
 ## Needs Bench Verification
@@ -76,8 +77,9 @@ Without the LED chain GPIO 27 drives nothing.
 
 ### Session panel
 
-- Press-to-event latency (target 15 ms; estimated 7-10 ms typical, 14 ms worst)
-  for pads, SCENE and MUTE, and the frame pass and the scan period on the device.
+- Press-to-event latency (target 15 ms; estimated 7-10 ms typical, 14.3 ms
+  worst for a key alone, more while many keys change at once) for pads, SCENE
+  and MUTE, and the frame pass and the scan period on the device.
 - Several keys held at once: no ghost presses. Each SCENE and MUTE key held:
   no other key reports.
 - Row rise time after a column is released (scope on a row with a key held in

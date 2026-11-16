@@ -709,7 +709,8 @@ static int paced_configurations(bool reset_u802_every_pass) {
         int txn = fake_matrix_txn;
         uint32_t t = now_ms;
         pass();
-        if (fake_matrix_txn - txn != 6) continue;      // only a configuration makes 6
+        // Only a configuration makes 6: no key changes, so no sample brings its check.
+        if (fake_matrix_txn - txn != 6) continue;
         CHECK(configurations == 0 || t - last >= PANEL_RETRY_MS);
         last = t;
         configurations++;

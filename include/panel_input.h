@@ -30,7 +30,11 @@ void panel_input_init(void);
 // least PANEL_DEBOUNCE_MS after the sample that first saw it, every sample in
 // between agreeing; a change that does not last until then is lost, as is one
 // that starts and ends while its column is not sampled (bus down, scanner
-// being reconfigured). Any I2C error, or a check that finds a chip changed
+// being reconfigured). A sample that would settle a key (report its change or
+// end its suppression) is followed by the check in its own pass and counts
+// only if the check passes, so a chip that resets never supplies one: a pass
+// makes at most 8 transfers (the column, then the check), a configuration
+// attempt 6. Any I2C error, or a check that finds a chip changed
 // (reset), cancels every pending change and configures both chips again (a
 // pass of its own) before the next sample; reported states stay, so a key
 // held through it is not reported again. A configuration attempt fails when

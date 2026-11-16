@@ -25,7 +25,7 @@ typedef struct {
     uint16_t    pressed;            // Bits that just became pressed
     uint16_t    released;           // Bits that just became released
     uint16_t    held;               // Bits currently held down
-    uint16_t    long_pressed;       // Bits held > 500ms (fires once per press)
+    uint16_t    long_pressed;       // Bits held >= 500 ms at a good sample (once per press)
 
     // Internal
     uint16_t    _raw;               // Current debounced state
@@ -45,10 +45,13 @@ void mcp23017_init(void);
 
 // Poll button state — call from ui_update() on every pass. The chips are read
 // only when a sample is due (every MCP_DEBOUNCE_MS), or at once for a chip
-// whose rebaseline is pending; between samples the edges and the long-press
-// timer run from the last one. Each chip's ports count only if IPOL, read
-// back after them, still holds. A chip that reset (IPOL lost) is configured
-// again and its next good read becomes its baseline, with no events. A chip
+// whose rebaseline is pending; between samples the state stays as the last
+// one left it. A long press fires only in a pass that just took a good sample
+// of the key's chip, the first at or after MCP_LONG_PRESS_MS (up to one sample
+// late), so a step released before that sample never long-presses. Each
+// chip's ports count only if IPOL, read back after them, still holds. A chip
+// that reset (IPOL lost) is configured again and its next good read becomes
+// its baseline, with no events. A chip
 // with an I2C error or a reset keeps its keys as they were, with no long
 // press, until its next good sample; its configuration is written again
 // before its next read, and an attempt after a failed one (a configuration
