@@ -339,8 +339,8 @@ def sheet_mcu(d):
          "U301 plugs in on headers. All 26 header GPIOs are used; further controls go on I2C. Flags lead to sheets 4-9.",
          "VBUS (pin 40) and 3V3 (pin 36) are the board's 5 V and 3.3 V sources (power-output pins); sheet 2 has the budget.")
     note(sh, 20.32, 76.2,
-         "I2C0 400 kHz: 0x20 step buttons, 0x21 step LEDs (sheet 7),",
-         "0x34 TCA8418 key matrix (sheet 8).",
+         "I2C0 400 kHz: 0x20 + 0x24 step buttons, 0x21 step LEDs",
+         "(sheet 7), 0x34 TCA8418 key matrix (sheet 8).",
          "R301/R302: external pull-ups, the firmware turns the",
          "internal ones off. 2.2 k suits up to ~150 pF; fit up",
          "to 4.7 k when the measured bus allows it.")
@@ -699,13 +699,14 @@ def sheet_top(d):
 
 # ------------------------------------------------------------------ sheet 7: step row
 
-def mcp_block(sh, ref, X, Y, addr_a0_high, kind, refs):
+def mcp_block(sh, ref, X, Y, addr_a0_high, kind, refs, skip=()):
+    """MCP23017 with its 16 pins fanned out to 7.62 mm rows. skip: (port, bit) pins left open."""
     conn = {"9": "+3V3", "10": "GND", "12": "I2C_SCL", "13": "I2C_SDA", "18": ref + "_RESET_N",
             "15": "+3V3" if addr_a0_high else "GND", "16": "GND", "17": "GND", "19": None, "20": None,
             "11": None, "14": None}
     for k in range(8):
-        conn[str(21 + k)] = "%s_GPA%d" % (ref, k)
-        conn[str(1 + k)] = "%s_GPB%d" % (ref, k)
+        conn[str(21 + k)] = None if ("A", k) in skip else "%s_GPA%d" % (ref, k)
+        conn[str(1 + k)] = None if ("B", k) in skip else "%s_GPB%d" % (ref, k)
     place(sh, "Interface_Expansion:MCP23017x-x-SO", ref, "MCP23017", X, Y, fp=FP_SO28W, conn=conn,
           ref_at=(2.54, -26.67, "left"), val_at=(2.54, 26.67, "left"))
     # bus
@@ -758,8 +759,12 @@ def mcp_block(sh, ref, X, Y, addr_a0_high, kind, refs):
         else:
             xj = xp + 2.54 * (8 - k)
         net = "%s_GP%s%d" % (ref, port, k)
-        sh.wire((px, py), (xj, py), (xj, target), (xs, target))
         step = idx + 1
+        if (port, k) in skip:
+            sh.nc((px, py))
+            sh.text("STEP %d: SW%d on U703 (0x24), below" % (step, 700 + step), (xs, target + 0.635))
+            continue
+        sh.wire((px, py), (xj, py), (xj, target), (xs, target))
         if kind == "buttons":
             sw = "SW%d" % (700 + step)
             place(sh, "Switch:SW_Push", sw, "STEP %d" % step, xs + 5.08, target, fp=FP_TACT,
@@ -782,24 +787,82 @@ def mcp_block(sh, ref, X, Y, addr_a0_high, kind, refs):
             sh.text("STEP %d" % step, (xs + 24.13, target + 0.635))
 
 
+def extra_buttons_block(sh, X, Y):
+    """U703 at 0x24: steps 8 and 16, kept off the output-only GPA7/GPB7 of U701."""
+    ref = "U703"
+    conn = {"9": "+3V3", "10": "GND", "12": "I2C_SCL", "13": "I2C_SDA", "18": "U703_RESET_N",
+            "15": "GND", "16": "GND", "17": "+3V3", "19": None, "20": None, "11": None, "14": None,
+            "21": "U703_GPA0", "22": "U703_GPA1"}
+    unused = [str(p) for p in list(range(23, 29)) + list(range(1, 9))]
+    for p in unused:
+        conn[p] = None
+    place(sh, "Interface_Expansion:MCP23017x-x-SO", ref, "MCP23017", X, Y, fp=FP_SO28W, conn=conn,
+          ref_at=(2.54, -26.67, "left"), val_at=(2.54, 26.67, "left"))
+    for pin, net, shape in (("12", "I2C_SCL", "input"), ("13", "I2C_SDA", "bidirectional")):
+        px, py = sh.pin(ref, pin)
+        sh.wire((px, py), (X - 27.94, py))
+        sh.hlabel(net, (X - 27.94, py), shape, "left")
+    for pin in ["19", "20"] + unused:
+        sh.nc(sh.pin(ref, pin))
+    rx, ry = sh.pin(ref, "18")
+    sh.wire((rx, ry), (X - 17.78, ry), (X - 17.78, ry - 2.54))
+    res(sh, "R719", "10k", X - 17.78, ry - 6.35, {"1": "+3V3", "2": "U703_RESET_N"}, fields=LEFT)
+    sh.wire((X - 17.78, ry - 10.16), (X - 17.78, ry - 12.7))
+    rail(sh, "+3V3", X - 17.78, ry - 12.7)
+    # address 0x24: A2 = 1, A1 = A0 = 0
+    a0 = sh.pin(ref, "15")
+    a1 = sh.pin(ref, "16")
+    a2 = sh.pin(ref, "17")
+    sh.wire(a0, (X - 15.24, a0[1]), (X - 15.24, a1[1]))
+    sh.wire(a1, (X - 15.24, a1[1]))
+    sh.wire((X - 15.24, a0[1]), (X - 30.48, a0[1]), (X - 30.48, a2[1] + 5.08))
+    gnd(sh, X - 30.48, a2[1] + 5.08)
+    sh.wire(a2, (X - 20.32, a2[1]))
+    rail(sh, "+3V3", X - 20.32, a2[1])
+    sh.wire((X, Y - 25.4), (X, Y - 27.94))
+    rail(sh, "+3V3", X, Y - 27.94)
+    sh.wire((X, Y + 25.4), (X, Y + 27.94))
+    gnd(sh, X, Y + 27.94)
+    decap(sh, "C703", "100n", X - 22.86, Y - 33.02, "+3V3")
+    xp = X + 12.7
+    xs = xp + 33.02
+    p0 = sh.pin(ref, "21")
+    p1 = sh.pin(ref, "22")
+    rows = [(8, "U703_GPA0", [p0, (xs, p0[1])], p0[1]),
+            (16, "U703_GPA1", [p1, (xp + 2.54, p1[1]), (xp + 2.54, p1[1] + 5.08), (xs, p1[1] + 5.08)],
+             p1[1] + 5.08)]
+    for step, net, path, target in rows:
+        sh.wire(*path)
+        sw = "SW%d" % (700 + step)
+        place(sh, "Switch:SW_Push", sw, "STEP %d" % step, xs + 5.08, target, fp=FP_TACT,
+              conn={"1": net, "2": "GND"}, ref_at=(0, -4.445, "center"), val_at=(0, 2.54, "center"),
+              hide_val=True)
+        sh.wire((xs + 10.16, target), (xs + 12.7, target))
+        gnd(sh, xs + 12.7, target)
+        sh.text("STEP %d" % step, (xs + 16.51, target + 0.635))
+
+
 def sheet_steps(d):
-    sh = d.sheet("Step_row", "step_row.kicad_sch", "Step row: 16 buttons (MCP23017 0x20) and 16 LEDs (0x21)", "A3", 7)
+    sh = d.sheet("Step_row", "step_row.kicad_sch",
+                 "Step row: 16 buttons and 16 LEDs on MCP23017", "A3", 7)
     sh.heading("Step buttons: MCP23017 at 0x20 (A2 A1 A0 = 000)", (20.32, 30.48))
     sh.heading("Step LEDs: MCP23017 at 0x21 (A0 = 1)", (215.9, 30.48))
-    mcp_block(sh, "U701", 76.2, 106.68, False, "buttons", {"reset": "R717", "cap": "C701"})
+    mcp_block(sh, "U701", 76.2, 106.68, False, "buttons", {"reset": "R717", "cap": "C701"},
+              skip={("A", 7), ("B", 7)})
     mcp_block(sh, "U702", 271.78, 106.68, True, "leds", {"reset": "R718", "cap": "C702"})
-    note(sh, 20.32, 180.34,
-         "Firmware (unchanged hardware): U701 all 16 pins inputs with internal pull-ups and inverted polarity, read",
-         "as one 16-bit word, bit n = STEP n+1 (GPA0-7 = steps 1-8, GPB0-7 = steps 9-16). U701 INTA/INTB unused (polled).",
-         "SW701-SW716: 6x6 mm tactile, pressed = low.",
-         "",
-         "WARNING: the current MCP23017 datasheet (DS20001952 rev. D and later) makes GPA7 and GPB7 output-only;",
-         "a level change on them during a read can corrupt SDA for the whole bus. Steps 8 and 16 sit on those pins",
-         "as the firmware expects. Open point 1 in README: to be moved before the PCB.")
+    sh.heading("Steps 8 and 16: MCP23017 at 0x24 (A2 = 1)", (20.32, 187.96))
+    extra_buttons_block(sh, 76.2, 236.22)
     note(sh, 215.9, 180.34,
-         "U702: all 16 pins outputs, bit n high = STEP n+1 lit (GPA0-7 = 1-8, GPB0-7 = 9-16).",
-         "D701-D716: red 3 mm LEDs, 470 R: about 3 mA each from 3.3 V, 48 mA with all lit.",
-         "GPA7/GPB7 as outputs are fine.")
+         "Buttons: SW701-SW716, 6x6 mm tactile, pressed = low, internal pull-ups, inverted polarity.",
+         "U701 (0x20): GPA0-6 = steps 1-7, GPB0-6 = steps 9-15 (bit n = STEP n+1, as before).",
+         "U703 (0x24): GPA0 = step 8, GPA1 = step 16; its other pins are unused.",
+         "GPA7/GPB7 of U701 and U703 are output-only in the current MCP23017 datasheet",
+         "(DS20001952 rev. D+; a level change during a read can corrupt SDA): left open,",
+         "the firmware must configure them as outputs. INTA/INTB unused (polled).",
+         "",
+         "U702 (0x21): all 16 pins outputs, bit n high = STEP n+1 lit (GPA0-7 = 1-8,",
+         "GPB0-7 = 9-16); GPA7/GPB7 as outputs are fine. D701-D716: red 3 mm LEDs, 470 R,",
+         "about 1.5-3 mA each from the expander's 3.3 V outputs.")
     return sh
 
 
@@ -1047,10 +1110,10 @@ def root_sheet(d, sheets):
          "4  OLED_CS_N               28  PLAY_N",
          "5  OLED_DC",
          "6  OLED_RST_N              I2C0 400 kHz, external pull-ups:",
-         "7  JITTER_PROBE (TP301)      0x20  MCP23017 step buttons",
+         "7  JITTER_PROBE (TP301)      0x20  MCP23017 step buttons 1-7, 9-15",
          "8  I2C_SDA                   0x21  MCP23017 step LEDs",
-         "9  I2C_SCL                   0x34  TCA8418 key matrix",
-         "10 DAC_SCK (SPI1)",
+         "9  I2C_SCL                   0x24  MCP23017 step buttons 8, 16",
+         "10 DAC_SCK (SPI1)            0x34  TCA8418 key matrix",
          "11 DAC_MOSI",
          "12 DAC_CS1_N (U501: CV1 CV2)",
          "13 DAC_CS2_N (U502: CV3 CV4)")

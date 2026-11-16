@@ -27,7 +27,7 @@ fails if the drawing connects anything differently, then runs ERC.
 | 4 | `midi.kicad_sch` | MIDI OUT (CA-033, 3.3 V: 33 R / 10 R, buffer U401), MIDI IN (H11L1 opto, reserved) |
 | 5 | `cv_gate.kicad_sch` | U501/U502 MCP4822, U503 MCP6004 buffers, CV 1-4 jacks; U504 74AHCT125 gates 1-4 |
 | 6 | `top_strip.kicad_sch` | OLED header J601 (SSD1309, SPI0), encoders TRACK/VALUE with RC filters, PLAY |
-| 7 | `step_row.kicad_sch` | MCP23017 0x20 (16 step buttons), MCP23017 0x21 (16 step LEDs) |
+| 7 | `step_row.kicad_sch` | MCP23017 0x20 (step buttons 1-7, 9-15), 0x24 (steps 8, 16), 0x21 (16 step LEDs) |
 | 8 | `key_matrix.kicad_sch` | U801 TCA8418 (0x34), 8 x 10 matrix: 64 pads, 8 SCENE, 8 MUTE, one 1N4148W per key |
 | 9 | `rgb_chain.kicad_sch` | U901 74AHCT1G125, 82 x SK6812MINI-E with 100 nF each, bulk C984 (A2 sheet) |
 
@@ -40,7 +40,9 @@ D9nn is chain position nn, which equals firmware logical index nn-1.
 - GPIO map exactly as in the design: MIDI 0/1, OLED SPI0 2-6, jitter probe 7, I2C0 8/9,
   DAC SPI1 10-13 (CS 12 = U501 = CV1/CV2, CS 13 = U502 = CV3/CV4, channel A = odd CV),
   gates 14-17, encoder 1 = 18/19/20, encoder 2 = 21/22/26, LED data 27, PLAY 28.
-- I2C: 0x20 buttons, 0x21 LEDs, 0x34 TCA8418; external 2.2 k pull-ups.
+- I2C: 0x20 buttons 1-7 and 9-15, 0x24 buttons 8 and 16, 0x21 LEDs, 0x34 TCA8418;
+  external 2.2 k pull-ups. The 0x24 expander is new and needs firmware support
+  (decision 10).
 - Key matrix: ROW r = slot r+1; COL 0-7 = track 1-8, COL 8 = SCENE (row), COL 9 = MUTE
   (track = row + 1), as in the plan's table. TCA8418 INT not connected (polled).
 - RGB chain order is the plan's logical order (`LED_PAD(track,row) = row*8 + track`,
@@ -89,7 +91,7 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
    the DAC's gain/offset errors (about +-2 % FSR) need a per-channel calibration in
    firmware, which does not exist yet.
 3. **Gates are 5 V** (74AHCT125 on VBUS, 1 k series, 100 k pull-downs at the inputs and at
-   the jacks). ARCHITECTURE.md only says the GPIOs are 3.3 V logic; see open point 4.
+   the jacks). ARCHITECTURE.md only says the GPIOs are 3.3 V logic; see open point 3.
 4. **Encoder RC filters** (10 k pull-up, 10 k series, 10 nF) on A/B; the internal
    pull-ups stay on in firmware and do no harm.
 5. **AGND** of the Pico joins GND through R303 (0 R) at one point. The Pico symbol
@@ -106,33 +108,32 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
 9. **Defined states**: R802 pulls the TCA8418's open-drain INT up (datasheet), R903 holds
    the first LED's DIN low while U901 is unpowered, C506/C507 add local bulk at U502 and
    the VBUS buffers.
+10. **Steps 8 and 16 on a third MCP23017 (U703, 0x24; decided by the owner).** The current
+    MCP23017 datasheet (DS20001952 rev. D, 2022, and later) makes GPA7/GPB7 output-only;
+    Microchip's support note, as quoted on EEVblog, says a level change on them during a
+    read can corrupt SDA, so buttons there could upset the whole I2C bus. SW708/SW716 now
+    sit on U703 GPA0/GPA1 (A2 = 1, A1 = A0 = 0; 0x22/0x23 stay free for the design's
+    matrix fallback). U701 GPA7/GPB7 and all unused U703 pins are left open.
+    **Firmware change needed** (the firmware is not touched here): read U703 GPA0/GPA1 as
+    steps 8/16 (same register setup as 0x20: inputs, pull-ups, inverted polarity), stop
+    using U701 bits 7 and 15 as buttons, and configure GPA7/GPB7 of U701 and U703 as
+    outputs. U703's spare pins can later drive U201 EN or TCA8418 RESET (open point 2).
 
 ## Open points for the owner (design-level, not changed here)
 
-1. **MCP23017 GPA7/GPB7 must not be inputs.** The current MCP23017 datasheet
-   (DS20001952 rev. D, 2022, and later) makes them output-only; Microchip's support note,
-   as quoted on EEVblog, says a level change on them during a read can corrupt SDA, so a
-   bouncing button there can upset the whole I2C bus (TCA8418 and the LED expander too).
-   Steps 8 and 16 sit on 0x20's GPA7/GPB7, as the unchanged firmware expects. Options, all
-   with a firmware change: (a) a third MCP23017 at 0x24 for steps 8 and 16 (same driver;
-   its spare pins can also drive U201 EN and TCA8418 RESET, see 3); (b) a PCA9555/TCA9555
-   at 0x20 instead of U701 (16 real I/O, new register map); (c) no new part: buttons 8/16
-   on two bidirectional pins of 0x21 and LEDs 8/16 on 0x20's GPA7/GPB7 (mixed ports in
-   both drivers). The design's matrix fallback (MCP23017 at 0x22/0x23) works only with
-   GPA7/GPB7 as column outputs.
-2. **TCA8418 latency.** TI's datasheet (SCPS215G, 8.6.2.15) scans the keypad every 25 ms
+1. **TCA8418 latency.** TI's datasheet (SCPS215G, 8.6.2.15) scans the keypad every 25 ms
    and reports a press after 25-40 ms; disabling debounce does not change that. The design
    asks for <= 15 ms press-to-event. Either accept 25-40 ms (plus firmware debounce), or
    switch the matrix to the design's fallback scanner (two MCP23017), or lay out both on
    the board and fit one after a bench test.
-3. **LED rail before enumeration.** EN = +3V3 turns the chain on before any firmware runs;
+2. **LED rail before enumeration.** EN = +3V3 turns the chain on before any firmware runs;
    82 x ~1 mA idle plus the Pico exceed the 100 mA an unconfigured USB device may draw.
    If the design's fallback (minimal USB enumeration asking for 500 mA) is ever needed,
-   EN must be firmware-controlled (an expander output with a pull-down). Enumeration
+   EN must be firmware-controlled (a spare U703 output with a pull-down). Enumeration
    goes through the Pico's own micro-USB (D+/D- are not on its header).
-4. **Gate level.** Gates are 5 V here; confirm that the target synths want 5 V gates
+3. **Gate level.** Gates are 5 V here; confirm that the target synths want 5 V gates
    (most do), or drop U504 for 3.3 V gates through 1 k.
-5. **DAC gain 2x is not possible on this board.** With the DACs on +3V3 only the default
+4. **DAC gain 2x is not possible on this board.** With the DACs on +3V3 only the default
    1x (0-2.048 V, about two octaves) works. `-DREBIRTH_CV_DAC_GAIN=2` would need the DACs
    on VBUS and 3.3 V -> 5 V buffers on their SPI lines (ARCHITECTURE.md already says so);
    a firmware `#error` for gain 2 on this board would prevent a wrong build.
@@ -154,7 +155,7 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
 
 ## Verification
 
-- Netlist exported from the root equals the generator's declared nets (306 nets, every
+- Netlist exported from the root equals the generator's declared nets (307 nets, every
   pin of every part, 0 differences); `kicad-cli sch erc`: 0 violations (with KiCad's
   default symbol library table installed; without it ERC reports library warnings only).
 - `readable-schematic` lint: 0 errors. Advisories accepted: `flag_side` on the Pico's
