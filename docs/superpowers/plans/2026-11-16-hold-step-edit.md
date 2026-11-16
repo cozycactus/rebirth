@@ -669,3 +669,164 @@ Expected: ends with `Built target rp2040_sequencer`.
 git add include/sequencer.h src/display.c src/ui.c test/test_ui.c README.md
 git commit -m "Show held step values in Pattern View"
 ```
+
+---
+
+### Task 3: Final review fixes
+
+Three reviewers read the branch after Tasks 1 and 2. Each found one place where `handle_pattern_view` departs from the spec, and several tests that a wrong implementation would pass. The spec was amended in Behaviour 2 and 3; read those two items again before starting.
+
+**Files:**
+- Modify: `src/ui.c` — `ui_state_t`, `clear_grid_gesture`, `handle_pattern_view`
+- Test: `test/test_ui.c`
+
+**Interfaces:**
+- Consumes: the state and helpers Task 1 added (`ui.grid_hold`, `ui.grid_tap_pending`, `ui.grid_enc_target[]`, `edit_held_steps()`; test helpers `step_down`, `step_up`, `turn`, `encoder_down`, `encoder_up`, `enter_pattern_view`, `tick`, `STEP`).
+- Produces: nothing new for other code.
+
+**Findings to fix:**
+
+1. *A long press does not reach steps that join later.* `BTN_LONG_PRESS` arrives once, while the encoder button is still down. A step pressed after that, with the button still down, enters `ui.grid_enc_target[enc]` and loses its tap but receives no edit. Required: once `BTN_LONG_PRESS` has edited an encoder's targets, every step that enters `ui.grid_enc_target[enc]` afterwards, while that button stays down, receives the same long-press edit exactly once, in the update in which it joins. A step that already received it is not toggled again if it is released and pressed again. The record of who received it is dropped wherever `ui.grid_enc_target[enc]` is dropped.
+2. *An encoder event edits a step it does not belong to.* The targets of an encoder button event are `ui.grid_enc_target[enc] | ui.grid_hold`. When a short press completes (button already up) in the same update in which a new step is first seen down, that step is edited and its tap is cancelled. Required: the targets of a button event are `ui.grid_enc_target[enc]` alone. The mask is already filled while the button is down and survives until after the dispatch.
+3. *A turn in the same update as a first press leaves the tap pending.* Required: when `e1d` or `e2d` is non-zero, the steps in `steps->pressed` lose their `ui.grid_tap_pending` bit. They are still not edited, and the turn still does not navigate.
+
+- [ ] **Step 1: Write the failing tests**
+
+In `test/test_ui.c`, replace `test_grid_turn_in_the_same_update_as_the_press_is_not_an_edit` (and its `RUN` line) with:
+
+```c
+static void test_grid_turn_in_the_same_update_as_the_press_cancels_the_tap(void) {
+    enter_pattern_view();
+    deltas[0] = 2;
+    step_down(1u << 4);
+    CHECK(STEP(0, 4).flags == 0);
+    CHECK(ui.selected_track == 0);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == 0);           // neither edited nor toggled
+    CHECK(STEP(0, 4).note == 0);
+}
+```
+
+Add these tests with a `RUN(...)` line each:
+
+```c
+static void test_grid_long_press_applies_to_later_steps(void) {
+    for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
+        reset();
+        enter_pattern_view();
+        uint8_t flag = enc == 0 ? STEP_FLAG_SLIDE : STEP_FLAG_TIE;
+        step_down(1u << 4);
+        encoder_down(enc);
+        press_encoder(enc, BTN_LONG_PRESS);
+        CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | flag));
+        step_up(1u << 4);
+        step_down(1u << 9);                 // the same encoder button is still down
+        CHECK(STEP(0, 9).flags == (STEP_FLAG_ACTIVE | flag));
+        for (unsigned i = 0; i < 3; i++) ui_update();
+        CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | flag));
+        CHECK(STEP(0, 9).flags == (STEP_FLAG_ACTIVE | flag));
+        step_down(1u << 4);                 // an earlier target is not toggled twice
+        step_up((1u << 4) | (1u << 9));
+        encoder_up(enc, BTN_RELEASE);
+        CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | flag));
+        CHECK(STEP(0, 9).flags == (STEP_FLAG_ACTIVE | flag));
+        CHECK(ui.mode == UI_PATTERN_VIEW);
+        turn(0, 1);
+        CHECK(ui.selected_track == 1);
+    }
+}
+
+static void test_grid_encoder_press_ending_as_a_step_goes_down_is_not_part_of_it(void) {
+    enter_pattern_view();
+    encoder_down(0);                        // no step is held yet
+    held[0] = false;
+    buttons[0] = BTN_PRESS;                 // the short press completes ...
+    step_down(1u << 9);                     // ... in the update that first sees step 10 down
+    CHECK(STEP(0, 9).flags == 0);           // not created, not accented
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    step_up(1u << 9);
+    CHECK(STEP(0, 9).flags == STEP_FLAG_ACTIVE);    // an ordinary tap
+    CHECK(STEP(0, 9).note == 60);
+}
+
+static void test_grid_tap_edits_selected_track_and_pattern(void) {
+    enter_pattern_view();
+    turn(0, 4);                             // track 5
+    CHECK(ui.selected_track == 4);
+    g_seq.active_pattern[4] = 3;            // editor on A4 while A1 plays
+    step_down(1u << 3);
+    step_up(1u << 3);
+    CHECK(g_seq.patterns[3].steps[4][3].flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(4, 3).flags == 0);
+    CHECK(STEP(0, 3).flags == 0);
+}
+
+static void test_grid_driver_long_press_event_does_not_toggle(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    sleep_ms(MCP_LONG_PRESS_MS);
+    step_buttons.long_pressed = 1u << 4;    // what mcp23017 emits at 500 ms
+    ui_update();
+    CHECK(STEP(0, 4).flags == 0);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == 0);           // peek, not a tap
+}
+
+static void test_grid_hold_edit_refreshes_the_edited_track_and_pattern(void) {
+    turn(0, 4);                             // Performance: track 5
+    step_down(1u << 11);                    // slot 4: A4 is selected at once while stopped
+    step_up(1u << 11);
+    CHECK(g_seq.transport.current_pattern[4] == 3);
+    enter_pattern_view();
+    step_down(1u << 0);
+    turn(1, -10);                           // drum hit at velocity 90
+    step_up(1u << 0);
+    CHECK(g_seq.patterns[3].steps[4][0].flags == STEP_FLAG_ACTIVE);
+    transport_start();
+    fake_midi_length = 0;
+    timer_hw->alarm[0] = pulse_interval_us;
+    tick();
+    unsigned found = 0;
+    for (unsigned i = 0; i + 2 < fake_midi_length; i++) {
+        if (fake_midi[i] == (MIDI_NOTE_ON | 4) && fake_midi[i + 1] == 40 &&
+            fake_midi[i + 2] == 90) found++;
+    }
+    CHECK(found == 1);
+}
+
+static void test_step_edit_note_and_velocity_still_work(void) {
+    press_encoder(0, BTN_PRESS);            // Pattern View
+    press_encoder(0, BTN_PRESS);            // Step Edit, step 1
+    CHECK(ui.mode == UI_STEP_EDIT);
+    turn(0, 3);
+    CHECK(STEP(0, 0).note == 3);
+    turn(1, 10);
+    CHECK(STEP(0, 0).velocity == 10);
+    CHECK(STEP(0, 0).flags == 0);           // Step Edit does not activate a step
+}
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cmake --build test/build -j && ctest --test-dir test/build --output-on-failure -R ui_tests`
+Expected: `ui_tests` FAILS. Run `test/build/test_ui` and note which of the new tests fail before any code change: the three that cover the findings must fail (`..._cancels_the_tap`, `..._applies_to_later_steps`, `..._is_not_part_of_it`); the other four pin behaviour that is already correct and are expected to pass. To see each of the three fail, comment out the earlier failing `RUN` line temporarily, and restore it.
+
+- [ ] **Step 3: Fix the three findings in `handle_pattern_view`**
+
+Implement the three "Required" statements above. The state that records which targets already received a long press is yours to name; it lives in `ui_state_t` next to `grid_enc_target` and is cleared in `clear_grid_gesture()` and wherever `ui.grid_enc_target[enc]` is reset. Keep every pattern write under the existing `seq_lock()` section and the single refresh after it.
+
+- [ ] **Step 4: Run all host tests and build the firmware**
+
+Run: `cmake --build test/build -j && ctest --test-dir test/build --output-on-failure`
+Expected: `100% tests passed out of 7`.
+
+Run: `cmake --build build -j`
+Expected: ends with `Built target rp2040_sequencer`.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/ui.c test/test_ui.c
+git commit -m "Fix hold-step issues found in the multi-model review"
+```
+

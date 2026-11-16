@@ -22,14 +22,19 @@ Applies to `UI_PATTERN_VIEW` only.
 2. **Hold and turn.** While one or more steps are held, encoder 1 changes the
    note and encoder 2 changes the velocity of every held step. Range and
    clamping are the same as in Step Edit (0-127). A turn that arrives in the
-   same update as a step's first press does not edit that step.
+   same update as a step's first press does not edit that step, but it cancels
+   that step's tap: whether the turn came before or after the press cannot be
+   known, and no toggle is the safe outcome.
 3. **Hold and press an encoder.** An encoder button that is down at any moment
    while steps are held belongs to the gesture until that button is released.
    Its event applies to every step that was held while it was down, even if
    those steps were released before the encoder button: encoder 1 short
    toggles accent, encoder 1 long toggles slide (clearing tie), encoder 2 long
    toggles tie (clearing slide). Each step is toggled independently. Encoder 2
-   short stays play/stop.
+   short stays play/stop. A long press that has already fired also applies,
+   once, to each step that joins the hold while the button is still down. A
+   press whose button is already up when a step is first seen down does not
+   belong to that step: it neither edits the step nor cancels its tap.
 4. **Empty steps.** The first edit of an inactive step activates it with the
    same defaults `pattern_toggle_step()` applies, then applies the edit.
 5. **No toggle after encoder input.** A held step is not toggled on release
@@ -134,3 +139,12 @@ Three independent reviewers read the first version. Changed as a result:
   driver's long-press event.
 - Behaviour 2: a turn in the same update as the first press is not an edit.
 - Screen example corrected to the octave naming the code uses (note 60 = C4).
+
+After the implementation, three reviewers read the code. Changed as a result:
+
+- Behaviour 3: a long press now reaches steps that join after it fired; before,
+  such a step lost its tap and received nothing.
+- Behaviour 3: an encoder event applies only to steps held while its button was
+  down. Before, a short press completing in the same update as a new step
+  press edited that step.
+- Behaviour 2: a turn in the same update as a first press cancels the tap.
