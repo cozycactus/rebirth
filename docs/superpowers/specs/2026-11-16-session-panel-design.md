@@ -220,7 +220,9 @@ Song mode keeps its own bar logic.
 **Where a launched pattern starts** (A): it plays as if it had started at the last bar
 line. At a bar line that is step 1; launched on beat 3 with `1 BEAT` it starts at step 9 of a
 16-step pattern, so the groove never shifts. Formally the new track step is
-`(global_step mod 16) mod length`. Tracks not launched keep their own phase.
+`(global_step mod 16) mod length`. Tracks not launched keep their own phase. This rule is for
+`1 BAR`, `1 BEAT` and `NEXT STEP`; `TRACK LOOP` keeps today's behavior and starts the new
+pattern at step 1.
 
 Default: `1 BAR`; `TRACK LOOP` stays as an option (decided by the user). Existing tests
 that assume today's rule set `TRACK LOOP` explicitly.
@@ -253,7 +255,8 @@ dim white when the row has a clip; otherwise off.
 
 **MUTE c:** base light is track hue `half` when audible, off when muted (live or stored).
 The focused track is `full` when audible and dim white when muted. When the track plays a
-location outside the shown bank, the light blinks slowly.
+location outside the shown bank, the light blinks slowly; when the track's queue points
+outside the shown bank, it blinks on 8th notes instead, so a pending launch is never hidden.
 
 **PLAY:** green while playing, off when stopped. **BEAT:** white flash on each quarter
 note, brighter on the bar line, while playing.
