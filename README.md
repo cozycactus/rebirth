@@ -152,4 +152,7 @@ test/
 
 ## License
 
-TBD
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
+
+Behavior of the original ReBirth RB-338 is taken from
+[OpenRB-338](https://github.com/pingw33n/openrb-338) (also GPL-3.0).
