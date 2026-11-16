@@ -394,6 +394,20 @@ static void test_selector_short_press_mutes_on_release(void) {
     CHECK(g_seq.track_mutes == 4);
 }
 
+// Step LEDs 1-8 of the selector are lit for audible tracks: a stored mute at
+// the playing location counts as muted, as on MUTE and the RGB lights.
+static void test_selector_leds_show_stored_mutes(void) {
+    press_encoder(1, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    ui_update();
+    CHECK((led_mask & 0xFF) == 0xFF);
+    g_seq.patterns[g_seq.transport.current_pattern[2]].tracks[2].muted = true;
+    g_seq.patterns[9].tracks[3].muted = true;   // not where track 4 plays
+    seq_set_track_mute(5, true);
+    ui_update();
+    CHECK((led_mask & 0xFF) == (0xFF & ~((1u << 2) | (1u << 5))));
+}
+
 static void test_flash_controls_are_blocked_during_playback(void) {
     transport_start();
     press_encoder(1, BTN_LONG_PRESS);
@@ -726,7 +740,8 @@ static void test_session_oled_renders(void) {
     // Stopped, every track on A1, focus T1 A1 of length 16: no bar step.
     memcpy(rendered, ssd1309_get_framebuffer(), sizeof(rendered));
     display_clear();
-    display_draw_session_view(0, 0, 0, 0, 16, DEFAULT_BPM, LAUNCH_QUANT_TRACK_LOOP, 0xFF);
+    display_draw_session_view(0, 0, PLAY_MODE_PATTERN, 0, 0, 16, DEFAULT_BPM,
+                              LAUNCH_QUANT_TRACK_LOOP, 0xFF);
     CHECK(memcmp(rendered, ssd1309_get_framebuffer(), sizeof(rendered)) == 0);
     // Track 1 moved to A2 (stopped: at once), then playing at global step 5.
     panel(PANEL_PAD, 1, 1);
@@ -738,8 +753,40 @@ static void test_session_oled_renders(void) {
     ui_render();
     memcpy(rendered, ssd1309_get_framebuffer(), sizeof(rendered));
     display_clear();
-    display_draw_session_view(0, 0xFF, 1, 1, 7, DEFAULT_BPM, LAUNCH_QUANT_TRACK_LOOP, 5);
+    display_draw_session_view(0, 0xFF, PLAY_MODE_PATTERN, 1, 1, 7, DEFAULT_BPM,
+                              LAUNCH_QUANT_TRACK_LOOP, 5);
     CHECK(memcmp(rendered, ssd1309_get_framebuffer(), sizeof(rendered)) == 0);
+}
+
+// True when the last character cell of OLED line 0 shows exactly `mark`.
+static bool mode_mark_is(char mark) {
+    const uint8_t x0 = (FONT_COLS - 1) * FONT_CHAR_W;
+    bool rendered[FONT_CHAR_H][FONT_CHAR_W];
+    for (uint8_t y = 0; y < FONT_CHAR_H; y++) {
+        for (uint8_t x = 0; x < FONT_CHAR_W; x++) rendered[y][x] = ssd1309_get_pixel(x0 + x, y);
+    }
+    display_clear();
+    const char text[2] = { mark, '\0' };
+    ssd1309_draw_string(x0, 0, text, false);
+    for (uint8_t y = 0; y < FONT_CHAR_H; y++) {
+        for (uint8_t x = 0; x < FONT_CHAR_W; x++) {
+            if (rendered[y][x] != ssd1309_get_pixel(x0 + x, y)) return false;
+        }
+    }
+    return true;
+}
+
+// Line 0 of the Session OLED ends with the play mode: P (Pattern) or S (Song).
+static void test_session_oled_shows_the_play_mode(void) {
+    CHECK(ui.mode == UI_SESSION);
+    display_clear();
+    ui_render();
+    CHECK(mode_mark_is('P'));
+    CHECK(song_append(0, 1));
+    transport_set_mode(PLAY_MODE_SONG);
+    display_clear();
+    ui_render();
+    CHECK(mode_mark_is('S'));
 }
 
 static void render_views(const char *path) {
@@ -798,6 +845,7 @@ int main(int argc, char **argv) {
     RUN(test_accent_can_combine_with_slide_or_tie);
     RUN(test_long_config_press_never_mutes);
     RUN(test_selector_short_press_mutes_on_release);
+    RUN(test_selector_leds_show_stored_mutes);
     RUN(test_flash_controls_are_blocked_during_playback);
     RUN(test_song_mode_has_a_return_to_pattern_playback);
     RUN(test_song_editor_lights_its_three_buttons);
@@ -809,6 +857,7 @@ int main(int argc, char **argv) {
     RUN(test_session_step_leds_blink_playhead);
     RUN(test_session_passes_take_no_playback_lock);
     RUN(test_session_oled_renders);
+    RUN(test_session_oled_shows_the_play_mode);
     RUN(test_pad_launch_decides_and_writes_atomically);
     RUN(test_scene_cancel_decides_and_writes_atomically);
     RUN(test_step_release_toggles_the_cell_focused_at_press);

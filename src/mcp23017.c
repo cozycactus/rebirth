@@ -51,6 +51,7 @@ static bool mcp_read_ports(uint16_t *raw) {
 
 #define MCP_RETRY_MS    100     // between failed configuration attempts
 #define MCP_CHECK_MS    1000    // IPOL readback, to notice a chip that reset
+#define MCP_RESET_SUSPECT_KEYS 3  // keys going down in one sample that trigger a readback
 
 static bool configured;         // config accepted, and no I2C error since
 static bool retry_armed;        // the last configuration attempt failed
@@ -75,19 +76,30 @@ static bool ensure_configured(uint32_t now) {
     return configured;
 }
 
-// About once a second: a chip that reset (brown-out, ESD) answers with IPOL
-// and the pull-ups back at their defaults. Reconfigure it and take the ports
-// that follow as the new state.
-static void check_config(uint32_t now) {
-    if (!configured || (uint32_t)(now - check_ms) < MCP_CHECK_MS) return;
-    check_ms = now;
+// A chip that reset (brown-out, ESD) answers with IPOL and the pull-ups back
+// at their defaults. Reads IPOL back: on a mismatch the chip is reconfigured
+// and the ports that follow become the new state, with no events; an I2C
+// error rewrites the configuration before the next read. True only when the
+// configuration is intact.
+static bool config_intact(void) {
     uint16_t ipol;
     if (!mcp_read_pair(REG_IPOLA, &ipol)) {
         configured = false;
-    } else if (ipol != 0xFFFF) {
+        return false;
+    }
+    if (ipol != 0xFFFF) {
         configured = false;
         rebaseline = true;
+        return false;
     }
+    return true;
+}
+
+// About once a second, to notice a reset chip whatever its ports show.
+static void check_config(uint32_t now) {
+    if (!configured || (uint32_t)(now - check_ms) < MCP_CHECK_MS) return;
+    check_ms = now;
+    config_intact();
 }
 
 // The ports as the held state, with no press, release or long press from the
@@ -152,6 +164,13 @@ void mcp23017_poll(void) {
 
     // Debounce: only update if enough time has passed
     if (now - buttons._debounce_ms >= MCP_DEBOUNCE_MS) {
+        // Idle lines of a chip that reset read as pressed: several keys going
+        // down in one sample are accepted only once the configuration reads
+        // back intact.
+        uint16_t going_down = raw & (uint16_t)~buttons._raw;
+        if (__builtin_popcount(going_down) >= MCP_RESET_SUSPECT_KEYS && !config_intact()) {
+            return;
+        }
         buttons._debounce_ms = now;
         buttons._raw = raw;
     }

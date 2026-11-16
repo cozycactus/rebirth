@@ -147,7 +147,7 @@ static void draw_step_grid(const pattern_t *p, uint8_t track,
 // ─── Session View ──────────────────────────────────────────────
 //
 // Layout (128×64):
-//   Line 0 (y=0):   BANK A  ROW 3      (or MIXED)
+//   Line 0 (y=0):   BANK A  ROW 3     P (or MIXED; P/S = Pattern/Song mode)
 //   Line 1 (y=14):  T3  B4  LEN 16     (focused track, location, length)
 //   Line 2 (y=28):  120.0 BPM 1 BAR
 //   Bar (y=44–51):  16 step boxes, the global step in the bar filled
@@ -166,7 +166,7 @@ const char *display_launch_quant_name(launch_quant_t quant) {
     return (unsigned)quant < LAUNCH_QUANT_COUNT ? launch_quant_names[quant] : "?";
 }
 
-void display_draw_session_view(uint8_t bank, uint8_t common_row,
+void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mode,
                                uint8_t focus_track, uint8_t focus_location, uint8_t focus_length,
                                float bpm, launch_quant_t quant, uint8_t bar_step) {
     if (bank >= PATTERN_BANKS) bank = 0;
@@ -180,6 +180,8 @@ void display_draw_session_view(uint8_t bank, uint8_t common_row,
         snprintf(line, sizeof(line), "BANK %c  MIXED", 'A' + bank);
     }
     ssd1309_draw_string(0, 0, line, false);
+    ssd1309_draw_string((FONT_COLS - 1) * FONT_CHAR_W, 0,
+                        mode == PLAY_MODE_SONG ? "S" : "P", false);
 
     char label[4];
     pattern_label(focus_location, label, sizeof(label));
