@@ -77,7 +77,7 @@ Use a logic analyzer or oscilloscope:
   step, the flam lane on as many steps as possible with FLAM at 3 and at 12
   pulses, the other six tracks busy, MIDI and CV/Gate on, and capture at 140-150
   BPM, then at 200 and 300 BPM. First capture the same pattern load on a build of
-  the base commit (3cbd4f9, master 8b2fe7c) as the baseline: it has no kits, so
+  the base commit (3cbd4f9) as the baseline: it has no kits, so
   use its densest synth/drum pattern. The GPIO 7 maximum pulse width (`I`) may
   rise by at most 20 us over that baseline; `J` and `P` and the wire-level MIDI
   Clock interval (GPIO 0 decoded) must be no worse than the baseline. A Clock

@@ -72,7 +72,7 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
 ### Kit track
 
 None of these has been run on hardware; every item is `NOT VERIFIED`. Baseline
-means a build of the commit this branch is based on (3cbd4f9, master 8b2fe7c),
+means a build of the commit this branch is based on (3cbd4f9),
 measured first with the same densest pattern load.
 
 - `NOT VERIFIED` Note map: the 909 plays BD, SD, LT, MT, HT, RS, CP, CH, OH, CC
