@@ -73,6 +73,20 @@ Use a logic analyzer or oscilloscope:
   snapshot), bus contention (the LED DMA), or XIP-cache contention: only the
   timer handler itself runs from RAM, and the functions it calls share the
   flash cache with Core 0 code running from flash.
+- Kit track load case (two kits): make two tracks kits with every voice on every
+  step, the flam lane on as many steps as possible with FLAM at 3 and at 12
+  pulses, the other six tracks busy, MIDI and CV/Gate on, and capture at 140-150
+  BPM, then at 200 and 300 BPM. First capture the same pattern load on a build of
+  the base commit (3cbd4f9, master 8b2fe7c) as the baseline: it has no kits, so
+  use its densest synth/drum pattern. The GPIO 7 maximum pulse width (`I`) may
+  rise by at most 20 us over that baseline; `J` and `P` and the wire-level MIDI
+  Clock interval (GPIO 0 decoded) must be no worse than the baseline. A Clock
+  waits for the rest of one message plus one byte at most (the PL011 keeps a
+  one-byte holding register with the FIFO off): about 1.3 ms worst case, against
+  up to about 10 ms behind a kit burst on the earlier path. At 300 BPM with every
+  voice of both kits flammed the queue is overloaded by design: second hits are
+  dropped and counted as `FLAM DROP <n>` on the pattern-select screen; nothing
+  else may be dropped and playback must not stop.
 - Exercise mutes, live edits, different loop lengths, Song transitions,
   tempo changes, Stop and Panic. Check that gates stay low after Stop/Panic.
 - Save/load are rejected while running. After stopping, test save/load and restart
@@ -105,8 +119,10 @@ location):
 | `sequencer_snapshot()`, once per UI frame | playback, seq | 8 tracks' transport fields and the stored-mute byte of each playing location, in one section so a frame sees one transport state |
 | `sequencer_get_jitter_stats()`, `sequencer_reset_jitter_stats()` | playback | 11 values, or one flag |
 | `transport_continue()` | playback | returns at once while playing (its 8-track load runs only when stopped) |
-| `sequencer_refresh_track_playback()`, after every edit | seq, twice | one location's steps and config copied out; the row built with interrupts on; one prepared row (113 bytes) and its clip bit published |
-| `seq_set_track_config()` | seq | one location's config per section, 32 sections, then one refresh per location |
+| `sequencer_refresh_track_playback()`, after every edit | seq, twice | one location's steps (or kit steps) and config copied out; the row built with interrupts on; one prepared row (116 bytes) and its clip bit published |
+| `seq_kit_tracks()` | seq | one short section per location (32): the kit mask of one location's track types |
+| `seq_set_track_config()` | seq | a KIT config runs `seq_kit_tracks()` first; then one location's config per section, 32 sections, then one refresh per location |
+| `seq_set_kit_config()` | seq | the track's kit settings (about 15 bytes) in one section; then one refresh per location |
 | `seq_toggle_track_mute()` | seq | the live mute bit; then one location's stored mute per section |
 | `seq_set_track_mute()`, `seq_get_track_mutes()`, `sequencer_clip_mask()`, `song_clear()`, `song_set_end_mode()`, `song_append*()` | seq | a few bytes |
 | `song_insert*()`, `song_remove()`, `song_move()` | seq | `memmove` of the entries after the edit point: up to 255 x 9 = 2,295 bytes (see below) |
@@ -126,6 +142,8 @@ Core 1's timer ISR, which takes `seq_lock` every step.
 
 ## Current Bench Status
 
-No physical before/after capture is recorded for these changes. Host tests verify
+No physical before/after capture is recorded for these changes, the kit track
+included: its GPIO 7, wire Clock and interrupts-off figures are listed as
+`NOT VERIFIED` in [HARDWARE_STATUS.md](HARDWARE_STATUS.md). Host tests verify
 timing logic and output ordering, not physical jitter. Use the GPIO probe and
 on-device counters above for repeatable measurements on the assembled hardware.

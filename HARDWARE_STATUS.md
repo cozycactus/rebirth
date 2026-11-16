@@ -1,6 +1,6 @@
 # Hardware Status
 
-Last updated: 2026-11-16
+Last updated: 2026-11-16 (kit track added)
 
 ## Migrating An Existing Build
 
@@ -43,6 +43,18 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
   and incomplete reads, and keys or PLAY held through a resync. Storage tests
   cover the input resync after save and load.
 - DAC command tests cover the 2.048 V reference, both gains and octave scaling.
+- Kit track (host tests and both firmware builds, DAC gain 1 and 2, with no
+  warnings): lane helpers, prepared kit rows, the pulse order, velocity levels,
+  flams at exactly `flam_pulses`, note-offs as Note On velocity 0, releases on
+  mute, Stop, Panic and type change, the two-kit limit, running status and Clock
+  ahead of note bytes over a fake UART, the 192-byte flam reserve, save format v6
+  and loading real v4/v5 images, whole-detent encoder reading, and the kit OLED
+  screens. The sanitizer build passes too.
+- RAM from `arm-none-eabi-size -A build/fw1/rp2040_sequencer.elf` after a fresh
+  build: `.data` 7,596 + `.bss` 104,664 = 112,260 bytes (about 110 KiB) of the
+  RP2040's 264 KiB. The design expected about 108 KB with the grown flash copy
+  buffer; the figure is about 4 KB above that and still fits.
+  The `.heap` and the two stack sections are separate (2,048 bytes each).
 
 ## Needs Bench Verification
 
@@ -56,6 +68,39 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
 - CV calibration and supply/logic compatibility. Default gain is 1x
   (nominal 0-2.048 V); the 2x build option requires suitable hardware.
 - Wire-level MIDI Clock jitter under dense note traffic, independently of GPIO 7.
+
+### Kit track
+
+None of these has been run on hardware; every item is `NOT VERIFIED`. Baseline
+means a build of the commit this branch is based on (3cbd4f9, master 8b2fe7c),
+measured first with the same densest pattern load.
+
+- `NOT VERIFIED` Note map: the 909 plays BD, SD, LT, MT, HT, RS, CP, CH, OH, CC
+  and RC from the default notes (or the notes set in the config) on the right
+  voice, on the configured channel.
+- `NOT VERIFIED` Three velocity levels audible: a plain note, an accented note
+  (or a note with AC) and an accented note with AC sound as three different
+  dynamic levels, with the accent threshold of the machine between them; if not,
+  VEL NORM, VEL ACC and VEL MAX are adjusted and recorded.
+- `NOT VERIFIED` Running status and Note On velocity 0 are understood by the 909:
+  every note stops at its gate, none sticks, none is missed.
+- `NOT VERIFIED` Flams at 140-150 BPM sound as flams (FLAM 3 and 12 pulses).
+- `NOT VERIFIED` GPIO 7 maximum ISR duration with two dense kits (every voice,
+  every step, flams on) within +20 us of the baseline.
+- `NOT VERIFIED` Wire-level MIDI Clock interval (GPIO 0 decoded) with two dense
+  kits no worse than the baseline; the worst wait for a Clock behind a note
+  burst is about 1.3 ms by design.
+- `NOT VERIFIED` Longest Core 0 interrupts-off window while playing (editing,
+  launching, track-config edits, Song edits) under 100 us. Song list inserts and
+  removes near the front of a 256-entry song are estimated at 130-165 us under
+  `seq_lock` and are a known open item (JITTER_MEASUREMENT.md).
+- `NOT VERIFIED` UI loop time with the per-byte UART interrupt (3,125 interrupts
+  per second at full rate) shows no new input lag or missed encoder edges.
+- `NOT VERIFIED` OLED kit screens (Session lane strip, kit pattern view, kit step
+  editor, kit config) and the tight `FLAM DROP <n>` line of the pattern-select
+  screen are legible and not clipped on the real SSD1309.
+- `NOT VERIFIED` Edges per detent of the fitted encoders (`ENC_EDGES_PER_DETENT`
+  is 4, EC11 type): one click moves one lane, one value or one config row.
 
 ### Session panel
 
@@ -74,6 +119,16 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
 - A pad, a step button and PLAY held through a flash save/load, and through a
   panic, do nothing once released.
 - PLAY debounce (20 ms) on the real switch: one press, one start or stop.
+
+## Known Follow-Ups
+
+- Pattern select, the Song editor and the SYNTH/DRUM OUTPUT row still read raw
+  encoder edges, so one click can move several slots or pass through
+  intermediate modes. The kit screens, the Session view, the Pattern view and
+  the track config rows read whole detents.
+- Song list edits (`song_insert*()`, `song_remove()`, `song_move()`) near the
+  front of a 256-entry song keep Core 0's interrupts off for an estimated
+  130-165 us (a `memmove` under `seq_lock`).
 
 ## Not Implemented Yet
 
