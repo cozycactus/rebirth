@@ -241,11 +241,11 @@ static void test_nonplaying_editor_hides_playhead(void) {
     g_seq.active_pattern[0] = 3;
     g_seq.transport.current_track_step[0] = 0;
     display_clear();
-    display_draw_pattern_view(&g_seq.patterns[3], 0, 0);
+    display_draw_pattern_view(&g_seq.patterns[3], 0, 0, -1);
     uint8_t without_playhead[OLED_BUF_SIZE];
     memcpy(without_playhead, ssd1309_get_framebuffer(), sizeof(without_playhead));
     display_clear();
-    display_draw_pattern_view(&g_seq.patterns[3], 0, NO_QUEUED_PATTERN);
+    display_draw_pattern_view(&g_seq.patterns[3], 0, NO_QUEUED_PATTERN, -1);
     CHECK(memcmp(without_playhead, ssd1309_get_framebuffer(), sizeof(without_playhead)) == 0);
 }
 
@@ -578,6 +578,59 @@ static void test_grid_hold_creates_drum_hit_with_kit_note(void) {
     CHECK(STEP(4, 3).flags == STEP_FLAG_ACTIVE);
 }
 
+static void render(void) {
+    display_clear();
+    ui_render();
+}
+
+// Compares rows 10-17 of the current frame with the given text drawn alone.
+// Clears the display.
+static void check_info_line(const char *expected) {
+    bool actual[FONT_CHAR_H][OLED_WIDTH];
+    for (unsigned y = 0; y < FONT_CHAR_H; y++) {
+        for (unsigned x = 0; x < OLED_WIDTH; x++) actual[y][x] = ssd1309_get_pixel(x, 10 + y);
+    }
+    display_clear();
+    ssd1309_draw_string(0, 10, expected, false);
+    for (unsigned y = 0; y < FONT_CHAR_H; y++) {
+        for (unsigned x = 0; x < OLED_WIDTH; x++) CHECK(actual[y][x] == ssd1309_get_pixel(x, 10 + y));
+    }
+}
+
+static void test_held_step_line_is_rendered(void) {
+    uint8_t idle[OLED_BUF_SIZE];
+    enter_pattern_view();
+    render();
+    memcpy(idle, ssd1309_get_framebuffer(), sizeof(idle));
+    step_down(1u << 4);                     // shown from the first moment of the hold
+    render();
+    CHECK(ssd1309_get_pixel(32, 33));       // bracket under step 5
+    check_info_line("S05 Note:C-1  Vel:  0");
+    sleep_ms(MCP_LONG_PRESS_MS);
+    step_up(1u << 4);                       // peek: nothing changed
+    render();
+    CHECK(memcmp(idle, ssd1309_get_framebuffer(), sizeof(idle)) == 0);
+}
+
+static void test_held_step_line_shows_lowest_held_step(void) {
+    enter_pattern_view();
+    step_down(1u << 9);
+    turn(0, -59);                           // step 10: note 1
+    turn(1, 27);                            // velocity 127
+    render();
+    check_info_line("S10 Note:C#-1 Vel:127");
+    step_down(1u << 2);                     // a lower step joins
+    render();
+    CHECK(ssd1309_get_pixel(16, 33));       // bracket under step 3 only
+    CHECK(!ssd1309_get_pixel(72, 33));
+    check_info_line("S03 Note:C-1  Vel:  0");
+    step_up(1u << 2);
+    render();
+    CHECK(ssd1309_get_pixel(72, 33));
+    check_info_line("S10 Note:C#-1 Vel:127");
+    step_up(1u << 9);
+}
+
 static void render_views(const char *path) {
     uint8_t image[6][OLED_HEIGHT][OLED_WIDTH / 8];
     for (unsigned entry = 0; entry < MAX_SONG_ENTRIES; entry++) CHECK(song_append(0, 255));
@@ -650,6 +703,8 @@ int main(int argc, char **argv) {
     RUN(test_grid_turn_in_the_same_update_as_the_press_is_not_an_edit);
     RUN(test_grid_hold_turn_clamps_and_still_cancels_tap);
     RUN(test_grid_hold_creates_drum_hit_with_kit_note);
+    RUN(test_held_step_line_is_rendered);
+    RUN(test_held_step_line_shows_lowest_held_step);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS all six OLED views render");

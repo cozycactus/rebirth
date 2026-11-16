@@ -93,6 +93,13 @@ Unix builds also exercise concurrent Stop/Panic during a pending gate commit.
 - Encoder 1 short opens the selected playing pattern for editing; long cycles bank.
 - Encoder 2 short starts/stops; long opens the pattern selector.
 - Hold both encoder buttons for Panic. Release both before issuing another command.
+- Pattern view: a tap shorter than half a second toggles a step when the
+  button is released. Hold one or more steps and turn encoder 1 for note or
+  encoder 2 for velocity; encoder 1 short/long toggles accent/slide and
+  encoder 2 long toggles tie on the held steps. The first edit of a held empty
+  step creates it. A step held longer, or held while an encoder is turned or
+  pressed, is not toggled on release. Encoder 2 short is still start/stop;
+  track, tempo and mode changes are suspended while a step is held.
 - In the selector, buttons 1-8 mute on **short release**; holding opens track
   configuration without muting. Save/load (9/10) require stopped playback.
 - Manual queues are unavailable in Song mode. In the song editor, button 2

@@ -962,7 +962,8 @@ void ui_render(void) {
             display_draw_pattern_view(
                 seq_active_pattern(ui.selected_track),
                 ui.selected_track,
-                g_seq.transport.current_track_step[ui.selected_track]);
+                g_seq.transport.current_track_step[ui.selected_track],
+                ui.grid_hold ? (int8_t)__builtin_ctz(ui.grid_hold) : -1);
             display_draw_bpm(g_seq.transport.bpm);
             break;
 

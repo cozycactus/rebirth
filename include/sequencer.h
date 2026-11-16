@@ -265,7 +265,7 @@ void display_clear(void);
 void display_update(void);
 void display_draw_performance_view(uint8_t selected_track, uint8_t bank,
                                    uint8_t mutes);
-void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step);
+void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step, int8_t held_step);
 void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step);
 void display_draw_pattern_select(uint8_t pattern,
                                   uint8_t length,
