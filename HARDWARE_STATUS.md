@@ -5,7 +5,7 @@ Last updated: 2026-11-16
 ## Migrating An Existing Build
 
 The Session panel changes two things an existing board must provide even
-without the new grid:
+without the new grid, and the key scanner changes three more:
 
 - **PLAY on GPIO 28.** PLAY is now the only start/stop; the encoder presses no
   longer start or stop the transport. Wire a momentary switch from GPIO 28 to
@@ -14,8 +14,18 @@ without the new grid:
   SCL (GPIO 9) are now disabled. Fit 2.2-4.7 kOhm pull-ups from each line to
   3.3 V, or the step buttons and step LEDs stop working.
 
-Without the TCA8418 the panel keys simply report nothing (recovery is retried
-every 100 ms); without the LED chain GPIO 27 drives nothing.
+- **Key scanner.** The TCA8418 (0x34) is replaced by two MCP23017, U801 at 0x22
+  and U802 at 0x23, scanning the diode matrix (pin map in
+  `hardware/schematic/README.md`). Without them the panel keys simply report
+  nothing (the configuration is retried every 100 ms); the TCA8418 is no longer
+  read.
+- **Steps 8 and 16 on U703 (0x24), GPA0 and GPA1.** They were on GPA7 and GPB7
+  of 0x20, which are output-only on current MCP23017 datasheets. An existing
+  board with those two buttons on 0x20 loses steps 8 and 16: the firmware now
+  drives those pins low (a button to GND there is harmless). Add U703 at 0x24,
+  or live with 14 steps; a missing U703 costs only those two.
+
+Without the LED chain GPIO 27 drives nothing.
 
 ## Verified In This Repo
 
@@ -24,7 +34,7 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
 - DIN MIDI UART output code is compiled into the firmware target.
 - CV/Gate, OLED, encoder, MCP23017, step LED, flash storage, and UI modules compile into the firmware target,
   as do the Session view (`session.c`), the LED frame builder (`led_frame.c`), the RGB LED chain
-  (`rgb_leds.c`, PIO and DMA), the TCA8418 driver (`tca8418.c`) and the panel input (`panel_input.c`).
+  (`rgb_leds.c`, PIO and DMA), the key scan driver (`key_scan.c`) and the panel input (`panel_input.c`).
 - GPIO 7 jitter probe and ISR jitter stats compile into the firmware target.
 - USB MIDI scaffolding has been removed by design.
 - DIN MIDI output uses a UART TX interrupt queue instead of blocking serial writes in the sequencer timer ISR.
@@ -39,11 +49,16 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
   failed step LED writes (direction and mask rewritten), chip resets found by
   config readback, retries limited to one per 100 ms on a dead bus, step
   button and encoder resync after a flash stall, and internal pulls off on
-  GPIO 8/9, and a reset button expander whose idle lines read as pressed.
-  Panel input tests cover the same for the TCA8418, plus overflow and
-  incomplete reads, keys or PLAY held through a resync, and keys released
-  during a stall or an overflow. Storage tests cover the input resync after
-  save and load.
+  GPIO 8/9, and a reset button expander (0x20 or 0x24) whose idle lines read
+  as pressed, reads only when a sample is due, steps 8 and 16 from 0x24 and a
+  missing 0x24. Key scan tests run the driver over a fake key matrix: register
+  values, one column low at every row read, a fault at every transfer, a reset
+  of either chip before any transfer or inside a read. Panel input tests cover
+  the same for the scanner, plus a chord of all 80 keys without ghosts, keys or
+  PLAY held through a resync, keys released during a stall, a tap lost during
+  an outage, and press-to-event within 15 ms in a host loop model (11.44 ms
+  worst; the device is not measured). Storage tests cover the input resync
+  after save and load.
 - DAC command tests cover the 2.048 V reference, both gains and octave scaling.
 
 ## Needs Bench Verification
@@ -61,16 +76,23 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
 
 ### Session panel
 
-- Press-to-event latency (target 15 ms) for pads, SCENE and MUTE; if the TCA8418
-  cannot meet it, the fallback is two more MCP23017s (0x22, 0x23).
-- Several pads held at once: no ghost presses.
+- Press-to-event latency (target 15 ms; estimated 7-10 ms typical, 14 ms worst)
+  for pads, SCENE and MUTE, and the frame pass and the scan period on the device.
+- Several keys held at once: no ghost presses. Each SCENE and MUTE key held:
+  no other key reports.
+- Row rise time after a column is released (scope on a row with a key held in
+  the previous column; the estimate is about 10 us, the firmware leaves about
+  67 us).
+- I2C load and SDA integrity with the scan running.
+- CV/Gate noise with the scan running.
+- Steps 8 and 16 on U703 (0x24), and 14 working steps without it.
 - LED current with the busiest frame and with a full grid.
 - Total USB current and inrush, powered from at least two different laptops.
 - Power-up with no flash of the LED chain.
 - I2C rise times with the chosen external pull-ups.
 - CV/Gate noise with the LEDs animating.
 - GPIO 7 jitter and wire-level MIDI Clock unchanged while scenes launch, the
-  LEDs animate, the TCA8418 is polled and the OLED refreshes.
+  LEDs animate, the key matrix is scanned and the OLED refreshes.
 - SK6812MINI-E colour order (GRB as sent) and the chain order table in
   `rgb_leds.c` against the board wiring.
 - A pad, a step button and PLAY held through a flash save/load, and through a

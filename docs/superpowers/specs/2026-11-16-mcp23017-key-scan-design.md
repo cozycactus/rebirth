@@ -1,6 +1,7 @@
 # Key matrix scan on two MCP23017, steps 8 and 16 on a third: design
 
-Date: 2026-11-16. Status: reviewed (Codex, DeepSeek, Grok; Gemini could not run).
+Date: 2026-11-16. Status: implemented (branch session-panel-mcp-scan); reviewed by Codex, DeepSeek, Grok;
+Gemini could not run.
 Changes the firmware of the Session panel (`2026-11-16-session-panel-design.md`) to drive
 the board of PR #10 (branch `session-panel-pcb`, `hardware/schematic/README.md`, decisions
 10 and 11, "Interfaces the firmware relies on").
@@ -142,8 +143,9 @@ tap completed meanwhile is lost (as today).
   and a held SCENE or MUTE key would then pull its row low in every U801 column. So any
   failed transfer, a failed check, or a check that reads other values marks the scanner
   unconfigured: nothing is sampled until `key_scan_init` has written both chips again and
-  the next check passes (an attempt after a failed one waits `PANEL_RETRY_MS`), and the
-  scan restarts at step 0.
+  the next check passes (an attempt after a failed one waits `PANEL_RETRY_MS`; a failed
+  first check after a configuration counts as a failed attempt), and the scan restarts at
+  step 0.
 - On that loss every key's pending change is cancelled: `raw = accepted || suppressed`,
   `since = now`. A key goes back to its accepted state, a suppressed key back to "held", so
   ending a suppression again needs two up samples 5 ms apart. Accepted keys stay as they
@@ -205,7 +207,8 @@ The 16-bit step word and `step_buttons_t` stay; bit n = step n+1.
   read IPOL back (2 bytes); the GPIO bytes are used only if IPOL holds the configured value.
   A mismatch means the chip reset (or IPOL was overwritten): the chip is configured again
   and its next good read becomes its baseline, with no press, release or long press (as
-  now). This replaces the 1-second IPOL readback and the "three keys at once" guard, which
+  now). A failure before a chip's first good sample after its configuration arms the 100 ms
+  retry for that chip. This replaces the 1-second IPOL readback and the "three keys at once" guard, which
   could never fire for U703 (two keys) and so would let a reset U703 press steps 8 and 16.
 - A failed read, a failed configuration or a mismatch makes the chip untrusted: its bits
   keep their last accepted state, they make no long press until a good sample of that chip

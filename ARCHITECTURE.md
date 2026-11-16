@@ -5,7 +5,7 @@
 | Context | Work |
 | --- | --- |
 | Core 1 timer IRQ | 96 PPQN timing, playheads, note durations, MIDI production, CV/gate output |
-| Core 0 main loop | Panel I2C polling (TCA8418 keys, MCP23017 step buttons and LEDs), PLAY and encoders, edits, transport commands and launches; per ~33 ms frame: one transport snapshot, the RGB frame build and its LED DMA start, the OLED; stopped-only storage |
+| Core 0 main loop | Panel I2C polling (key matrix scan on two MCP23017, one bus step per pass; MCP23017 step buttons and LEDs), PLAY and encoders, edits, transport commands and launches; per ~33 ms frame: one transport snapshot, the RGB frame build and its LED DMA start, the OLED; stopped-only storage |
 | Core 0 UART IRQ | Drain pending MIDI bytes into UART0 |
 
 The playback lock serializes the complete timer handler with Start, Stop,
@@ -130,8 +130,9 @@ loss needs a future two-slot/journal design.
 | SSD1309 OLED | 2 SCK, 3 MOSI, 4 CS, 5 DC, 6 reset; SPI0 |
 | Jitter probe | 7 |
 | I2C0 bus | 8 SDA, 9 SCL; 400 kHz; external pull-ups (2.2-4.7 kOhm), internal ones disabled |
-| MCP23017 buttons / LEDs | I2C 0x20 / 0x21 |
-| TCA8418 panel key scanner | I2C 0x34; 8 x 10 matrix, 80 keys; 3.3 V only; no INT line, polled |
+| MCP23017 step buttons | I2C 0x20: steps 1-7 (GPA0-6), 9-15 (GPB0-6); I2C 0x24: step 8 (GPA0), step 16 (GPA1) |
+| MCP23017 step LEDs | I2C 0x21 |
+| MCP23017 panel key scanner | I2C 0x22: ROW0-6 (GPA0-6), ROW7 (GPB0), COL0-6 (GPB1-7), COL7 (GPA7); I2C 0x23: COL8 (GPA0), COL9 (GPA1); 8 x 10 matrix, 80 keys (64 pads, 8 SCENE, 8 MUTE); no INT line, polled |
 | Two MCP4822 DACs | 10 SCK, 11 MOSI, 12/13 CS; SPI1 |
 | Gates | 14-17; 3.3 V logic |
 | Encoder 1 | 18, 19, switch 20 |
@@ -147,35 +148,55 @@ all of them (GPIO 27 LED data, GPIO 28 PLAY).
 Every I2C transaction, initialisation included, uses the SDK timeout API (2000 us)
 and checks the exact byte count, so a missing or stuck chip never hangs the UI,
 but each failed transaction can delay one UI pass by up to its 2 ms timeout. Any
-I2C error marks that chip unconfigured: its configuration is written again
-before the next read, and an attempt that fails is retried after 100 ms, not on
-every pass, so a dead bus costs about one timeout per chip per 100 ms. PLAY is a
-plain GPIO and is sampled first on every pass, whatever the bus does. About once
-a second each chip's configuration is read back (TCA8418 CFG, MCP23017 IPOL,
-step-LED IODIR), so a chip that reset (brown-out, ESD) is reconfigured; the
-button expander's ports then become the new baseline without events. A reset
-button expander's idle lines read as pressed, so its IPOL is also read back
-before a sample with three or more keys going down at once is accepted. A failed
-button read keeps the last accepted state; the step LED mask is cached only
-after a successful write. Core 1 never touches I2C or the LEDs.
+I2C error marks that chip (the key scanner: both chips as one unit) unconfigured:
+its configuration is written again before the next read. An attempt after a failed
+one waits 100 ms, not every pass; for the scanner and the step row, a failed first
+check or sample after a configuration counts as a failed attempt. A dead bus
+costs about one timeout per chip per 100 ms. PLAY is a plain GPIO and is sampled
+first on every pass, whatever the bus does.
 
-A TCA8418 FIFO overflow, or an event read that fails after the event count was
-read, drops the whole batch: the key state is forgotten and the FIFO drained,
-with nothing reported. A flash save stalls both cores (only a save uses the
-multicore lockout) and a load stalls only Core 0; afterwards the inputs are
-resynced: `panel_input_resync()` drops every queued panel event (PLAY
-included) and drains the FIFO, re-initialising the chip only if that fails;
-`mcp23017_resync()` and `encoder_resync()` take the buttons as they are now,
-with no press, release or long press from the stall; and the UI drops the
-step gestures in progress. When a panic is released, the panel and the step
-buttons are resynced the same way. After a resync or an overflow on a chip
-that kept its configuration (the drain worked), every key reads as up: such a
-chip reports a key held across the drain only by its release, which then
-changes nothing, and a key whose release was drained presses normally again.
-A re-initialised chip (failed drain, incomplete read, chip reset) may report a
-held key again, so a key that was down then stays suppressed until a release
-has held for 8 ms. PLAY that was down stays suppressed until a release has
-held for 20 ms. A bounce or a re-reported press never becomes a command.
+A chip that reset (brown-out, ESD) comes back with IODIR = 0xFF and the rest 0,
+so every input chip has a canary register: a value that differs from the
+power-on value, written first in the chip's configuration and read back after the
+data it vouches for (IODIR on 0x22 and 0x23, IPOL on 0x20 and 0x24). A reset at
+any moment after the canary write clears it. The scanner checks both of its chips
+at the start of every scan; the step row reads IPOL back after every sample and
+uses the ports only if it holds. A chip that failed either check is configured
+again, and the step row's next good read becomes its baseline without events. The
+step-LED expander still has its IODIR read back about once a second. A failed
+button read keeps the last accepted state and makes no long press; the step LED
+mask is cached only after a successful write. GPA7 and GPB7 of every expander are
+outputs (output-only on current MCP23017 datasheets; a level change on them
+during a read can corrupt SDA). Core 1 never touches I2C or the LEDs.
+
+The key matrix is scanned by `key_scan.c` from Core 0: 11 bus steps per scan (a
+configuration check, then columns 0-9), one step per UI pass, so a pass never
+waits for a whole scan (2.7-3 ms) and the encoders keep their rate. At most one
+column is low when the rows are read. A key's state changes only in the pass that
+sampled its column, and only at a sample at least 5 ms (`PANEL_DEBOUNCE_MS`)
+after the sample that first saw the change, with every sample between agreeing.
+Press to event is about 7-10 ms typical and about 14 ms worst by estimate, target
+15 ms (bench item). Contract: the scan has no event FIFO. A tap shorter than the
+debounce, or one that starts and ends while the bus is down or the scanner is
+being reconfigured, is lost. On any I2C error, failed check or mismatch the
+scanner is configured again before any further sample; every pending key change
+is cancelled, and a key held through it stays held, with no release or new press.
+The step row reads its ports only when its 20 ms sample is due; U701 (0x20) and
+U703 (0x24) are independent, so a missing U703 costs only steps 8 and 16.
+
+A flash save stalls both cores (only a save uses the multicore lockout) and a
+load stalls only Core 0; afterwards the inputs are resynced:
+`panel_input_resync()` drops every queued panel event (PLAY included), does no
+I2C and restarts the scan at the check; `mcp23017_resync()` and
+`encoder_resync()` take the buttons as they are now, with no press, release or
+long press from the stall; and the UI drops the step gestures in progress. When
+a panic is released, the panel and the step buttons are resynced the same way.
+After a resync, and at power-up, every key is taken as held until it has been
+seen up for 5 ms (two samples): a key held through the stall reports nothing, nor
+does its release; a key released during the stall presses normally again once
+its suppression has ended; a key pressed meanwhile and still held reports
+nothing until it is released. PLAY that was down stays suppressed until a release
+has held for 20 ms. A bounce or a re-reported press never becomes a command.
 
 ### Power
 

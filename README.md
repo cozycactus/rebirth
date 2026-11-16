@@ -51,7 +51,7 @@ DIN MIDI bytes are queued into a UART TX ring buffer and drained by UART0's TX i
 | Jitter probe | 7 | High while sequencer timer ISR runs |
 | Encoders | 18–22, 26 | 2× rotary + push |
 | I²C0 bus | 8, 9 | 400 kHz; external 2.2–4.7 kΩ pull-ups to 3.3 V (internal pulls are off) |
-| I²C devices | on 8, 9 | MCP23017 0x20 step buttons, MCP23017 0x21 step LEDs, TCA8418 0x34 panel keys (pads, SCENE, MUTE) |
+| I²C devices | on 8, 9 | MCP23017 0x20 step buttons 1-7 and 9-15, MCP23017 0x24 step buttons 8 and 16, MCP23017 0x21 step LEDs, MCP23017 0x22 + 0x23 panel key matrix scanner (pads, SCENE, MUTE) |
 | Tempo LED | 25 | Pico on-board LED |
 | RGB LED data | 27 | 82× SK6812MINI-E via PIO, buffered to 5 V |
 | PLAY button | 28 | Momentary switch to GND, internal pull-up |
@@ -87,13 +87,14 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-Eleven CTest targets (ten test sources; `test_sync` is built twice, once per DAC
+Twelve CTest targets (eleven test sources; `test_sync` is built twice, once per DAC
 gain) cover pattern/song data (`test_pattern`, `test_song`), MIDI/gate output at
 both DAC gains (`test_sync`, `test_sync_gain2`), the real timer/transport code
 (`test_playback`), flash storage (`test_storage`), the Session view
-(`test_session`), the LED frame builder (`test_led_frame`), the TCA8418 panel
-input (`test_panel_input`), the MCP23017 button/LED expanders and encoder
-buttons (`test_expanders`) and UI/OLED rendering (`test_ui`). Launch
+(`test_session`), the LED frame builder (`test_led_frame`), the MCP23017 key
+matrix scan driver (`test_key_scan`), the panel input on that scanner
+(`test_panel_input`), the MCP23017 button/LED expanders and encoder buttons
+(`test_expanders`) and UI/OLED rendering (`test_ui`). Launch
 quantization runs in `sequencer.c` and is tested in `test_playback`.
 Unix builds also exercise concurrent Stop/Panic during a pending gate commit.
 
@@ -170,9 +171,9 @@ src/
   session.c         — Session view: bank, focus, pad/scene/mute presses
   led_frame.c       — Pure LED frame builder (light tables, current budget)
   rgb_leds.c        — 82-LED SK6812 chain on GPIO 27 (PIO)
-  tca8418.c         — TCA8418 key scanner driver (I2C 0x34)
+  key_scan.c        — Key matrix scanner on two MCP23017 (I2C 0x22, 0x23)
   panel_input.c     — Panel key and PLAY debounce, events, recovery, resync
-  mcp23017.c        — Step buttons (MCP23017 0x20)
+  mcp23017.c        — Step buttons (MCP23017 0x20 and 0x24)
   step_leds.c       — Step LEDs (MCP23017 0x21)
   encoder.c         — Two rotary encoders with push buttons
   flash_storage.c   — Save/load of patterns and song
@@ -188,8 +189,9 @@ test/
   test_ui.c         — UI events and production OLED rendering
   test_session.c    — Pad/scene launch and cancel, focus, bank
   test_led_frame.c  — LED light tables and current budget
-  test_panel_input.c — TCA8418 decoding, debounce, overflow, recovery, resync
-  test_expanders.c  — MCP23017, step LED and encoder error handling, resync
+  test_key_scan.c   — Scan driver: configuration, one column low, faults, chip resets
+  test_panel_input.c — Matrix scan decoding, debounce, recovery, resync, latency
+  test_expanders.c  — MCP23017 (0x20 + 0x24), step LED and encoder error handling, resync
 ```
 
 ## Status
