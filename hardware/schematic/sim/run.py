@@ -931,9 +931,15 @@ def bench_inrush():
                     "t_in_limit_ms": round((lim[-1] - lim[0]) * 1e3, 2) if lim else 0.0,
                     "vbus_min_V": round(min(vbus), 3), "e_switch_mJ": round(energy * 1e3, 2),
                     "p_switch_peak_W": round(max(pd), 2),
-                    # TPS2553 overcurrent FAULT deglitch 5 / 8 / 11 ms (min / typ / max)
+                    "p_switch_avg_in_limit_W": round(energy / (lim[-1] - lim[0]), 2) if lim else 0.0,
+                    # TPS2553 (SLVS841G) overcurrent FAULT deglitch 3 / 7.5 / 11 ms (min / typ / max): the
+                    # TPS2553 only flags FAULT and keeps limiting; a TPS2553-1 would latch off at that point
                     "fault_flag_if_deglitch_min_typ_max": [bool(lim) and lim[-1] - lim[0] > dg
-                                                           for dg in (5e-3, 8e-3, 11e-3)]})
+                                                           for dg in (3e-3, 7.5e-3, 11e-3)],
+                    # junction rise: <= peak power x RthJB (29.4 C/W) with the board copper at ambient
+                    # for these few ms; x RthJA (182.6 C/W) would apply only to a charge lasting seconds
+                    "tj_rise_bound_RthJB_C": round(max(pd) * 29.4, 1),
+                    "tj_rise_if_steady_RthJA_C": round((energy / (lim[-1] - lim[0]) if lim else 0) * 182.6, 1)})
     return res
 
 

@@ -2,8 +2,9 @@
 
 Benches for the CV outputs, gate outputs, encoder RC filters, MIDI OUT/IN and the
 +5V_LED inrush of the schematic in this folder (generator `gen/build.py`), as it stands
-after the multi-model review (MIDI OUT open collector, C984 470 uF, the added pull-downs).
-The values in the benches are the schematic's. ngspice 46, 2026-11-16.
+after the multi-model review (MIDI OUT open collector, C984 470 uF, the added pull-downs)
+and the third MCP23017 (no analog change). The benches' part values were checked against
+`gen/build.py` at that state (merge dfba9fd). ngspice 46, 2026-11-16.
 
 ```bash
 python3 hardware/schematic/sim/run.py            # every bench, under a minute
@@ -30,7 +31,7 @@ and decoupling (last section).
 | Encoder RC filters | OK | GPIO follows the contact in <= 0.2 ms; spikes shorter than 30 us (worst-case thresholds) to 100 us (mid) rejected; fast turn with bounce decodes 24 of 24 |
 | MIDI OUT (open collector) | OK, meets CA-033 | loop current 6.7 mA, 4.3 mA at CA-033's worst corner (spec: 4.47 mA); RA short 109 mA / 0.375 W; bit width error <= 1.2 % |
 | MIDI IN (H11L1) | OK, meets CA-033 | 1.7-4.8x the H11L1 turn-on current for 5 V, CA-033 and old 3.3 V senders; bit width error <= 3.2 % |
-| +5V_LED inrush (U201) | OK, TP201 pulses at power-up | charged in 6.8-12.7 ms at the current limit (C984 470 uF): longer than the 5 ms minimum FAULT deglitch, so TP201 goes low briefly at power-up |
+| +5V_LED inrush (U201) | OK with TPS2553 (not -1) | charged in 6.8-12.7 ms at the current limit (C984 470 uF): longer than the 3-11 ms FAULT deglitch, so TP201 goes low briefly at power-up (a TPS2553-1 would latch off); junction rise <= 44 C |
 
 **One design change:** C511-C514 100 pF -> **1 nF C0G** (`gen/build.py`, `cv_stage`).
 With R511 1 k inside the loop and the feedback taken from the jack through R521 10 k,
@@ -90,6 +91,7 @@ The generic models are in `sim/models.lib` with the datasheet numbers next to th
   loss beyond DC resistance, so it rings more than a real cable.
 - **TPS2553**: behavioural: soft-start ramp (tr 1.1 ms typ), then constant current at
   IOS = 232 / 267 / 306 mA (R201 = 100 k 1 %, datasheet equations), rDS(on) 85 mR.
+  FAULT deglitch, thermal limits and RthJB / RthJA from SLVS841G (rev. October 2026).
 - **RP2040 inputs**: VIH 2.0 V, VIL 0.8 V, Schmitt hysteresis >= 0.2 V, pull-up 50-80 k
   (RP2040 datasheet, "Pin specifications"). The real thresholds lie anywhere inside these
   limits, so the encoder bench checks the extremes.
@@ -332,20 +334,35 @@ C202 10u ; C983 100n ; 82 x 100n (C901-C982) ; C984 470u (ESR 0.1 R)
 Bidle led 0 82 mA | 0 (82 x SK6812MINI-E idle, assumed 1 mA each)
 ```
 
-| IOS | Rail at 90 % after EN | Time in current limit | VBUS dip (0.25 R cable) | Switch energy / peak power |
-| --- | --- | --- | --- | --- |
-| 232 mA | 9.0-12.7 ms | 9.8-14.0 ms | 58 mV | 5.3-7.4 mJ / 1.1 W |
-| 267 mA | 7.8-10.5 ms | 8.5-11.6 ms | 67 mV | 5.3-7.1 mJ / 1.3 W |
-| 306 mA | 6.8-8.8 ms | 7.4-9.7 ms | 77 mV | 5.3-6.9 mJ / 1.5 W |
+| IOS | Rail at 90 % after EN | Time in current limit | VBUS dip (0.25 R cable) | Switch energy | Switch power peak / mean | Junction rise (bound) |
+| --- | --- | --- | --- | --- | --- | --- |
+| 232 mA | 9.0-12.7 ms | 9.8-14.0 ms | 58 mV | 5.3-7.4 mJ | 1.1 / 0.5-0.6 W | <= 34 C |
+| 267 mA | 7.8-10.5 ms | 8.5-11.6 ms | 67 mV | 5.3-7.1 mJ | 1.3 / 0.6-0.7 W | <= 39 C |
+| 306 mA | 6.8-8.8 ms | 7.4-9.7 ms | 77 mV | 5.3-6.9 mJ | 1.5 / 0.7-0.8 W | <= 44 C |
 
-VBUS never supplies more than IOS to the chain. With C984 at 470 uF the rail now spends
-7.4-14 ms in current limit at power-up: longer than the TPS2553's minimum overcurrent
-FAULT deglitch (5 ms) in every case, than the typical 8 ms in all but the fastest, and
-than the maximum 11 ms at the low limit with the chain's idle load. So LED_FAULT_N
-(TP201) goes low for a few milliseconds at (almost) every power-up. It is a test point only, so nothing reacts; read it on
-the bench as "charging", not as a fault. The 5-7 mJ the switch absorbs is far below what
-trips its thermal limit (an estimate, the model has no thermal part). With the earlier
-100 uF the rail was up in 2-3 ms, inside the deglitch.
+VBUS never supplies more than IOS to the chain. With C984 at 470 uF (100 uF before the
+review: 2-3 ms) the rail spends 7.4-14 ms in current limit at power-up. The TPS2553's
+overcurrent FAULT deglitch is 3 / 7.5 / 11 ms (min / typ / max, SLVS841G), so
+LED_FAULT_N (TP201) goes low for a few milliseconds at every power-up: in every case at
+the minimum deglitch, in all but one at the typical, and with the chain's idle load at
+IOS <= 267 mA even at the maximum. What that means depends on the variant:
+
+- **TPS2553 (as drawn; "auto retry" in TI's comparison table)**: after the deglitch it
+  only asserts FAULT and keeps regulating at IOS (datasheet 9.1.1); it switches off only
+  if the die passes 135 C in current limit, and then cycles back on 10 C lower. The
+  charge simply finishes. TP201 is a test point and nothing reacts to it; read it on the
+  bench as "charging", not as a fault.
+- **TPS2553-1 (latch-off) must not be fitted**: it turns off when the overcurrent lasts
+  past the deglitch (7.5 ms typ) and stays off until EN or power is cycled, so with
+  470 uF the LED rail would not come up at most power-ups. The BOM needs TPS2553DBV
+  without -1.
+
+Temperature (estimate; the model has no thermal part): the switch dissipates 1.1-1.5 W
+at the start, falling to zero as the rail rises, 0.5-0.8 W on average over the charge.
+For these few milliseconds the board copper stays at ambient, so the junction rise is
+at most peak power x RthJB (29.4 C/W, DBV): <= 44 C, i.e. <= 69 C at 25 C ambient and
+<= 104 C at 60 C, below the 135 C current-limit shutdown. RthJA (182.6 C/W) would only
+apply to a charge lasting seconds (it would give 92-138 C of rise), which this is not.
 
 ## kicad-happy automatic pass
 
