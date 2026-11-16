@@ -209,10 +209,18 @@ Three things follow:
   not the kit's VEL NORM. On a machine whose accent threshold lies below 100,
   lower that velocity in the step editor.
 - The kick track and the kit's BD lane send the same note on the same channel,
-  and a kit Note Off would cut the kick track's note, so use one or the other.
-  The same holds for two kits on one MIDI channel: a Note Off from one cuts the
-  other's note wherever their note maps share a note, so give each kit its own
-  channel.
+  so use one or the other (see below).
+
+**One note, one track.** Any track (DRUM, SYNTH or another kit) on the kit's
+channel that plays one of the kit's notes has its note cut by the kit's
+releases (a kit Note Off is Note On velocity 0 on that note), and both trigger
+the same sound. Keep each kit note unique on its channel: leave the kit's BD
+lane empty when the kick has its own track, move a voice's NOTE away from a
+note another track plays there, and give two kits on one channel note maps that
+do not share a note (or a channel each). The power-up demo follows this: track
+1 is the kick, a DRUM track on CHANNEL 10 (note 36), and track 2 a kit on the
+same channel with its default settings, its BD lane empty, SD on steps 5 and 13
+and CH on every step.
 
 **Drums on the leftmost columns.** Inside one step the notes go out in track
 order, so the kick and the kit on the leftmost tracks get the earliest bytes.

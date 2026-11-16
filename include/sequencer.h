@@ -71,6 +71,7 @@ typedef enum {
 #define KIT_VOICES      11
 #define KIT_LANE_AC     0
 #define KIT_LANE_BD     1
+#define KIT_LANE_SD     2
 #define KIT_LANE_CH     8
 #define KIT_LANE_OH     9
 #define MAX_KIT_TRACKS  2

@@ -2,6 +2,7 @@
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
 #include "sequencer.h"
+#include "kit.h"
 
 // ─── Global shared state ────────────────────────────────────────
 
@@ -42,7 +43,9 @@ static void init_defaults(void) {
     g_seq.song.end_mode = SONG_END_LOOP;
     g_seq.song.name[0] = '\0';
 
-    // Set up a basic demo pattern on bank A, slot 1.
+    // Set up a basic demo pattern on bank A, slot 1: the kick on its own DRUM
+    // track and a kit on the same channel with its BD lane empty, so no other
+    // track plays one of the kit's notes on its channel (a kit release would cut it).
     pattern_t *p = &g_seq.patterns[0];
     p->tracks[0].type = TRACK_TYPE_DRUM;
     p->tracks[0].drum_note = 36;  // GM Kick
@@ -51,19 +54,14 @@ static void init_defaults(void) {
         pattern_set_step(p, 0, s, 36, 100, STEP_FLAG_ACTIVE);
     }
 
-    // Track 1: Snare on 5, 13
-    p->tracks[1].type = TRACK_TYPE_DRUM;
-    p->tracks[1].drum_note = 38;  // GM Snare
+    // Track 1: a kit, its settings at the defaults sequencer_init() sets.
+    // SD on steps 5 and 13, CH on every step.
+    p->tracks[1].type = TRACK_TYPE_KIT;
     p->tracks[1].midi_channel = 9;
-    pattern_set_step(p, 1, 4, 38, 100, STEP_FLAG_ACTIVE);
-    pattern_set_step(p, 1, 12, 38, 100, STEP_FLAG_ACTIVE);
-
-    // Track 2: Closed hi-hat on every step
-    p->tracks[2].type = TRACK_TYPE_DRUM;
-    p->tracks[2].drum_note = 42;  // GM Closed HH
-    p->tracks[2].midi_channel = 9;
     for (int s = 0; s < 16; s++) {
-        pattern_set_step(p, 2, s, 42, 80, STEP_FLAG_ACTIVE);
+        uint32_t word = kit_edit(0, KIT_LANE_CH, KIT_NOTE);
+        if (s == 4 || s == 12) word = kit_edit(word, KIT_LANE_SD, KIT_NOTE);
+        p->kit_steps[1][s] = word;
     }
 
     // Routing belongs to the track: every location gets location 0's config.

@@ -1195,7 +1195,6 @@ static void test_sequencer_init_sets_kit_defaults(void) {
 
 #define KIT_CHANNEL 9
 #define KIT_STATUS  (MIDI_NOTE_ON | KIT_CHANNEL)
-#define KIT_LANE_SD 2
 
 static fake_midi_msg_t msg[FAKE_MIDI_CAPACITY];
 
