@@ -1832,16 +1832,38 @@ static uint32_t play_load(const load_case_t *c) {
         clock++;
     }
     CHECK(clock == clocks);
+    // Stopped, every note still sounding is released (after the Clock check: the Stop
+    // cancels a pending Clock).
+    transport_stop();
+    fake_uart_run_until(timer_hw->timerawl + 1000000);
+    CHECK(!fake_uart_tx_irq);
+    static unsigned ons[16][128], offs[16][128];
+    memset(ons, 0, sizeof(ons));
+    memset(offs, 0, sizeof(offs));
     unsigned total = msgs();
     unsigned first_hits[2] = {0, 0};
+    unsigned second_hits = 0;
     for (unsigned i = 0; i < total; i++) {
+        uint8_t kind = msg[i].status & 0xF0, channel = msg[i].status & 0x0F;
+        if (kind == MIDI_NOTE_ON && msg[i].data2) ons[channel][msg[i].data1]++;
+        else if (kind == MIDI_NOTE_ON || kind == MIDI_NOTE_OFF) offs[channel][msg[i].data1]++;
         for (uint8_t kit = 0; kit < 2; kit++) {
-            first_hits[kit] += msg[i].status == (MIDI_NOTE_ON | (9 + kit)) && msg[i].data2 == 80;
+            if (msg[i].status != (MIDI_NOTE_ON | (9 + kit))) continue;
+            first_hits[kit] += msg[i].data2 == 80;
+            second_hits += msg[i].data2 == 110 || msg[i].data2 == 127;
         }
+    }
+    // Every hit has its release, per channel and note.
+    for (unsigned channel = 0; channel < 16; channel++) {
+        for (unsigned note = 0; note < 128; note++) CHECK(ons[channel][note] == offs[channel][note]);
     }
     CHECK(first_hits[0] == KIT_VOICES * steps);
     CHECK(first_hits[1] == KIT_VOICES * steps);
-    return flam_drops();
+    // Every flam step has its second hits, but for those dropped: each drop is one kit's
+    // flam pulse, all its voices.
+    uint32_t drops = flam_drops();
+    CHECK(second_hits == KIT_VOICES * (c->flam_kits * steps - drops));
+    return drops;
 }
 
 static void test_kits_at_wire_rate(void) {
