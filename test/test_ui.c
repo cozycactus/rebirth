@@ -539,6 +539,61 @@ static void test_session_passes_take_no_playback_lock(void) {
     CHECK(playback_locks <= 2);
 }
 
+// The timer ISR runs through the bar line just before a session launch takes
+// the playback lock for a second time, i.e. between a decision taken under one
+// lock and a write under another.
+static unsigned launch_playback_locks;
+static void bar_line_on_second_playback_lock(spin_lock_t *lock) {
+    if (lock != spin_lock_instance(playback_spinlock_num)) return;
+    if (++launch_playback_locks != 2) return;
+    fake_before_lock = NULL;            // the ISR takes the lock too
+    while (g_seq.transport.pulse_count <= 16 * PULSES_PER_STEP) tick();
+}
+
+static void play_to_bar_end_with_race(void) {
+    while (g_seq.transport.pulse_count <= 15 * PULSES_PER_STEP) tick();  // step 15 played
+    launch_playback_locks = 0;
+    fake_before_lock = bar_line_on_second_playback_lock;
+}
+
+static void test_pad_launch_decides_and_writes_atomically(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_start();
+    tick();                             // step 0 played: queues wait for step 16
+    CHECK(transport_queue_track_pattern(2, 3));
+    play_to_bar_end_with_race();
+    // The playing pad drops the queue. Before the bar: track 2 stays on 0.
+    // After it: track 2 is on 3 and the pad queues 0. Never a mix.
+    CHECK(session_pad(2, 0, true));
+    fake_before_lock = NULL;
+    const volatile transport_t *t = &g_seq.transport;
+    bool before = t->current_pattern[2] == 0 && t->queued_pattern[2] == NO_QUEUED_PATTERN;
+    bool after = t->current_pattern[2] == 3 && t->queued_pattern[2] == 0;
+    CHECK(before || after);
+}
+
+static void test_scene_cancel_decides_and_writes_atomically(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_start();
+    tick();
+    CHECK(transport_queue_track_pattern(0, 3));
+    CHECK(transport_queue_track_pattern(1, 5));
+    play_to_bar_end_with_race();
+    // Track 0 is queued to row 3: the press cancels every queue. Before the
+    // bar nothing moves; after it, tracks 0/1 are on 3/5 and row 3 is launched.
+    CHECK(session_scene(3));
+    fake_before_lock = NULL;
+    const volatile transport_t *t = &g_seq.transport;
+    bool before = true, after = t->current_pattern[0] == 3 && t->current_pattern[1] == 5 &&
+                                t->queued_pattern[0] == NO_QUEUED_PATTERN;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        before = before && t->current_pattern[track] == 0 &&
+                 t->queued_pattern[track] == NO_QUEUED_PATTERN;
+        if (track > 0) after = after && t->queued_pattern[track] == 3;
+    }
+    CHECK(before || after);
+}
+
 static bool oled_blank(void) {
     const uint8_t *frame = ssd1309_get_framebuffer();
     for (unsigned i = 0; i < OLED_BUF_SIZE; i++) {
@@ -639,6 +694,8 @@ int main(int argc, char **argv) {
     RUN(test_session_step_leds_blink_playhead);
     RUN(test_session_passes_take_no_playback_lock);
     RUN(test_session_oled_renders);
+    RUN(test_pad_launch_decides_and_writes_atomically);
+    RUN(test_scene_cancel_decides_and_writes_atomically);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS all six OLED views render");

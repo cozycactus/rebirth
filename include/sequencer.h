@@ -235,10 +235,13 @@ void song_set_end_mode(song_end_mode_t mode);
 bool transport_queue_pattern(uint8_t pattern_index);
 bool transport_queue_track_pattern(uint8_t track, uint8_t pattern_index);
 void transport_clear_queue(void);
-// Pattern mode only. Playing: tracks not on the location are queued to it and
-// tracks already on it lose any queue. Stopped: every track selects it at once.
-bool transport_queue_scene(uint8_t pattern_index);
 void transport_clear_track_queue(uint8_t track);
+// A pad (one track) or scene (all tracks) press, decided and written in one
+// critical section, Pattern mode only. If any track in track_mask is queued to
+// the location, their queues are cancelled. Otherwise each one already on it
+// loses any queue and keeps playing, and each other one is queued to it
+// (selected at once while stopped). False for an invalid location or Song mode.
+bool transport_launch(uint8_t track_mask, uint8_t pattern_index);
 
 typedef struct {
     transport_state_t state;
@@ -260,9 +263,14 @@ uint64_t sequencer_clip_mask(uint8_t bank);
 
 // Track mutes (bitmask, instant)
 void seq_set_track_mute(uint8_t track, bool muted);
-// Copies a track's routing into all 32 locations, then refreshes that track's
-// prepared rows. Takes seq_lock: call with none held.
+// Copies a track's routing into all 32 locations, each keeping its own stored
+// `muted`, then refreshes that track's prepared rows. Takes seq_lock: call with
+// none held.
 void seq_set_track_config(uint8_t track, const track_config_t *config);
+// The MUTE button. A track that is muted (live, or stored at the location it
+// plays) becomes audible: the live bit and the stored mute of every location
+// are cleared and its prepared rows refreshed. An audible track gets the live
+// mute. Takes seq_lock: call with none held.
 void seq_toggle_track_mute(uint8_t track);
 uint8_t seq_get_track_mutes(void);
 

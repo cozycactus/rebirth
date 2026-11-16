@@ -51,36 +51,12 @@ bool session_pad(uint8_t track, uint8_t row, bool move_focus) {
         focus.track = track;
         focus.location = target;
     }
-
-    transport_snapshot_t snap;
-    sequencer_snapshot(&snap);
-    if (snap.mode == PLAY_MODE_SONG) return false;
-
-    if (snap.queued[track] == target) {
-        transport_clear_track_queue(track);
-    } else if (snap.current[track] == target) {
-        if (snap.queued[track] != NO_QUEUED_PATTERN) transport_clear_track_queue(track);
-    } else {
-        return transport_queue_track_pattern(track, target);
-    }
-    return true;
+    return transport_launch((uint8_t)(1u << track), target);
 }
 
 bool session_scene(uint8_t row) {
     if (row >= SLOTS_PER_BANK) return false;
-    uint8_t target = location(row);
-
-    transport_snapshot_t snap;
-    sequencer_snapshot(&snap);
-    if (snap.mode == PLAY_MODE_SONG) return false;
-
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if (snap.queued[track] == target) {
-            transport_clear_queue();
-            return true;
-        }
-    }
-    return transport_queue_scene(target);
+    return transport_launch(UINT8_MAX, location(row));
 }
 
 void session_mute(uint8_t track) {

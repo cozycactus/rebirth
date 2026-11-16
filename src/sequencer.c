@@ -801,8 +801,10 @@ bool transport_queue_track_pattern(uint8_t track, uint8_t pattern_index) {
     return queue_patterns((uint8_t)(1u << track), pattern_index);
 }
 
-bool transport_queue_scene(uint8_t pattern_index) {
+bool transport_launch(uint8_t track_mask, uint8_t pattern_index) {
     if (pattern_index >= MAX_PATTERNS) return false;
+    // The decision reads current and queued under the same locks as the write,
+    // so the timer cannot apply a queue between the two.
     uint32_t playback_irq_state = playback_lock();
     if (g_seq.transport.mode != PLAY_MODE_PATTERN) {
         playback_unlock(playback_irq_state);
@@ -810,10 +812,18 @@ bool transport_queue_scene(uint8_t pattern_index) {
     }
     uint32_t lock_state = seq_lock();
     transport_t *t = (transport_t *)&g_seq.transport;
+    bool cancel = false;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if (t->state == TRANSPORT_PLAYING) {
-            t->queued_pattern[track] =
-                (t->current_pattern[track] == pattern_index) ? NO_QUEUED_PATTERN : pattern_index;
+        if ((track_mask & (1u << track)) && t->queued_pattern[track] == pattern_index) {
+            cancel = true;
+        }
+    }
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        if (!(track_mask & (1u << track))) continue;
+        if (cancel || t->current_pattern[track] == pattern_index) {
+            t->queued_pattern[track] = NO_QUEUED_PATTERN;
+        } else if (t->state == TRANSPORT_PLAYING) {
+            t->queued_pattern[track] = pattern_index;
         } else {
             t->current_pattern[track] = pattern_index;
             t->queued_pattern[track] = NO_QUEUED_PATTERN;

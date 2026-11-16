@@ -23,12 +23,13 @@ void session_move_focus(int8_t delta);
 
 // Launches slot `row` of the shown bank on `track`: a pad on the queued
 // location cancels it, a pad on the playing one drops any queue, else queues.
-// With move_focus the focus follows the pad, accepted or not. False = rejected
-// (Song mode).
+// The decision and the write are one transport_launch call, atomic with the
+// timer. With move_focus the focus follows the pad, accepted or not. False =
+// rejected (Song mode).
 bool session_pad(uint8_t track, uint8_t row, bool move_focus);
 
 // Scene launch of slot `row`; a press while any track is queued to it cancels
-// every queue. False = rejected (Song mode).
+// every queue. One transport_launch call. False = rejected (Song mode).
 bool session_scene(uint8_t row);
 
 void session_mute(uint8_t track);

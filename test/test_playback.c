@@ -815,7 +815,7 @@ static void test_scene_queue_skips_tracks_already_there(void) {
     CHECK(g_seq.transport.current_pattern[1] == 9);
     CHECK(transport_queue_track_pattern(1, 4));
     CHECK(transport_queue_track_pattern(3, 2));
-    CHECK(transport_queue_scene(9));
+    CHECK(transport_launch(UINT8_MAX, 9));
     CHECK(g_seq.transport.queued_pattern[1] == NO_QUEUED_PATTERN);
     CHECK(g_seq.transport.queued_pattern[3] == 9);
     CHECK(g_seq.transport.queued_pattern[0] == 9);
@@ -827,7 +827,7 @@ static void test_empty_scene_silences_all_tracks(void) {
     transport_set_launch_quant(LAUNCH_QUANT_BAR);
     transport_start();
     run_through_step(3);
-    CHECK(transport_queue_scene(5));
+    CHECK(transport_launch(UINT8_MAX, 5));
     run_through_step(16);
     for (uint8_t track = 0; track < NUM_TRACKS; track++)
         CHECK(g_seq.transport.current_pattern[track] == 5);
@@ -837,7 +837,7 @@ static void test_empty_scene_silences_all_tracks(void) {
 }
 
 static void test_scene_selects_at_once_when_stopped(void) {
-    CHECK(transport_queue_scene(4));
+    CHECK(transport_launch(UINT8_MAX, 4));
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         CHECK(g_seq.transport.current_pattern[track] == 4);
         CHECK(g_seq.transport.queued_pattern[track] == NO_QUEUED_PATTERN);
@@ -846,7 +846,7 @@ static void test_scene_selects_at_once_when_stopped(void) {
 
 static void test_scene_rejected_in_song_mode(void) {
     transport_set_mode(PLAY_MODE_SONG);
-    CHECK(!transport_queue_scene(4));
+    CHECK(!transport_launch(UINT8_MAX, 4));
 }
 
 static void test_snapshot_reports_queues_and_mutes(void) {
@@ -860,6 +860,56 @@ static void test_snapshot_reports_queues_and_mutes(void) {
     CHECK(snap.live_mutes == 0x02);
     CHECK(snap.stored_mutes & 0x08);
     CHECK(snap.state == TRANSPORT_PLAYING);
+}
+
+static unsigned muted_locations(uint8_t track) {
+    unsigned count = 0;
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) count += g_seq.patterns[p].tracks[track].muted;
+    return count;
+}
+
+static void test_track_config_keeps_each_stored_mute(void) {
+    g_seq.patterns[4].tracks[2].muted = true;
+    track_config_t cfg = g_seq.patterns[0].tracks[2];      // edited at an audible location
+    cfg.midi_channel = 6;
+    seq_set_track_config(2, &cfg);
+    CHECK(muted_locations(2) == 1 && g_seq.patterns[4].tracks[2].muted);
+    cfg = g_seq.patterns[4].tracks[2];                      // edited at the muted location
+    cfg.midi_channel = 7;
+    seq_set_track_config(2, &cfg);
+    CHECK(muted_locations(2) == 1 && g_seq.patterns[4].tracks[2].muted);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) CHECK(g_seq.patterns[p].tracks[2].midi_channel == 7);
+}
+
+static bool track_note_on(uint8_t channel, uint8_t note) {
+    for (unsigned i = 0; i + 1 < fake_midi_length; i++) {
+        if (fake_midi[i] == (MIDI_NOTE_ON | channel) && fake_midi[i + 1] == note) return true;
+    }
+    return false;
+}
+
+static void test_mute_button_undoes_a_stored_mute(void) {
+    set_note(0, 2, 0, 61, 0);
+    set_note(9, 2, 0, 61, 0);
+    g_seq.patterns[0].tracks[2].muted = true;
+    g_seq.patterns[9].tracks[2].muted = true;
+    sequencer_refresh_track_playback(2, 0);
+    sequencer_refresh_track_playback(2, 9);
+    transport_start();
+    run_through_step(0);
+    CHECK(!track_note_on(2, 61));                           // stored mute: silent
+    seq_toggle_track_mute(2);                               // muted -> audible
+    CHECK(g_seq.track_mutes == 0);
+    CHECK(muted_locations(2) == 0);
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    CHECK(snap.stored_mutes == 0);
+    run_through_step(16);
+    CHECK(track_note_on(2, 61));                            // heard on its next step
+    seq_toggle_track_mute(2);                               // audible -> live mute
+    CHECK(g_seq.track_mutes == 1u << 2);
+    seq_toggle_track_mute(2);
+    CHECK(g_seq.track_mutes == 0);
 }
 
 int main(void) {
@@ -917,6 +967,8 @@ int main(void) {
     RUN(test_scene_selects_at_once_when_stopped);
     RUN(test_scene_rejected_in_song_mode);
     RUN(test_snapshot_reports_queues_and_mutes);
+    RUN(test_track_config_keeps_each_stored_mute);
+    RUN(test_mute_button_undoes_a_stored_mute);
 #ifdef REBIRTH_THREADED_TEST
     RUN(test_stop_during_pending_gate_commit);
     RUN(test_panic_during_pending_gate_commit);
