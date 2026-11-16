@@ -16,6 +16,7 @@ static void init_defaults(void) {
     g_seq.transport.state = TRANSPORT_STOPPED;
     g_seq.transport.mode = PLAY_MODE_PATTERN;
     g_seq.transport.bpm = DEFAULT_BPM;
+    g_seq.launch_quant = LAUNCH_QUANT_BAR;
     g_seq.transport.pulse_count = 0;
     g_seq.transport.current_step = 0;
     for (int t = 0; t < NUM_TRACKS; t++) {

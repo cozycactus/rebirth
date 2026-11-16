@@ -36,8 +36,15 @@ lock, including for locations not currently playing.
 ## Playback Rules
 
 - Each track has its own pattern, queue and 1-16 step playhead.
-- Queues apply at that track's loop end. Shortening below the next step wraps to
-  zero; extending preserves position.
+- Queued pattern changes apply on a launch quantization (default `1 BAR`):
+  `BAR` and `BEAT` wait for a global step that is a multiple of 16 or 4, `STEP`
+  applies on the next step, `TRACK LOOP` waits for that track's loop end (the
+  old rule). With `BAR`, `BEAT` and `STEP` the new clip joins in phase: its
+  playhead starts at `(global step % 16) % new length`, so it lines up with the
+  bar. `TRACK LOOP` always starts the new clip at step 1. Queuing the location
+  that is already playing just clears the queue and keeps the playhead.
+  Shortening below the next step wraps to zero; extending preserves position,
+  and neither applies a pending queue. The quantization is not saved.
 - Selection while stopped is immediate and survives Start.
 - Stop cancels pending queues and retains the current playing locations.
 - Manual queues are rejected in Song mode. Song entries apply on 16-step bar

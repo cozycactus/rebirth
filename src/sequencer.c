@@ -215,18 +215,22 @@ static void load_prepared_track(uint8_t track) {
     seq_unlock(lock_state);
 }
 
-static void apply_track_queue_if_ready(uint8_t track) {
+// Applies the queued pattern; returns true when the playing location changed.
+static bool apply_track_queue_if_ready(uint8_t track) {
     transport_t *t = (transport_t *)&g_seq.transport;
-    if (t->queued_pattern[track] == NO_QUEUED_PATTERN) return;
+    if (t->queued_pattern[track] == NO_QUEUED_PATTERN) return false;
 
+    bool changed = false;
     uint32_t lock_state = seq_lock();
     uint8_t queued = t->queued_pattern[track];
     if (queued != NO_QUEUED_PATTERN) {
+        changed = t->current_pattern[track] != queued;
         t->current_pattern[track] = queued;
         t->queued_pattern[track] = NO_QUEUED_PATTERN;
     }
     seq_unlock(lock_state);
     load_prepared_track(track);
+    return changed;
 }
 
 // Immediate note-off (used by transport_stop)
@@ -525,11 +529,28 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
             prepared = &prepared_playback;
 
             uint8_t track_len = clamp_pattern_steps(prepared->track[tr].length);
+            if (t->mode == PLAY_MODE_PATTERN &&
+                t->queued_pattern[tr] != NO_QUEUED_PATTERN) {
+                uint8_t quant = g_seq.launch_quant;
+                bool due;
+                switch (quant) {
+                    case LAUNCH_QUANT_BAR:  due = (global_step_count % 16u) == 0; break;
+                    case LAUNCH_QUANT_BEAT: due = (global_step_count % 4u) == 0; break;
+                    case LAUNCH_QUANT_STEP: due = true; break;
+                    default:                due = t->track_step_count[tr] >= track_len; break;
+                }
+                if (due) {
+                    if (apply_track_queue_if_ready((uint8_t)tr)) {
+                        prepared = &prepared_playback;
+                        track_len = clamp_pattern_steps(prepared->track[tr].length);
+                        t->track_step_count[tr] = (quant == LAUNCH_QUANT_TRACK_LOOP)
+                            ? 0u
+                            : (global_step_count % STEPS_PER_PATTERN) % track_len;
+                    }
+                }
+            }
             if (t->track_step_count[tr] >= track_len) {
-                if (t->mode == PLAY_MODE_PATTERN) apply_track_queue_if_ready((uint8_t)tr);
-                prepared = &prepared_playback;
                 t->track_step_count[tr] = 0;
-                track_len = clamp_pattern_steps(prepared->track[tr].length);
             }
 
             uint8_t track_step = (uint8_t)t->track_step_count[tr];
@@ -724,6 +745,19 @@ void transport_set_mode(play_mode_t mode) {
         }
     }
     playback_unlock(playback_irq_state);
+}
+
+void transport_set_launch_quant(launch_quant_t q) {
+    if ((unsigned)q >= LAUNCH_QUANT_COUNT) return;
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t lock_state = seq_lock();
+    g_seq.launch_quant = (uint8_t)q;
+    seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
+}
+
+launch_quant_t transport_get_launch_quant(void) {
+    return (launch_quant_t)g_seq.launch_quant;
 }
 
 static bool queue_patterns(uint8_t track_mask, uint8_t pattern_index) {

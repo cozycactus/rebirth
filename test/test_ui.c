@@ -43,6 +43,7 @@ static void reset(void) {
     }
     g_seq.transport.bpm = DEFAULT_BPM;
     sequencer_init();
+    transport_set_launch_quant(LAUNCH_QUANT_TRACK_LOOP);
     memset(&step_buttons, 0, sizeof(step_buttons));
     memset(buttons, 0, sizeof(buttons));
     memset(deltas, 0, sizeof(deltas));

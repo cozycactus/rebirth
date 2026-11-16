@@ -43,6 +43,7 @@ static void reset(void) {
     }
     g_seq.transport.bpm = DEFAULT_BPM;
     sequencer_init();
+    transport_set_launch_quant(LAUNCH_QUANT_TRACK_LOOP);
     timer_hw->alarm[0] = pulse_interval_us;
 }
 
@@ -648,6 +649,128 @@ static void test_concurrent_midi_producers_and_uart_irq(void) {
 
 #define RUN(test) do { reset(); test(); tests++; printf("PASS %s\n", #test); } while (0)
 
+static void run_through_step(uint32_t step) {
+    while (g_seq.transport.pulse_count <= step * PULSES_PER_STEP) tick();
+}
+
+static void start_quant_test(launch_quant_t q) {
+    set_note(0, 0, 0, 60, 0);
+    set_note(1, 0, 0, 62, 0);
+    transport_set_launch_quant(q);
+    transport_start();
+}
+
+static void test_bar_launch_waits_for_bar_line(void) {
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    CHECK(transport_queue_track_pattern(0, 1));
+    run_through_step(15);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    CHECK(g_seq.transport.queued_pattern[0] == 1);
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+    CHECK(g_seq.transport.queued_pattern[0] == NO_QUEUED_PATTERN);
+    CHECK(g_seq.transport.current_track_step[0] == 0);
+}
+
+static void test_bar_launch_on_short_loop_waits_for_bar(void) {
+    set_length(0, 0, 12);
+    set_length(1, 0, 12);
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(3);
+    CHECK(transport_queue_track_pattern(0, 1));
+    run_through_step(12);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+    CHECK(g_seq.transport.current_track_step[0] == 0);
+}
+
+static void test_beat_launch_joins_in_phase(void) {
+    set_note(1, 0, 8, 64, 0);
+    start_quant_test(LAUNCH_QUANT_BEAT);
+    run_through_step(5);
+    CHECK(transport_queue_track_pattern(0, 1));
+    run_through_step(7);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    fake_midi_length = 0;
+    run_through_step(8);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+    CHECK(g_seq.transport.current_track_step[0] == 8);
+    CHECK(count_byte(64) == 1);
+}
+
+static void test_launch_phase_matrix(void) {
+    static const launch_quant_t quants[] = {
+        LAUNCH_QUANT_BAR, LAUNCH_QUANT_BEAT, LAUNCH_QUANT_STEP, LAUNCH_QUANT_TRACK_LOOP
+    };
+    static const uint8_t due[] = {16, 8, 6, 16};
+    static const uint8_t lengths[] = {5, 12, 16};
+    static const uint8_t expected[4][3] = {
+        {0, 0, 0}, {3, 8, 8}, {1, 6, 6}, {0, 0, 0}
+    };
+    for (unsigned q = 0; q < 4; q++) {
+        for (unsigned l = 0; l < 3; l++) {
+            reset();
+            set_length(1, 0, lengths[l]);
+            start_quant_test(quants[q]);
+            run_through_step(5);
+            CHECK(transport_queue_track_pattern(0, 1));
+            run_through_step(due[q] - 1u);
+            CHECK(g_seq.transport.current_pattern[0] == 0);
+            run_through_step(due[q]);
+            CHECK(g_seq.transport.current_pattern[0] == 1);
+            CHECK(g_seq.transport.current_track_step[0] == expected[q][l]);
+        }
+    }
+}
+
+static void test_requeue_of_playing_location_keeps_phase(void) {
+    set_length(0, 0, 12);
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(13);
+    CHECK(transport_queue_track_pattern(0, 0));
+    run_through_step(16);
+    CHECK(g_seq.transport.queued_pattern[0] == NO_QUEUED_PATTERN);
+    CHECK(g_seq.transport.current_track_step[0] == 4);
+}
+
+static void test_quant_change_retargets_pending_queue(void) {
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(2);
+    CHECK(transport_queue_track_pattern(0, 1));
+    transport_set_launch_quant(LAUNCH_QUANT_STEP);
+    run_through_step(3);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+}
+
+static void test_shortening_under_bar_does_not_launch_early(void) {
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(9);
+    CHECK(transport_queue_track_pattern(0, 1));
+    set_length(0, 0, 8);
+    run_through_step(12);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+}
+
+static void test_queue_right_after_bar_waits_a_whole_bar(void) {
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(16);
+    CHECK(transport_queue_track_pattern(0, 1));
+    run_through_step(31);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    run_through_step(32);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+}
+
+static void test_launch_quant_setter_ignores_invalid(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BEAT);
+    transport_set_launch_quant(LAUNCH_QUANT_COUNT);
+    CHECK(transport_get_launch_quant() == LAUNCH_QUANT_BEAT);
+}
+
 int main(void) {
     unsigned tests = 0;
     seq_lock_init();
@@ -686,6 +809,15 @@ int main(void) {
     RUN(test_moving_song_entry_keeps_playing_entry_anchor);
     RUN(test_staging_overflow_never_sends_partial_message);
     RUN(test_output_overflow_stops_transport);
+    RUN(test_bar_launch_waits_for_bar_line);
+    RUN(test_bar_launch_on_short_loop_waits_for_bar);
+    RUN(test_beat_launch_joins_in_phase);
+    RUN(test_launch_phase_matrix);
+    RUN(test_requeue_of_playing_location_keeps_phase);
+    RUN(test_quant_change_retargets_pending_queue);
+    RUN(test_shortening_under_bar_does_not_launch_early);
+    RUN(test_queue_right_after_bar_waits_a_whole_bar);
+    RUN(test_launch_quant_setter_ignores_invalid);
 #ifdef REBIRTH_THREADED_TEST
     RUN(test_stop_during_pending_gate_commit);
     RUN(test_panic_during_pending_gate_commit);

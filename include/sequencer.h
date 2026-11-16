@@ -119,6 +119,14 @@ typedef enum {
     PLAY_MODE_SONG,         // Play song chain
 } play_mode_t;
 
+typedef enum {
+    LAUNCH_QUANT_TRACK_LOOP = 0, // at the end of that track's loop (old rule)
+    LAUNCH_QUANT_BAR,            // global step that is a multiple of 16
+    LAUNCH_QUANT_BEAT,           // global step that is a multiple of 4
+    LAUNCH_QUANT_STEP,           // next step
+    LAUNCH_QUANT_COUNT
+} launch_quant_t;
+
 typedef struct {
     transport_state_t state;
     play_mode_t       mode;
@@ -155,6 +163,7 @@ typedef struct {
     pattern_t            patterns[MAX_PATTERNS];
     song_t               song;
     uint8_t              active_pattern[NUM_TRACKS]; // Edited pattern per track/section
+    volatile uint8_t     launch_quant;       // launch_quant_t; not saved
     volatile uint8_t     track_mutes;        // Bitmask: bit N = track N muted for playback
     // Spinlock index for mutex
     uint32_t             spinlock_num;
@@ -182,6 +191,8 @@ void transport_stop(void);
 void transport_continue(void);
 void transport_set_bpm(float bpm);
 void transport_set_mode(play_mode_t mode);
+void transport_set_launch_quant(launch_quant_t q);  // ignores q >= COUNT
+launch_quant_t transport_get_launch_quant(void);
 void sequencer_panic(void);
 void sequencer_refresh_track_playback(uint8_t track, uint8_t pattern_index);
 void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out);

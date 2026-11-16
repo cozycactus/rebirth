@@ -384,6 +384,7 @@ int main(void) {
     midi_init();
     g_seq.transport.bpm = DEFAULT_BPM;
     sequencer_init();
+    transport_set_launch_quant(LAUNCH_QUANT_TRACK_LOOP);
     transport_start();
 
     /* song_append */
