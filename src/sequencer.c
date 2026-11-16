@@ -206,7 +206,7 @@ static bool fill_prepared_track(prepared_track_pattern_t *dst,
     dst->length = pattern_get_track_length(pat, track);
     track_config_t config = pat->tracks[track];
     // Only what the cell's own type plays.
-    bool is_kit = config.type == TRACK_TYPE_KIT;
+    bool is_kit = kit_is_cell(pat, track);
     if (is_kit) {
         memcpy(words, pat->kit_steps[track], sizeof(words));
         kit = g_seq.kit_config[track];

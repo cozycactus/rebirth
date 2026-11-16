@@ -83,21 +83,39 @@ bool kit_cell_has_clip(const uint32_t steps[STEPS_PER_PATTERN], uint8_t length) 
     return false;
 }
 
-uint8_t kit_track_mask(const pattern_t *patterns, uint8_t count) {
+bool kit_is_cell(const pattern_t *p, uint8_t track) {
+    return track < NUM_TRACKS && p->tracks[track].type == TRACK_TYPE_KIT;
+}
+
+uint8_t kit_cell_mask(const pattern_t *patterns, const uint8_t location[NUM_TRACKS]) {
     uint8_t mask = 0;
-    for (uint8_t i = 0; i < count; i++) {
-        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
-            if (patterns[i].tracks[t].type == TRACK_TYPE_KIT) mask |= (uint8_t)(1u << t);
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        if (location[t] < MAX_PATTERNS && kit_is_cell(&patterns[location[t]], t)) {
+            mask |= (uint8_t)(1u << t);
         }
     }
     return mask;
 }
 
+uint8_t kit_track_mask(const pattern_t *patterns, uint8_t count) {
+    uint8_t mask = 0;
+    for (uint8_t i = 0; i < count; i++) {
+        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+            if (kit_is_cell(&patterns[i], t)) mask |= (uint8_t)(1u << t);
+        }
+    }
+    return mask;
+}
+
+char kit_value_glyph(uint8_t value) {
+    static const char glyph[4] = {'.', 'o', 'O', 'f'};
+    return glyph[value & 3u];
+}
+
 void kit_lane_glyphs(const uint32_t steps[STEPS_PER_PATTERN], uint8_t lane, uint8_t length,
                      char out[STEPS_PER_PATTERN + 1]) {
-    static const char glyph[4] = {'.', 'o', 'O', 'f'};
     for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
-        out[s] = s < length ? glyph[kit_get(steps[s], lane)] : ' ';
+        out[s] = s < length ? kit_value_glyph(kit_get(steps[s], lane)) : ' ';
     }
     out[STEPS_PER_PATTERN] = '\0';
 }

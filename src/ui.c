@@ -27,6 +27,7 @@ typedef enum {
     UI_PATTERN_SELECT,      // Choose bank A-D and pattern 1-8
     UI_TRACK_CONFIG,        // Track settings
     UI_SONG_EDIT,           // Song chain editor
+    UI_KIT_STEP_EDIT,       // One kit step: all 12 lanes
 } ui_mode_t;
 
 // ─── UI State ──────────────────────────────────────────────────
@@ -45,13 +46,14 @@ typedef struct {
     // STEP_EDIT
     uint8_t edit_step;              // 0–15
     ui_mode_t step_edit_return;     // Screen the step editor was opened from
+    uint8_t kit_cursor;             // KIT_STEP_EDIT: lane under the cursor
 
     // PATTERN_SELECT
     uint8_t select_pattern;         // 0–31 (bank A-D × slot 1-8)
 
     // TRACK_CONFIG
     uint8_t config_track;           // 0–7
-    uint8_t config_param;           // 0–4
+    uint8_t config_param;           // row: 0–4, on a kit 0..KIT_PARAM_COUNT-1
 
     // SONG_EDIT
     uint16_t song_cursor;           // Position in song
@@ -119,10 +121,9 @@ static void toggle_steps(uint8_t track, uint8_t location, uint16_t mask) {
     sequencer_refresh_track_playback(track, location);
 }
 
-// A cell is a kit cell when its own type is KIT. Patterns are written by
-// Core 0 only: read without a lock.
-static bool is_kit_cell(uint8_t track, uint8_t location) {
-    return g_seq.patterns[location].tracks[track].type == TRACK_TYPE_KIT;
+// Patterns are written by Core 0 only: the panel reads them without a lock.
+static bool is_kit(session_focus_t cell) {
+    return kit_is_cell(&g_seq.patterns[cell.location], cell.track);
 }
 
 static uint16_t steps_within_length(uint8_t track, uint8_t location) {
@@ -157,7 +158,7 @@ static uint16_t handle_bound_steps(session_focus_t cell, uint16_t bind,
     for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
         if (!(short_releases & (1u << s))) continue;
         session_focus_t bound = ui.step_cell[s];
-        if (is_kit_cell(bound.track, bound.location)) {
+        if (is_kit(bound)) {
             press_kit_step(bound, s);
         } else {
             toggle_steps(bound.track, bound.location, (uint16_t)(1u << s));
@@ -264,14 +265,40 @@ static void handle_tempo_led(void) {
 
 // ─── Session Handler ───────────────────────────────────────────
 
-// Points the editing screens (selected_track, active_pattern and, on a kit,
-// the track's lane) at the focus.
+// Points the editing screens (selected_track, active_pattern) at a cell. A kit
+// track's lane needs no copy: every screen reads session_kit_lane().
 static void target_focus(session_focus_t focus) {
     ui.selected_track = focus.track;
-    if (is_kit_cell(focus.track, focus.location)) session_set_kit_lane(focus.track, focus.lane);
     uint32_t lock_state = seq_lock();
     g_seq.active_pattern[focus.track] = focus.location;
     seq_unlock(lock_state);
+}
+
+// The kit step editor on `step` of the selected track's active cell, the lane
+// cursor on `lane`; VALUE press returns to `from`.
+static void open_kit_editor(uint8_t step, uint8_t lane, ui_mode_t from) {
+    ui.edit_step = step;
+    ui.kit_cursor = lane;
+    ui.step_edit_return = from;
+    ui.mode = UI_KIT_STEP_EDIT;
+}
+
+// The first long-pressed step opens an editor on the cell and lane it was bound
+// to at its press: the kit step editor on a kit cell, else the note editor.
+static void open_editor_on_long_press(uint16_t long_presses, ui_mode_t from) {
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (!(long_presses & (1u << s))) continue;
+        session_focus_t cell = ui.step_cell[s];
+        target_focus(cell);
+        if (is_kit(cell)) {
+            open_kit_editor(s, cell.lane, from);
+        } else {
+            ui.edit_step = s;
+            ui.step_edit_return = from;
+            ui.mode = UI_STEP_EDIT;
+        }
+        return;
+    }
 }
 
 static void handle_session_view(int8_t e1d, int8_t e2d,
@@ -326,20 +353,11 @@ static void handle_session_view(int8_t e1d, int8_t e2d,
 
     // Only keys pressed in this view count, on the cell and lane focused at
     // the press; steps beyond that cell's length do nothing. A short press acts
-    // on release, a long press opens the step editor on that step without
-    // toggling it. On a kit the long press drops the key (Task 9: kit editor).
+    // on release, a long press opens the editor on that step and lane without
+    // changing it: the kit step editor on a kit, else the note editor.
     uint16_t long_presses = handle_bound_steps(
         focus, steps_within_length(focus.track, focus.location), steps);
-    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
-        if (long_presses & (1u << s)) {
-            if (is_kit_cell(ui.step_cell[s].track, ui.step_cell[s].location)) continue;
-            target_focus(ui.step_cell[s]);
-            ui.edit_step = s;
-            ui.step_edit_return = UI_SESSION;
-            ui.mode = UI_STEP_EDIT;
-            break;
-        }
-    }
+    open_editor_on_long_press(long_presses, UI_SESSION);
 }
 
 // ─── Pattern View Handler ──────────────────────────────────────
@@ -350,10 +368,7 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
     // Enc1 rotate (detents): walk the stops of the tracks' active patterns, a
     // kit's lanes included; the lane reached is the kit track's remembered one.
     if (e1d != 0) {
-        uint8_t kit_mask = 0;
-        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
-            if (is_kit_cell(t, g_seq.active_pattern[t])) kit_mask |= (uint8_t)(1u << t);
-        }
+        uint8_t kit_mask = kit_cell_mask(g_seq.patterns, g_seq.active_pattern);
         uint8_t track = ui.selected_track;
         uint8_t lane = session_kit_lane(track);
         session_walk_stops(&track, &lane, e1d, kit_mask);
@@ -367,11 +382,20 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
         transport_set_bpm(new_bpm);
     }
 
-    // Enc1 press: enter step edit
+    uint8_t track = ui.selected_track;
+    uint8_t location = g_seq.active_pattern[track];
+    session_focus_t cell = {track, location, session_kit_lane(track)};
+    bool kit = is_kit(cell);
+
+    // Enc1 press: step 1 in the kit step editor on a kit, else the note editor
     if (e1b == BTN_PRESS) {
-        ui.mode = UI_STEP_EDIT;
-        ui.edit_step = 0;
-        ui.step_edit_return = UI_PATTERN_VIEW;
+        if (kit) {
+            open_kit_editor(0, cell.lane, UI_PATTERN_VIEW);
+        } else {
+            ui.mode = UI_STEP_EDIT;
+            ui.edit_step = 0;
+            ui.step_edit_return = UI_PATTERN_VIEW;
+        }
     }
 
     // Enc1 long: back to the Session view
@@ -388,16 +412,65 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
     // Step buttons (active_pattern is Core 0's): other cells toggle on press;
     // a kit follows the Session rule on its remembered lane, its presses bound
     // to the cell and lane focused when they were made.
-    uint8_t track = ui.selected_track;
-    uint8_t location = g_seq.active_pattern[track];
-    bool kit = is_kit_cell(track, location);
     if (!kit) toggle_steps(track, location, steps->pressed);
 
     // A kit step pressed here and released on another screen does nothing.
     if (ui.mode != UI_PATTERN_VIEW) return;
-    session_focus_t cell = {track, location, session_kit_lane(track)};
-    // Long presses drop the key (Task 9: kit editor).
-    handle_bound_steps(cell, kit ? steps_within_length(track, location) : 0, steps);
+    // A long press opens the kit step editor on its step and lane.
+    uint16_t long_presses = handle_bound_steps(
+        cell, kit ? steps_within_length(track, location) : 0, steps);
+    open_editor_on_long_press(long_presses, UI_PATTERN_VIEW);
+}
+
+// ─── Kit Step Edit Handler ─────────────────────────────────────
+
+// One kit step of the selected track's active cell. Nothing here touches its
+// step_t data.
+static void handle_kit_step_edit(int8_t e1d, int8_t e2d,
+                                 button_event_t e1b, button_event_t e2b,
+                                 step_buttons_t *steps) {
+    (void)e1b;
+    uint8_t track = ui.selected_track;
+    uint8_t location = g_seq.active_pattern[track];
+
+    // TRACK rotate (detents): move the lane cursor, AC..RC.
+    if (e1d != 0) {
+        ui.kit_cursor = (uint8_t)clamp_i8((int16_t)ui.kit_cursor + e1d, KIT_LANE_AC,
+                                          KIT_LANES - 1);
+    }
+
+    // VALUE rotate: one value step per event in its direction, whatever its
+    // size (off/note/accent/flam; AC off/on), with the CH/OH rule.
+    if (e2d != 0) {
+        bool changed = false;
+        uint8_t lane = ui.kit_cursor;
+        uint8_t top = lane == KIT_LANE_AC ? 1 : KIT_FLAM;
+        uint32_t lock_state = seq_lock();
+        uint32_t *word = &g_seq.patterns[location].kit_steps[track][ui.edit_step];
+        uint8_t value = kit_get(*word, lane);
+        uint8_t next = e2d > 0 ? (value < top ? value + 1 : value)
+                               : (value > KIT_OFF ? value - 1 : value);
+        if (next != value) {
+            *word = kit_edit(*word, lane, next);
+            changed = true;
+        }
+        seq_unlock(lock_state);
+        if (changed) sequencer_refresh_track_playback(track, location);
+    }
+
+    // VALUE press: back to the screen the editor was opened from.
+    if (e2b == BTN_PRESS) {
+        ui.mode = ui.step_edit_return;
+    }
+
+    // Step buttons: another step within the length.
+    uint16_t selectable = steps->pressed & steps_within_length(track, location);
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (selectable & (1u << s)) {
+            ui.edit_step = s;
+            break;
+        }
+    }
 }
 
 // ─── Step Edit Handler ─────────────────────────────────────────
@@ -622,10 +695,10 @@ static uint16_t build_step_activity_mask(const pattern_t *pat, uint8_t track) {
     return mask;
 }
 
-// Session and Pattern view: on a kit cell the steps of `lane` that are not
-// off, else the active steps; within the length either way.
+// Session, Pattern view and kit editor: on a kit cell the steps of `lane` that
+// are not off, else the active steps; within the length either way.
 static uint16_t build_cell_mask(const pattern_t *pat, uint8_t track, uint8_t lane) {
-    if (pat->tracks[track].type != TRACK_TYPE_KIT) return build_step_activity_mask(pat, track);
+    if (!kit_is_cell(pat, track)) return build_step_activity_mask(pat, track);
     uint16_t mask = 0;
     uint8_t len = clamp_pattern_length(pattern_get_track_length(pat, track));
     for (uint8_t s = 0; s < len; s++) {
@@ -639,6 +712,16 @@ static bool eighth_blink_on(uint32_t pulse) {
     return (pulse / (PPQN / 2)) % 2 == 0;
 }
 
+// A cell's playhead: its step while the transport plays it (the playing
+// location of its track) within `length`, else STEPS_PER_PATTERN (none). Uses
+// the frame's snapshot; takes no lock.
+static uint8_t cell_playhead(const transport_snapshot_t *snap, uint8_t track,
+                             uint8_t location, uint8_t length) {
+    uint8_t step = snap->track_step[track];
+    bool playing = snap->state == TRANSPORT_PLAYING && snap->current[track] == location;
+    return playing && step < length ? step : STEPS_PER_PATTERN;
+}
+
 // Session step LEDs: the focused cell's active steps (on a kit, the focused
 // lane's steps) within its length. While the cell is the playing location of
 // its track, its playhead blinks on 8th notes of the transport. Uses the
@@ -648,11 +731,10 @@ static uint16_t build_session_mask(const transport_snapshot_t *snap) {
     const pattern_t *pat = &g_seq.patterns[focus.location];
     uint16_t mask = build_cell_mask(pat, focus.track, focus.lane);
 
-    uint8_t playhead = snap->track_step[focus.track];
-    if (snap->state == TRANSPORT_PLAYING &&
-        snap->current[focus.track] == focus.location &&
-        playhead < clamp_pattern_length(pattern_get_track_length(pat, focus.track)) &&
-        eighth_blink_on(snap->pulse_count)) {
+    uint8_t playhead = cell_playhead(
+        snap, focus.track, focus.location,
+        clamp_pattern_length(pattern_get_track_length(pat, focus.track)));
+    if (playhead < STEPS_PER_PATTERN && eighth_blink_on(snap->pulse_count)) {
         mask ^= (uint16_t)(1u << playhead);
     }
     return mask;
@@ -707,9 +789,14 @@ static void update_step_leds(void) {
             break;
         }
 
-        case UI_STEP_EDIT: {
+        case UI_STEP_EDIT:
+        case UI_KIT_STEP_EDIT: {
+            // The note editor shows the active steps, the kit editor the
+            // cursor lane's steps.
             pattern_t *p = seq_active_pattern(ui.selected_track);
-            mask = build_step_activity_mask(p, ui.selected_track);
+            mask = ui.mode == UI_KIT_STEP_EDIT
+                ? build_cell_mask(p, ui.selected_track, ui.kit_cursor)
+                : build_step_activity_mask(p, ui.selected_track);
 
             // Keep selected step obvious while editing.
             if (ui.edit_step < STEPS_PER_PATTERN) {
@@ -744,76 +831,128 @@ static void update_step_leds(void) {
 
 // ─── Track Config Handler ──────────────────────────────────────
 
+// Rows of a SYNTH or DRUM track's config screen (NOTE on a drum only).
+enum { TRACK_PARAM_TYPE, TRACK_PARAM_CHANNEL, TRACK_PARAM_OUTPUT, TRACK_PARAM_GATE,
+       TRACK_PARAM_NOTE };
+
+#define TRACK_TYPE_COUNT 3
+
+// SYNTH -> DRUM -> KIT -> SYNTH; backwards on a left turn.
+static track_type_t next_track_type(track_type_t type, int8_t direction) {
+    return (track_type_t)((type + (direction > 0 ? 1 : TRACK_TYPE_COUNT - 1)) %
+                          TRACK_TYPE_COUNT);
+}
+
+// value + delta, within lo..hi.
+static uint8_t step_value(uint8_t value, int8_t delta, uint8_t lo, uint8_t hi) {
+    int16_t next = (int16_t)value + delta;
+    return (uint8_t)(next < lo ? lo : (next > hi ? hi : next));
+}
+
+// TYPE moves one type per event. seq_set_track_config refuses a third kit track
+// before it changes anything; KIT is then skipped with a message.
+static void step_track_type(uint8_t track, track_config_t config, int8_t direction) {
+    config.type = next_track_type(config.type, direction);
+    if (seq_set_track_config(track, &config)) return;
+    show_notify("MAX 2 KITS");
+    config.type = next_track_type(config.type, direction);
+    seq_set_track_config(track, &config);
+}
+
+// CHANNEL, OUTPUT, GATE and a drum's NOTE: the track's routing, written to all
+// 32 locations when it changes.
+static void edit_track_param(uint8_t track, track_config_t config, uint8_t param,
+                             int8_t delta) {
+    uint8_t *field;
+    uint8_t lo = 0, hi = 127;
+    switch (param) {
+        case TRACK_PARAM_CHANNEL: field = &config.midi_channel; hi = 15; break;
+        case TRACK_PARAM_GATE: field = &config.gate_length_pct; lo = 10; hi = 100; break;
+        case TRACK_PARAM_NOTE: field = &config.drum_note; break;
+        case TRACK_PARAM_OUTPUT: {
+            // Output mode: cycle through 3 options
+            int16_t m = (int16_t)config.output_mode + (delta > 0 ? 1 : -1);
+            if (m < 0) m = 2;
+            if (m > 2) m = 0;
+            config.output_mode = (output_mode_t)m;
+            seq_set_track_config(track, &config);
+            return;
+        }
+        default: return;
+    }
+    uint8_t next = step_value(*field, delta, lo, hi);
+    if (next == *field) return;
+    *field = next;
+    seq_set_track_config(track, &config);
+}
+
+// A kit's CHANNEL and GATE are its routing (seq_set_track_config); FLAM, the
+// velocities and the notes are its kit settings (seq_set_kit_config). Each is
+// written only when it changes.
+static void edit_kit_param(uint8_t track, track_config_t config, uint8_t param,
+                           int8_t delta) {
+    uint32_t lock_state = seq_lock();
+    kit_config_t kit = g_seq.kit_config[track];
+    seq_unlock(lock_state);
+    uint8_t *field;
+    uint8_t lo = 1, hi = 127;
+    bool routing = false;
+    switch (param) {
+        case KIT_PARAM_CHANNEL:
+            field = &config.midi_channel; lo = 0; hi = 15; routing = true; break;
+        case KIT_PARAM_GATE:
+            field = &config.gate_length_pct; lo = 10; hi = 100; routing = true; break;
+        case KIT_PARAM_FLAM:
+            field = &kit.flam_pulses; lo = KIT_FLAM_MIN; hi = KIT_FLAM_MAX; break;
+        case KIT_PARAM_VEL_NORMAL: field = &kit.vel_normal; break;
+        case KIT_PARAM_VEL_ACCENT: field = &kit.vel_accent; break;
+        case KIT_PARAM_VEL_MAX: field = &kit.vel_max; break;
+        default:
+            if (param < KIT_PARAM_NOTE || param >= KIT_PARAM_COUNT) return;
+            field = &kit.note[param - KIT_PARAM_NOTE];
+            lo = 0;
+            break;
+    }
+    uint8_t next = step_value(*field, delta, lo, hi);
+    if (next == *field) return;
+    *field = next;
+    if (routing) {
+        seq_set_track_config(track, &config);
+    } else {
+        seq_set_kit_config(track, &kit);
+    }
+}
+
 static void handle_track_config(int8_t e1d, int8_t e2d,
                                  button_event_t e1b, button_event_t e2b,
                                  step_buttons_t *steps) {
     (void)steps;
     uint8_t edited_track = ui.config_track;
     uint32_t lock_state = seq_lock();
-    track_config_t config = g_seq.patterns[g_seq.active_pattern[edited_track]]
-                                .tracks[edited_track];
+    const pattern_t *cell = &g_seq.patterns[g_seq.active_pattern[edited_track]];
+    track_config_t config = cell->tracks[edited_track];
+    bool kit = kit_is_cell(cell, edited_track);
     seq_unlock(lock_state);
-    track_config_t *tc = &config;
-    bool changed = false;
 
-    int max_params = (tc->type == TRACK_TYPE_DRUM) ? 4 : 3;
+    // A kit lists TYPE, CHANNEL, GATE, FLAM, the velocities and the notes;
+    // the others TYPE, CHANNEL, OUTPUT, GATE and, on a drum, NOTE.
+    uint8_t last = kit ? KIT_PARAM_COUNT - 1
+                       : (config.type == TRACK_TYPE_DRUM ? TRACK_PARAM_NOTE : TRACK_PARAM_GATE);
+    if (ui.config_param > last) ui.config_param = last;
 
     // Enc1 rotate: select parameter
     if (e1d != 0) {
-        int16_t p = (int16_t)ui.config_param + e1d;
-        ui.config_param = clamp_i8(p, 0, max_params);
+        ui.config_param = (uint8_t)clamp_i8((int16_t)ui.config_param + e1d, 0, last);
     }
 
-    // Enc2 rotate: adjust value
+    // Enc2 rotate: adjust value (TYPE is the first row of both lists)
     if (e2d != 0) {
-        switch (ui.config_param) {
-            case 0: {
-                // Track type: synth / drum
-                tc->type = (tc->type == TRACK_TYPE_SYNTH)
-                           ? TRACK_TYPE_DRUM : TRACK_TYPE_SYNTH;
-                changed = true;
-                break;
-            }
-            case 1: {
-                // MIDI channel 0–15
-                int16_t ch = (int16_t)tc->midi_channel + e2d;
-                uint8_t next_channel = clamp_i8(ch, 0, 15);
-                if (tc->midi_channel != next_channel) {
-                    tc->midi_channel = next_channel;
-                    changed = true;
-                }
-                break;
-            }
-            case 2: {
-                // Output mode: cycle through 3 options
-                int16_t m = (int16_t)tc->output_mode + (e2d > 0 ? 1 : -1);
-                if (m < 0) m = 2;
-                if (m > 2) m = 0;
-                tc->output_mode = (output_mode_t)m;
-                changed = true;
-                break;
-            }
-            case 3: {
-                // Gate length 10–100%
-                int16_t g = (int16_t)tc->gate_length_pct + e2d;
-                if (g < 10) g = 10;
-                if (g > 100) g = 100;
-                if (tc->gate_length_pct != (uint8_t)g) {
-                    tc->gate_length_pct = (uint8_t)g;
-                    changed = true;
-                }
-                break;
-            }
-            case 4: {
-                // Drum note (only for drum tracks)
-                int16_t n = (int16_t)tc->drum_note + e2d;
-                uint8_t next_note = clamp_i8(n, 0, 127);
-                if (tc->drum_note != next_note) {
-                    tc->drum_note = next_note;
-                    changed = true;
-                }
-                break;
-            }
+        if (ui.config_param == TRACK_PARAM_TYPE) {
+            step_track_type(edited_track, config, e2d);
+        } else if (kit) {
+            edit_kit_param(edited_track, config, ui.config_param, e2d);
+        } else {
+            edit_track_param(edited_track, config, ui.config_param, e2d);
         }
     }
 
@@ -826,10 +965,6 @@ static void handle_track_config(int8_t e1d, int8_t e2d,
     // Enc2 press: back to pattern select
     if (e2b == BTN_PRESS) {
         ui.mode = UI_PATTERN_SELECT;
-    }
-
-    if (changed) {
-        seq_set_track_config(edited_track, &config);
     }
 }
 
@@ -987,17 +1122,57 @@ static void update_panel_lights(const transport_snapshot_t *snap) {
     rgb_leds_show(frame);
 }
 
+// On a kit focus the focus line names the lane and a strip shows its steps
+// and the cell's playhead.
 static void render_session_view(const transport_snapshot_t *snap) {
     session_focus_t focus = session_get_focus();
-    uint8_t length = clamp_pattern_length(
-        pattern_get_track_length(&g_seq.patterns[focus.location], focus.track));
+    const pattern_t *pat = &g_seq.patterns[focus.location];
+    uint8_t length = clamp_pattern_length(pattern_get_track_length(pat, focus.track));
     uint8_t bar_step = snap->state == TRANSPORT_PLAYING
         ? (uint8_t)((snap->pulse_count / PULSES_PER_STEP) % STEPS_PER_PATTERN)
         : STEPS_PER_PATTERN;    // none
+    const char *lane = NULL;
+    char strip[STEPS_PER_PATTERN + 1];
+    uint8_t playhead = STEPS_PER_PATTERN;
+    if (kit_is_cell(pat, focus.track)) {
+        lane = kit_lane_name(focus.lane);
+        kit_lane_glyphs(pat->kit_steps[focus.track], focus.lane, length, strip);
+        playhead = cell_playhead(snap, focus.track, focus.location, length);
+    }
     display_draw_session_view(session_bank(), session_common_row(snap),
                               focus.track, focus.location, length,
                               g_seq.transport.bpm, transport_get_launch_quant(),
-                              bar_step);
+                              bar_step, lane, lane ? strip : NULL, playhead);
+}
+
+// A kit cell shows its remembered lane's steps, any other cell its step_t grid.
+static void render_pattern_view(const transport_snapshot_t *snap) {
+    uint8_t track = ui.selected_track;
+    uint8_t location = g_seq.active_pattern[track];
+    const pattern_t *pat = &g_seq.patterns[location];
+    if (kit_is_cell(pat, track)) {
+        uint8_t lane = session_kit_lane(track);
+        uint8_t length = clamp_pattern_length(pattern_get_track_length(pat, track));
+        char strip[STEPS_PER_PATTERN + 1];
+        kit_lane_glyphs(pat->kit_steps[track], lane, length, strip);
+        display_draw_kit_lane_view(track, location, kit_lane_name(lane), strip,
+                                   cell_playhead(snap, track, location, length));
+    } else {
+        display_draw_pattern_view(pat, track, g_seq.transport.current_track_step[track]);
+    }
+    display_draw_bpm(g_seq.transport.bpm);
+}
+
+// A kit track's config lists its kit settings; the others keep their list.
+static void render_track_config(void) {
+    uint8_t track = ui.config_track;
+    const pattern_t *cell = seq_active_pattern(track);
+    if (kit_is_cell(cell, track)) {
+        display_draw_kit_config(&cell->tracks[track], &g_seq.kit_config[track], track,
+                                ui.config_param);
+    } else {
+        display_draw_track_config(&cell->tracks[track], track, ui.config_param);
+    }
 }
 
 // ─── UI Render (dispatches to display functions) ───────────────
@@ -1015,11 +1190,7 @@ void ui_render(void) {
             break;
 
         case UI_PATTERN_VIEW:
-            display_draw_pattern_view(
-                seq_active_pattern(ui.selected_track),
-                ui.selected_track,
-                g_seq.transport.current_track_step[ui.selected_track]);
-            display_draw_bpm(g_seq.transport.bpm);
+            render_pattern_view(&snap);
             break;
 
         case UI_STEP_EDIT:
@@ -1039,14 +1210,19 @@ void ui_render(void) {
             break;
 
         case UI_TRACK_CONFIG:
-            display_draw_track_config(
-                &seq_active_pattern(ui.config_track)->tracks[ui.config_track],
-                ui.config_track,
-                ui.config_param);
+            render_track_config();
             break;
 
         case UI_SONG_EDIT:
             display_draw_song_view(&g_seq.song, ui.song_cursor, ui.selected_track);
+            break;
+
+        case UI_KIT_STEP_EDIT:
+            display_draw_kit_step_edit(
+                ui.selected_track,
+                ui.edit_step,
+                seq_active_pattern(ui.selected_track)->kit_steps[ui.selected_track][ui.edit_step],
+                ui.kit_cursor);
             break;
     }
 
@@ -1084,8 +1260,10 @@ void ui_update(void) {
     mcp23017_poll();
 
     // 2. Read encoder events. TRACK walks whole detents where it walks the
-    // focus stops (one detent, one stop); elsewhere it keeps acceleration.
-    int8_t e1d = (ui.mode == UI_SESSION || ui.mode == UI_PATTERN_VIEW)
+    // focus stops or the kit editor's lanes (one detent, one stop); elsewhere it
+    // keeps acceleration.
+    int8_t e1d = (ui.mode == UI_SESSION || ui.mode == UI_PATTERN_VIEW ||
+                  ui.mode == UI_KIT_STEP_EDIT)
                      ? encoder_get_detents(0) : encoder_get_delta(0);
     int8_t e2d = encoder_get_delta(1);
     button_event_t e1b = encoder_get_button(0);
@@ -1132,6 +1310,9 @@ void ui_update(void) {
             break;
         case UI_SONG_EDIT:
             handle_song_edit(e1d, e2d, e1b, e2b, steps);
+            break;
+        case UI_KIT_STEP_EDIT:
+            handle_kit_step_edit(e1d, e2d, e1b, e2b, steps);
             break;
     }
 

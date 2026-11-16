@@ -11,7 +11,7 @@
 typedef struct {
     uint8_t track;
     uint8_t location;
-    uint8_t lane;       // KIT_LANE_AC..; meaningful on a kit cell only
+    uint8_t lane;       // on a kit cell the track's remembered lane, else 0
 } session_focus_t;
 
 // Bank 0; focus = (0, current location of track 0); every kit lane BD.
@@ -25,7 +25,8 @@ session_focus_t session_get_focus(void);
 // lands on AC, moving left on RC. Clamped at (0, first stop) and (7, last stop).
 void session_walk_stops(uint8_t *track, uint8_t *lane, int8_t detents, uint8_t kit_mask);
 
-// The lane each kit track last had focused (UI RAM, not saved).
+// The lane each kit track last had focused (UI RAM, not saved). The focus and
+// the Pattern view both read and move this one record.
 uint8_t session_kit_lane(uint8_t track);
 void session_set_kit_lane(uint8_t track, uint8_t lane);
 

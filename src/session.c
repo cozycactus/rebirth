@@ -1,12 +1,14 @@
 #include "session.h"
 #include "sequencer.h"
+#include "kit.h"
 
 #define SESSION_BANKS 4
 #define SLOTS_PER_BANK 8
 #define NO_COMMON_ROW 0xFF
 
 static uint8_t bank;
-static session_focus_t focus;
+static uint8_t focus_track, focus_location;
+// The only record of a kit track's lane: the focus reads it on a kit cell.
 static uint8_t kit_lane[NUM_TRACKS];
 
 static uint8_t location(uint8_t row) {
@@ -18,19 +20,13 @@ static uint8_t queued_or_current(const transport_snapshot_t *snap, uint8_t track
     return snap->queued[track] != NO_QUEUED_PATTERN ? snap->queued[track] : snap->current[track];
 }
 
-// Patterns are written by Core 0 only: read without a lock.
-static bool is_kit_cell(uint8_t track, uint8_t location) {
-    return g_seq.patterns[location].tracks[track].type == TRACK_TYPE_KIT;
-}
-
 void session_init(void) {
     transport_snapshot_t snap;
     sequencer_snapshot(&snap);
     bank = 0;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) kit_lane[track] = KIT_LANE_BD;
-    focus.track = 0;
-    focus.location = snap.current[0];
-    focus.lane = kit_lane[0];
+    focus_track = 0;
+    focus_location = snap.current[0];
 }
 
 uint8_t session_bank(void) {
@@ -41,7 +37,12 @@ void session_next_bank(void) {
     bank = (bank + 1) % SESSION_BANKS;
 }
 
+// Patterns are written by Core 0 only: the type is read without a lock.
 session_focus_t session_get_focus(void) {
+    session_focus_t focus = {focus_track, focus_location, 0};
+    if (kit_is_cell(&g_seq.patterns[focus_location], focus_track)) {
+        focus.lane = kit_lane[focus_track];
+    }
     return focus;
 }
 
@@ -87,20 +88,19 @@ void session_set_kit_lane(uint8_t track, uint8_t lane) {
 void session_move_focus(int8_t detents) {
     transport_snapshot_t snap;
     sequencer_snapshot(&snap);
-    uint8_t kit_mask = 0;
+    uint8_t edited[NUM_TRACKS];
     for (uint8_t t = 0; t < NUM_TRACKS; t++) {
-        uint8_t edited = t == focus.track ? focus.location : queued_or_current(&snap, t);
-        if (is_kit_cell(t, edited)) kit_mask |= (uint8_t)(1u << t);
+        edited[t] = t == focus_track ? focus_location : queued_or_current(&snap, t);
     }
+    uint8_t kit_mask = kit_cell_mask(g_seq.patterns, edited);
 
-    uint8_t track = focus.track;
-    uint8_t lane = focus.lane;
+    uint8_t track = focus_track;
+    uint8_t lane = session_get_focus().lane;
     session_walk_stops(&track, &lane, detents, kit_mask);
-    if (track != focus.track) {
-        focus.track = track;
-        focus.location = queued_or_current(&snap, track);
+    if (track != focus_track) {
+        focus_track = track;
+        focus_location = edited[track];
     }
-    focus.lane = lane;
     if (kit_in_mask(kit_mask, track)) session_set_kit_lane(track, lane);
 }
 
@@ -108,9 +108,8 @@ bool session_pad(uint8_t track, uint8_t row, bool move_focus) {
     if (track >= NUM_TRACKS || row >= SLOTS_PER_BANK) return false;
     uint8_t target = location(row);
     if (move_focus) {
-        focus.track = track;
-        focus.location = target;
-        focus.lane = kit_lane[track];
+        focus_track = track;
+        focus_location = target;
     }
     return transport_launch((uint8_t)(1u << track), target);
 }

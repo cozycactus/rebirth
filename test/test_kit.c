@@ -113,6 +113,24 @@ static void test_track_mask(void) {
     CHECK(kit_track_mask(patterns, 31) == 0x04);
 }
 
+static void test_cell_mask(void) {
+    static pattern_t patterns[MAX_PATTERNS];
+    for (int i = 0; i < MAX_PATTERNS; i++) pattern_init(&patterns[i], (uint8_t)i);
+    patterns[3].tracks[1].type = TRACK_TYPE_KIT;
+    patterns[0].tracks[6].type = TRACK_TYPE_KIT;
+    CHECK(kit_is_cell(&patterns[3], 1));
+    CHECK(!kit_is_cell(&patterns[0], 1));
+    CHECK(!kit_is_cell(&patterns[3], NUM_TRACKS));
+    uint8_t location[NUM_TRACKS] = {0};
+    CHECK(kit_cell_mask(patterns, location) == 0x40);
+    location[1] = 3;
+    CHECK(kit_cell_mask(patterns, location) == 0x42);
+    location[6] = 3;                                    // each track's own location
+    CHECK(kit_cell_mask(patterns, location) == 0x02);
+    location[1] = MAX_PATTERNS;                         // out of range: no kit
+    CHECK(kit_cell_mask(patterns, location) == 0);
+}
+
 static void test_glyphs(void) {
     uint32_t steps[STEPS_PER_PATTERN] = {0};
     steps[0] = kit_set(0, 2, 1);
@@ -122,6 +140,8 @@ static void test_glyphs(void) {
     kit_lane_glyphs(steps, 2, 6, out);
     CHECK(strlen(out) == 16);
     CHECK(memcmp(out, "oOf...          ", 17) == 0);
+    CHECK(kit_value_glyph(KIT_OFF) == '.' && kit_value_glyph(KIT_NOTE) == 'o');
+    CHECK(kit_value_glyph(KIT_ACCENT) == 'O' && kit_value_glyph(KIT_FLAM) == 'f');
 }
 
 static void test_pattern_helpers_move_kit_steps(void) {
@@ -166,6 +186,7 @@ int main(void) {
     RUN(test_lane_names);
     RUN(test_has_clip);
     RUN(test_track_mask);
+    RUN(test_cell_mask);
     RUN(test_glyphs);
     RUN(test_pattern_helpers_move_kit_steps);
     return 0;

@@ -85,6 +85,19 @@ typedef struct {
     uint8_t flam_pulses;
 } kit_config_t;
 
+// Rows of a kit track's config screen, in order (OUTPUT and CV are not used by a kit).
+typedef enum {
+    KIT_PARAM_TYPE,
+    KIT_PARAM_CHANNEL,
+    KIT_PARAM_GATE,
+    KIT_PARAM_FLAM,
+    KIT_PARAM_VEL_NORMAL,
+    KIT_PARAM_VEL_ACCENT,
+    KIT_PARAM_VEL_MAX,
+    KIT_PARAM_NOTE,                     // NOTE BD; voice v is KIT_PARAM_NOTE + v
+    KIT_PARAM_COUNT = KIT_PARAM_NOTE + KIT_VOICES,
+} kit_param_t;
+
 typedef enum {
     OUTPUT_MIDI_ONLY,
     OUTPUT_CV_GATE,
@@ -349,19 +362,35 @@ void display_init(void);
 void display_clear(void);
 void display_update(void);
 // common_row: session_common_row(&snap), 0xFF = MIXED. bar_step: global step in the
-// bar (0-15); 16 or more lights none (stopped).
+// bar (0-15); 16 or more lights none (stopped). On a kit focus kit_lane names the
+// lane ("SD"), kit_strip comes from kit_lane_glyphs and kit_playhead is the cell's
+// step (16 = none); kit_lane NULL on any other focus.
 void display_draw_session_view(uint8_t bank, uint8_t common_row,
                                uint8_t focus_track, uint8_t focus_location, uint8_t focus_length,
-                               float bpm, launch_quant_t quant, uint8_t bar_step);
+                               float bpm, launch_quant_t quant, uint8_t bar_step,
+                               const char *kit_lane, const char *kit_strip, uint8_t kit_playhead);
+// Session screen on a kit focus: the pixel rows of the lane strip and its playhead.
+#define DISPLAY_KIT_STRIP_Y 37
+#define DISPLAY_KIT_STRIP_H 11
 const char *display_launch_quant_name(launch_quant_t quant);
 void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step);
+// Pattern view on a kit cell: lane names the lane, strip from kit_lane_glyphs,
+// playhead the cell's step (16 = none). The BPM is drawn by the caller.
+void display_draw_kit_lane_view(uint8_t track, uint8_t location, const char *lane,
+                                const char *strip, uint8_t playhead);
 void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step);
+// One kit step word: the 12 lane values, the cursor on cursor_lane.
+void display_draw_kit_step_edit(uint8_t track, uint8_t step, uint32_t word, uint8_t cursor_lane);
 void display_draw_pattern_select(uint8_t pattern,
                                   uint8_t length,
                                   uint8_t queued_pat,
                                   uint8_t mutes);
 void display_draw_track_config(const track_config_t *tc, uint8_t track,
                                 uint8_t param_cursor);
+// A kit track's config: param is a kit_param_t row; FLAM shows its time at the
+// current tempo.
+void display_draw_kit_config(const track_config_t *tc, const kit_config_t *kc,
+                             uint8_t track, uint8_t param);
 void display_draw_song_view(const song_t *s, uint16_t pos, uint8_t track);
 void display_draw_bpm(float bpm);
 void display_draw_text(uint8_t x, uint8_t y, const char *text);
