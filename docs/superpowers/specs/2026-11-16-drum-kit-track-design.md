@@ -383,10 +383,11 @@ Each kit track remembers its last focused lane in UI RAM (A; not saved; BD, lane
 power-up, not the zero value AC). A pad press on a kit column moves the focus there onto that
 remembered lane.
 
-**A focus change cancels held step gestures (A).** Today a step press waits for its release and
-then applies to whatever is focused at that moment. When the focused track, location or lane
-changes, pending short and long step presses are dropped; a button still held must be released
-before it counts again. This prevents a press made on SD from landing on CH.
+**A step press belongs to the lane it was made on (A).** Since `session-panel` commit a86ef4a a
+Session step press acts, on release or long press, on the cell that was focused when it was made,
+whatever the focus does in between. A kit press also remembers the lane: a press made on SD acts on
+SD even if TRACK has moved to LT or CH before the release. The Pattern view binds its presses the
+same way.
 
 ### Step buttons on a kit lane (A)
 
