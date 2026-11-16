@@ -43,6 +43,7 @@ static void reset(void) {
     }
     g_seq.transport.bpm = DEFAULT_BPM;
     sequencer_init();
+    transport_set_launch_quant(LAUNCH_QUANT_TRACK_LOOP);
     timer_hw->alarm[0] = pulse_interval_us;
 }
 
@@ -648,6 +649,269 @@ static void test_concurrent_midi_producers_and_uart_irq(void) {
 
 #define RUN(test) do { reset(); test(); tests++; printf("PASS %s\n", #test); } while (0)
 
+static void run_through_step(uint32_t step) {
+    while (g_seq.transport.pulse_count <= step * PULSES_PER_STEP) tick();
+}
+
+static void start_quant_test(launch_quant_t q) {
+    set_note(0, 0, 0, 60, 0);
+    set_note(1, 0, 0, 62, 0);
+    transport_set_launch_quant(q);
+    transport_start();
+}
+
+static void test_bar_launch_waits_for_bar_line(void) {
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    CHECK(transport_queue_track_pattern(0, 1));
+    run_through_step(15);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    CHECK(g_seq.transport.queued_pattern[0] == 1);
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+    CHECK(g_seq.transport.queued_pattern[0] == NO_QUEUED_PATTERN);
+    CHECK(g_seq.transport.current_track_step[0] == 0);
+}
+
+static void test_bar_launch_on_short_loop_waits_for_bar(void) {
+    set_length(0, 0, 12);
+    set_length(1, 0, 12);
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(3);
+    CHECK(transport_queue_track_pattern(0, 1));
+    run_through_step(12);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+    CHECK(g_seq.transport.current_track_step[0] == 0);
+}
+
+static void test_beat_launch_joins_in_phase(void) {
+    set_note(1, 0, 8, 64, 0);
+    start_quant_test(LAUNCH_QUANT_BEAT);
+    run_through_step(5);
+    CHECK(transport_queue_track_pattern(0, 1));
+    run_through_step(7);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    fake_midi_length = 0;
+    run_through_step(8);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+    CHECK(g_seq.transport.current_track_step[0] == 8);
+    CHECK(count_byte(64) == 1);
+}
+
+static void test_launch_phase_matrix(void) {
+    static const launch_quant_t quants[] = {
+        LAUNCH_QUANT_BAR, LAUNCH_QUANT_BEAT, LAUNCH_QUANT_STEP, LAUNCH_QUANT_TRACK_LOOP
+    };
+    static const uint8_t due[] = {16, 8, 6, 16};
+    static const uint8_t lengths[] = {5, 12, 16};
+    static const uint8_t expected[4][3] = {
+        {0, 0, 0}, {3, 8, 8}, {1, 6, 6}, {0, 0, 0}
+    };
+    for (unsigned q = 0; q < 4; q++) {
+        for (unsigned l = 0; l < 3; l++) {
+            reset();
+            set_length(1, 0, lengths[l]);
+            start_quant_test(quants[q]);
+            run_through_step(5);
+            CHECK(transport_queue_track_pattern(0, 1));
+            run_through_step(due[q] - 1u);
+            CHECK(g_seq.transport.current_pattern[0] == 0);
+            run_through_step(due[q]);
+            CHECK(g_seq.transport.current_pattern[0] == 1);
+            CHECK(g_seq.transport.current_track_step[0] == expected[q][l]);
+        }
+    }
+}
+
+static void test_requeue_of_playing_location_keeps_phase(void) {
+    set_length(0, 0, 12);
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(13);
+    CHECK(transport_queue_track_pattern(0, 0));
+    run_through_step(16);
+    CHECK(g_seq.transport.queued_pattern[0] == NO_QUEUED_PATTERN);
+    CHECK(g_seq.transport.current_track_step[0] == 4);
+}
+
+static void test_quant_change_retargets_pending_queue(void) {
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(2);
+    CHECK(transport_queue_track_pattern(0, 1));
+    transport_set_launch_quant(LAUNCH_QUANT_STEP);
+    run_through_step(3);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+}
+
+static void test_shortening_under_bar_does_not_launch_early(void) {
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(9);
+    CHECK(transport_queue_track_pattern(0, 1));
+    set_length(0, 0, 8);
+    run_through_step(12);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+}
+
+static void test_queue_right_after_bar_waits_a_whole_bar(void) {
+    start_quant_test(LAUNCH_QUANT_BAR);
+    run_through_step(16);
+    CHECK(transport_queue_track_pattern(0, 1));
+    run_through_step(31);
+    CHECK(g_seq.transport.current_pattern[0] == 0);
+    run_through_step(32);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+}
+
+static void test_launch_keeps_track_routing(void) {
+    track_config_t cfg = g_seq.patterns[0].tracks[0];
+    cfg.midi_channel = 5;
+    cfg.output_mode = OUTPUT_MIDI_ONLY;
+    seq_set_track_config(0, &cfg);
+    set_note(3, 0, 0, 60, 0);
+    transport_start();
+    CHECK(transport_queue_track_pattern(0, 3));
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[0] == 3);
+    bool found = false;
+    for (unsigned i = 0; i + 2 < fake_midi_length; i++) {
+        found |= fake_midi[i] == 0x95 && fake_midi[i + 1] == 60;
+    }
+    CHECK(found);
+}
+
+static void test_launch_quant_setter_ignores_invalid(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BEAT);
+    transport_set_launch_quant(LAUNCH_QUANT_COUNT);
+    CHECK(transport_get_launch_quant() == LAUNCH_QUANT_BEAT);
+}
+
+static unsigned count_note_ons(void) {
+    unsigned count = 0;
+    for (unsigned i = 0; i < fake_midi_length; i++) count += (fake_midi[i] & 0xF0) == 0x90;
+    return count;
+}
+
+static void test_clip_mask_tracks_edits(void) {
+    CHECK(sequencer_clip_mask(1) == 0);
+    set_note(9, 2, 3, 60, 0);
+    CHECK(sequencer_clip_mask(1) == (1ull << (2 * 8 + 1)));
+    set_length(9, 2, 3);
+    CHECK(sequencer_clip_mask(1) == 0);
+}
+
+static void test_clip_mask_ignores_stored_mute(void) {
+    g_seq.patterns[9].tracks[2].muted = true;
+    set_note(9, 2, 0, 60, 0);
+    CHECK(sequencer_clip_mask(1) == (1ull << (2 * 8 + 1)));
+}
+
+static void test_scene_queue_skips_tracks_already_there(void) {
+    transport_start();
+    CHECK(transport_queue_track_pattern(1, 9));
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[1] == 9);
+    CHECK(transport_queue_track_pattern(1, 4));
+    CHECK(transport_queue_track_pattern(3, 2));
+    CHECK(transport_launch(UINT8_MAX, 9));
+    CHECK(g_seq.transport.queued_pattern[1] == NO_QUEUED_PATTERN);
+    CHECK(g_seq.transport.queued_pattern[3] == 9);
+    CHECK(g_seq.transport.queued_pattern[0] == 9);
+}
+
+static void test_empty_scene_silences_all_tracks(void) {
+    for (uint8_t track = 0; track < 4; track++)
+        for (uint8_t step = 0; step < 16; step++) set_note(0, track, step, 60, 0);
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_start();
+    run_through_step(3);
+    CHECK(transport_launch(UINT8_MAX, 5));
+    run_through_step(16);
+    for (uint8_t track = 0; track < NUM_TRACKS; track++)
+        CHECK(g_seq.transport.current_pattern[track] == 5);
+    unsigned before = count_note_ons();
+    run_through_step(24);
+    CHECK(count_note_ons() == before);
+}
+
+static void test_scene_selects_at_once_when_stopped(void) {
+    CHECK(transport_launch(UINT8_MAX, 4));
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        CHECK(g_seq.transport.current_pattern[track] == 4);
+        CHECK(g_seq.transport.queued_pattern[track] == NO_QUEUED_PATTERN);
+    }
+}
+
+static void test_scene_rejected_in_song_mode(void) {
+    transport_set_mode(PLAY_MODE_SONG);
+    CHECK(!transport_launch(UINT8_MAX, 4));
+}
+
+static void test_snapshot_reports_queues_and_mutes(void) {
+    transport_start();
+    CHECK(transport_queue_track_pattern(2, 7));
+    seq_set_track_mute(1, true);
+    g_seq.patterns[0].tracks[3].muted = true;
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    CHECK(snap.queued[2] == 7);
+    CHECK(snap.live_mutes == 0x02);
+    CHECK(snap.stored_mutes & 0x08);
+    CHECK(snap.state == TRANSPORT_PLAYING);
+}
+
+static unsigned muted_locations(uint8_t track) {
+    unsigned count = 0;
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) count += g_seq.patterns[p].tracks[track].muted;
+    return count;
+}
+
+static void test_track_config_keeps_each_stored_mute(void) {
+    g_seq.patterns[4].tracks[2].muted = true;
+    track_config_t cfg = g_seq.patterns[0].tracks[2];      // edited at an audible location
+    cfg.midi_channel = 6;
+    seq_set_track_config(2, &cfg);
+    CHECK(muted_locations(2) == 1 && g_seq.patterns[4].tracks[2].muted);
+    cfg = g_seq.patterns[4].tracks[2];                      // edited at the muted location
+    cfg.midi_channel = 7;
+    seq_set_track_config(2, &cfg);
+    CHECK(muted_locations(2) == 1 && g_seq.patterns[4].tracks[2].muted);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) CHECK(g_seq.patterns[p].tracks[2].midi_channel == 7);
+}
+
+static bool track_note_on(uint8_t channel, uint8_t note) {
+    for (unsigned i = 0; i + 1 < fake_midi_length; i++) {
+        if (fake_midi[i] == (MIDI_NOTE_ON | channel) && fake_midi[i + 1] == note) return true;
+    }
+    return false;
+}
+
+static void test_mute_button_undoes_a_stored_mute(void) {
+    set_note(0, 2, 0, 61, 0);
+    set_note(9, 2, 0, 61, 0);
+    g_seq.patterns[0].tracks[2].muted = true;
+    g_seq.patterns[9].tracks[2].muted = true;
+    sequencer_refresh_track_playback(2, 0);
+    sequencer_refresh_track_playback(2, 9);
+    transport_start();
+    run_through_step(0);
+    CHECK(!track_note_on(2, 61));                           // stored mute: silent
+    seq_toggle_track_mute(2);                               // muted -> audible
+    CHECK(g_seq.track_mutes == 0);
+    CHECK(muted_locations(2) == 0);
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    CHECK(snap.stored_mutes == 0);
+    run_through_step(16);
+    CHECK(track_note_on(2, 61));                            // heard on its next step
+    seq_toggle_track_mute(2);                               // audible -> live mute
+    CHECK(g_seq.track_mutes == 1u << 2);
+    seq_toggle_track_mute(2);
+    CHECK(g_seq.track_mutes == 0);
+}
+
 int main(void) {
     unsigned tests = 0;
     seq_lock_init();
@@ -686,6 +950,25 @@ int main(void) {
     RUN(test_moving_song_entry_keeps_playing_entry_anchor);
     RUN(test_staging_overflow_never_sends_partial_message);
     RUN(test_output_overflow_stops_transport);
+    RUN(test_bar_launch_waits_for_bar_line);
+    RUN(test_bar_launch_on_short_loop_waits_for_bar);
+    RUN(test_beat_launch_joins_in_phase);
+    RUN(test_launch_phase_matrix);
+    RUN(test_requeue_of_playing_location_keeps_phase);
+    RUN(test_quant_change_retargets_pending_queue);
+    RUN(test_shortening_under_bar_does_not_launch_early);
+    RUN(test_queue_right_after_bar_waits_a_whole_bar);
+    RUN(test_launch_keeps_track_routing);
+    RUN(test_launch_quant_setter_ignores_invalid);
+    RUN(test_clip_mask_tracks_edits);
+    RUN(test_clip_mask_ignores_stored_mute);
+    RUN(test_scene_queue_skips_tracks_already_there);
+    RUN(test_empty_scene_silences_all_tracks);
+    RUN(test_scene_selects_at_once_when_stopped);
+    RUN(test_scene_rejected_in_song_mode);
+    RUN(test_snapshot_reports_queues_and_mutes);
+    RUN(test_track_config_keeps_each_stored_mute);
+    RUN(test_mute_button_undoes_a_stored_mute);
 #ifdef REBIRTH_THREADED_TEST
     RUN(test_stop_during_pending_gate_commit);
     RUN(test_panic_during_pending_gate_commit);

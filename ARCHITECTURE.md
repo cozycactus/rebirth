@@ -5,7 +5,7 @@
 | Context | Work |
 | --- | --- |
 | Core 1 timer IRQ | 96 PPQN timing, playheads, note durations, MIDI production, CV/gate output |
-| Core 0 main loop | Buttons, encoders, OLED, edits, transport commands, stopped-only storage |
+| Core 0 main loop | Panel I2C polling (TCA8418 keys, MCP23017 step buttons and LEDs), PLAY and encoders, edits, transport commands and launches; per ~33 ms frame: one transport snapshot, the RGB frame build and its LED DMA start, the OLED; stopped-only storage |
 | Core 0 UART IRQ | Drain pending MIDI bytes into UART0 |
 
 The playback lock serializes the complete timer handler with Start, Stop,
@@ -17,9 +17,14 @@ Lock order is **playback -> shared state or MIDI**. UI edits take the shared loc
 release it, then refresh playback data. Transport commands and storage operations
 are Core 0 APIs. The timer uses internal stop helpers under the playback lock.
 
-Control operations can delay the timer. Display SPI, pattern conversion and
-flash writes do not run under the playback lock. A dual-core split alone does
-not establish physical jitter.
+What can delay the timer: Core 0 sections that hold the playback lock, i.e.
+transport commands, pad/scene launches, Panic and the per-frame transport
+snapshot (one short copy per frame, never one per UI pass); shared-lock
+sections the timer waits on; and bus or flash contention from Core 0, such as
+the LED DMA and Core 0 code running from flash through the XIP cache. Panel
+I2C polling, the LED frame build, display SPI, pattern conversion and flash
+writes do not run under the playback lock. A dual-core split alone does not
+establish physical jitter.
 
 ## Prepared Patterns
 
@@ -36,15 +41,37 @@ lock, including for locations not currently playing.
 ## Playback Rules
 
 - Each track has its own pattern, queue and 1-16 step playhead.
-- Queues apply at that track's loop end. Shortening below the next step wraps to
-  zero; extending preserves position.
+- Queued pattern changes apply on a launch quantization (default `1 BAR`):
+  `BAR` and `BEAT` wait for a global step that is a multiple of 16 or 4, `STEP`
+  applies on the next step, `TRACK LOOP` waits for that track's loop end (the
+  old rule). With `BAR`, `BEAT` and `STEP` the new clip joins in phase: its
+  playhead starts at `(global step % 16) % new length`, so it lines up with the
+  bar. `TRACK LOOP` always starts the new clip at step 1. Queuing the location
+  that is already playing just clears the queue and keeps the playhead.
+  Shortening below the next step wraps to zero; extending preserves position.
+  Under `BAR`, `BEAT` and `STEP`, neither shortening nor extending a clip
+  applies a pending queue; under `TRACK LOOP`, shortening below the playhead
+  counts as the loop end and does apply it. The quantization is not saved.
+- A pad or scene press is decided and written in one critical section
+  (`transport_launch()`, playback lock then shared state), so the timer never
+  applies a queue between the decision and the write.
+- Routing (`track_config_t`: type, channel, drum note, output mode, CV channel,
+  gate length) belongs to the track: `seq_set_track_config()` writes it to all
+  32 locations and refreshes that track's prepared rows. Older saves whose
+  locations differ play as before until that track's config is edited.
+- `muted` in `track_config_t` is a stored mute per location (from older saves);
+  routing edits leave it as it is in each location. A track is audible when
+  neither the live mute nor the stored mute of the location it plays is set.
+  MUTE on a muted track clears the live bit and the stored mute of every
+  location, so it is undone with one press.
 - Selection while stopped is immediate and survives Start.
 - Stop cancels pending queues and retains the current playing locations.
 - Manual queues are rejected in Song mode. Song entries apply on 16-step bar
   boundaries with repeat counts. Only changed tracks restart their loops.
 - Empty/all-skipped songs stay stopped. Trailing skipped rows respect Stop mode.
-- The editor can address a different location from playback. Entering it from
-  Performance selects the currently controlled playback location.
+- The editor can address a different location from playback. Entering the
+  pattern view or the step editor from the Session view targets the Session
+  focus (track, location); those screens keep that target until they are left.
 - Mutes release active notes and gates on the next internal pulse. Unmute takes
   effect at the next active step.
 - Gate length also determines MIDI note duration. Slide/tie are **outgoing** step
@@ -96,16 +123,54 @@ loss needs a future two-slot/journal design.
 | DIN MIDI TX, reserved RX | 0, 1; UART0, 31,250 baud, 8N1 |
 | SSD1309 OLED | 2 SCK, 3 MOSI, 4 CS, 5 DC, 6 reset; SPI0 |
 | Jitter probe | 7 |
-| MCP23017 buttons / LEDs | 8 SDA, 9 SCL; addresses 0x20 / 0x21 |
+| I2C0 bus | 8 SDA, 9 SCL; 400 kHz; external pull-ups (2.2-4.7 kOhm), internal ones disabled |
+| MCP23017 buttons / LEDs | I2C 0x20 / 0x21 |
+| TCA8418 panel key scanner | I2C 0x34; 8 x 10 matrix, 80 keys; 3.3 V only; no INT line, polled |
 | Two MCP4822 DACs | 10 SCK, 11 MOSI, 12/13 CS; SPI1 |
 | Gates | 14-17; 3.3 V logic |
 | Encoder 1 | 18, 19, switch 20 |
 | Encoder 2 | 21, 22, switch 26 |
 | Tempo LED | 25 |
+| RGB LED chain | 27; 82 x SK6812MINI-E via PIO, level-shifted to 5 V |
+| PLAY button | 28 to GND, internal pull-up, 20 ms debounce |
 
 There are **two** encoders. Firmware uses MCP23017 expanders, not shift-register
 button drivers. The Pico exposes 26 general-purpose GPIOs; this assignment uses
-24, leaving GPIO 27 and 28.
+all of them (GPIO 27 LED data, GPIO 28 PLAY).
+
+Every I2C transaction, initialisation included, uses the SDK timeout API (2000 us)
+and checks the exact byte count, so a missing or stuck chip never hangs the UI,
+but each failed transaction can delay one UI pass by up to its 2 ms timeout. Any
+I2C error marks that chip unconfigured: its configuration is written again
+before the next read, and an attempt that fails is retried after 100 ms, not on
+every pass, so a dead bus costs about one timeout per chip per 100 ms. PLAY is a
+plain GPIO and is sampled first on every pass, whatever the bus does. About once
+a second each chip's configuration is read back (TCA8418 CFG, MCP23017 IPOL,
+step-LED IODIR), so a chip that reset (brown-out, ESD) is reconfigured; the
+button expander's ports then become the new baseline without events. A failed
+button read keeps the last accepted state; the step LED mask is cached only
+after a successful write. Core 1 never touches I2C or the LEDs.
+
+A TCA8418 FIFO overflow, or an event read that fails after the event count was
+read, drops the whole batch: the key state is forgotten and the FIFO drained,
+with nothing reported. A flash save or load stalls both cores; afterwards the
+inputs are resynced: `panel_input_resync()` drops every queued panel event
+(PLAY included) and drains the FIFO, re-initialising the chip only if that
+fails; `mcp23017_resync()` and `encoder_resync()` take the buttons as they are
+now, with no press, release or long press from the stall; and the UI drops the
+step gestures in progress. When a panic is released, the panel and the step
+buttons are resynced the same way. After a resync or an overflow, a key or PLAY
+that was down stays suppressed until a release has held for its debounce time
+(8 ms, 20 ms for PLAY), so a bounce or a press the chip reports again never
+becomes a command.
+
+### Power
+
+The LEDs take 5 V from VBUS, so the device is powered through its USB socket
+only and must stay within 500 mA at 5 V (RGB chain budget 200 mA). The firmware
+has no USB stack and never enumerates, so a host may hold it to 100 mA; this is
+a bench check on real laptops. The frame builder scales the RGB brightness to
+keep the estimated current within the budget.
 
 ### MIDI Circuit
 

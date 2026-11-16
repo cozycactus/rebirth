@@ -78,7 +78,6 @@ add_test(NAME storage_tests COMMAND test_storage)
 add_executable(test_ui
     test_ui.c
     fakes/fake_hardware.c
-    ${REBIRTH_SRC}/sequencer.c
     ${REBIRTH_SRC}/pattern.c
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/shared_state.c
@@ -86,6 +85,47 @@ add_executable(test_ui
     ${REBIRTH_SRC}/flash_storage.c
     ${REBIRTH_SRC}/display.c
     ${REBIRTH_SRC}/ssd1309.c
+    ${REBIRTH_SRC}/session.c
+    ${REBIRTH_SRC}/led_frame.c
 )
 target_include_directories(test_ui PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME ui_tests COMMAND test_ui)
+
+add_executable(test_session
+    test_session.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/session.c
+    ${REBIRTH_SRC}/sequencer.c
+    ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/song.c
+    ${REBIRTH_SRC}/shared_state.c
+    ${REBIRTH_SRC}/midi_out.c
+)
+target_include_directories(test_session PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME session_tests COMMAND test_session)
+
+add_executable(test_led_frame
+    test_led_frame.c
+    ${REBIRTH_SRC}/led_frame.c
+)
+target_include_directories(test_led_frame PRIVATE ${REBIRTH_INC})
+add_test(NAME led_frame_tests COMMAND test_led_frame)
+
+add_executable(test_panel_input
+    test_panel_input.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/tca8418.c
+    ${REBIRTH_SRC}/panel_input.c
+)
+target_include_directories(test_panel_input PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME panel_input_tests COMMAND test_panel_input)
+
+add_executable(test_expanders
+    test_expanders.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/mcp23017.c
+    ${REBIRTH_SRC}/step_leds.c
+    ${REBIRTH_SRC}/encoder.c
+)
+target_include_directories(test_expanders PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME expanders_tests COMMAND test_expanders)
