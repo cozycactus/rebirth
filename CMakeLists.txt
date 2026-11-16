@@ -35,6 +35,7 @@ add_executable(rp2040_sequencer
     src/song.c
     src/session.c
     src/led_frame.c
+    src/rgb_leds.c
     src/display.c
     src/ui.c
     src/ssd1309.c
@@ -68,7 +69,11 @@ target_link_libraries(rp2040_sequencer
     hardware_i2c        # For MCP23017 button expander
     hardware_gpio
     hardware_flash
+    hardware_pio
+    hardware_dma
 )
+
+pico_generate_pio_header(rp2040_sequencer ${CMAKE_CURRENT_LIST_DIR}/src/ws2812.pio)
 
 # UART0 is used for DIN-5 MIDI, so UART stdio is off. No USB stdio needed.
 pico_enable_stdio_usb(rp2040_sequencer 0)
