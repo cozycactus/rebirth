@@ -553,19 +553,17 @@ static bool eighth_blink_on(uint32_t pulse) {
 
 // Session step LEDs: the focused cell's active steps within its length. While
 // the cell is the playing location of its track, its playhead blinks on 8th
-// notes of the transport. Takes the locks itself: call with none held.
-static uint16_t build_session_mask(void) {
+// notes of the transport. Uses the frame's snapshot; takes no lock.
+static uint16_t build_session_mask(const transport_snapshot_t *snap) {
     session_focus_t focus = session_get_focus();
     const pattern_t *pat = &g_seq.patterns[focus.location];
     uint16_t mask = build_step_activity_mask(pat, focus.track);
 
-    transport_snapshot_t snap;
-    sequencer_snapshot(&snap);
-    uint8_t playhead = snap.track_step[focus.track];
-    if (snap.state == TRANSPORT_PLAYING &&
-        snap.current[focus.track] == focus.location &&
+    uint8_t playhead = snap->track_step[focus.track];
+    if (snap->state == TRANSPORT_PLAYING &&
+        snap->current[focus.track] == focus.location &&
         playhead < clamp_pattern_length(pattern_get_track_length(pat, focus.track)) &&
-        eighth_blink_on(snap.pulse_count)) {
+        eighth_blink_on(snap->pulse_count)) {
         mask ^= (uint16_t)(1u << playhead);
     }
     return mask;
@@ -589,6 +587,9 @@ static uint16_t build_pattern_select_mask(void) {
     return mask;
 }
 
+// Per-pass step LEDs for every screen but the Session view, whose mask needs
+// the transport and is written once per frame by ui_render: the playback lock
+// is never taken on every pass of the UI loop.
 static void update_step_leds(void) {
     if (!step_leds_available()) return;
 
@@ -602,8 +603,7 @@ static void update_step_leds(void) {
 
     switch (ui.mode) {
         case UI_SESSION:
-            mask = build_session_mask();
-            break;
+            return;     // written once per frame by ui_render
 
         case UI_PATTERN_VIEW: {
             pattern_t *p = seq_active_pattern(ui.selected_track);
@@ -922,6 +922,7 @@ void ui_render(void) {
     switch (ui.mode) {
         case UI_SESSION:
             render_session_view(&snap);
+            if (step_leds_available()) step_leds_set_mask(build_session_mask(&snap));
             break;
 
         case UI_PATTERN_VIEW:

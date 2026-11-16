@@ -480,11 +480,13 @@ static void test_session_step_leds_show_focus_steps(void) {
     sequencer_refresh_track_playback(2, 3);
     push_panel(PANEL_PAD, 2, 3);
     ui_update();
+    ui_render();    // the Session mask is written once per frame
     CHECK(led_mask == 0x0011);
     // Steps beyond the cell's length stay dark.
     pattern_set_track_length(&g_seq.patterns[3], 2, 4);
     sequencer_refresh_track_playback(2, 3);
     ui_update();
+    ui_render();
     CHECK(led_mask == 0x0001);
 }
 
@@ -499,19 +501,42 @@ static void test_session_step_leds_blink_playhead(void) {
     CHECK(g_seq.transport.current_track_step[0] == 2);
     CHECK((g_seq.transport.pulse_count / (PPQN / 2)) % 2 == 1);
     ui_update();
+    ui_render();
     uint16_t phase_off = led_mask;
     pulses(3 * PULSES_PER_STEP);
     CHECK(g_seq.transport.current_track_step[0] == 2);
     CHECK((g_seq.transport.pulse_count / (PPQN / 2)) % 2 == 0);
     ui_update();
+    ui_render();
     uint16_t phase_on = led_mask;
     CHECK(phase_off == 0x0001);
     CHECK((phase_off ^ phase_on) == (1u << 2));
     // A focused cell that is not playing on its track shows no playhead.
     push_panel(PANEL_PAD, 1, 1);
     ui_update();
+    ui_render();
     CHECK(session_get_focus().track == 1 && session_get_focus().location == 1);
     CHECK(led_mask == 0);
+}
+
+static unsigned playback_locks;
+static void count_playback_lock(spin_lock_t *lock) {
+    if (lock == spin_lock_instance(playback_spinlock_num)) playback_locks++;
+}
+
+static void test_session_passes_take_no_playback_lock(void) {
+    // The timer ISR holds the playback lock for its whole body: the UI loop
+    // must not take it on every pass, only once per frame.
+    transport_start();
+    pulses(PULSES_PER_STEP + 1);
+    playback_locks = 0;
+    fake_before_lock = count_playback_lock;
+    for (int pass = 0; pass < 100; pass++) ui_update();
+    CHECK(ui.mode == UI_SESSION);
+    CHECK(playback_locks == 0);
+    ui_render();    // its snapshot plus session_common_row's
+    fake_before_lock = NULL;
+    CHECK(playback_locks <= 2);
 }
 
 static bool oled_blank(void) {
@@ -612,6 +637,7 @@ int main(int argc, char **argv) {
     RUN(test_stopped_lights_blink_on_a_120_bpm_clock);
     RUN(test_session_step_leds_show_focus_steps);
     RUN(test_session_step_leds_blink_playhead);
+    RUN(test_session_passes_take_no_playback_lock);
     RUN(test_session_oled_renders);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
