@@ -176,6 +176,7 @@ typedef struct {
     uint32_t last_isr_duration_us;
     uint32_t max_isr_duration_us;
     uint32_t overruns;                  // ISR entered later than one pulse interval
+    uint32_t flam_drops;                // kit flam second hits skipped on a full TX queue
 } sequencer_jitter_stats_t;
 
 // ─── Shared State (accessed by both cores) ──────────────────────

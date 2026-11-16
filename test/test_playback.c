@@ -1191,6 +1191,317 @@ static void test_sequencer_init_sets_kit_defaults(void) {
     }
 }
 
+// ─── Kit tracks ─────────────────────────────────────────────────
+
+#define KIT_CHANNEL 9
+#define KIT_STATUS  (MIDI_NOTE_ON | KIT_CHANNEL)
+#define KIT_LANE_SD 2
+
+static fake_midi_msg_t msg[FAKE_MIDI_CAPACITY];
+
+// Decodes all MIDI sent so far into msg[], channel messages only (real-time bytes left
+// out); returns the count.
+static unsigned msgs(void) {
+    unsigned decoded = decode_midi();
+    unsigned count = 0;
+    for (unsigned i = 0; i < decoded; i++) {
+        if (midi_msgs[i].status < 0xF8) msg[count++] = midi_msgs[i];
+    }
+    return count;
+}
+
+// Kit Note Ons on the kit channel with velocity `velocity` (0: releases) for `note`.
+static unsigned count_kit(uint8_t note, uint8_t velocity) {
+    unsigned count = 0;
+    unsigned total = msgs();
+    for (unsigned i = 0; i < total; i++) count += msg_is(msg[i], KIT_STATUS, note, velocity);
+    return count;
+}
+
+// Kit Note Ons with a velocity (hits), any note.
+static unsigned count_kit_hits(void) {
+    unsigned count = 0;
+    unsigned total = msgs();
+    for (unsigned i = 0; i < total; i++) count += msg[i].status == KIT_STATUS && msg[i].data2 != 0;
+    return count;
+}
+
+// Type KIT and `channel` in all 32 locations; the track stays OUTPUT_BOTH on its CV channel.
+static void make_kit(uint8_t track, uint8_t channel) {
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        g_seq.patterns[p].tracks[track].type = TRACK_TYPE_KIT;
+        g_seq.patterns[p].tracks[track].midi_channel = channel;
+        g_seq.patterns[p].tracks[track].output_mode = OUTPUT_BOTH;
+        sequencer_refresh_track_playback(track, p);
+    }
+}
+
+static void set_kit(uint8_t pattern, uint8_t track, uint8_t step, uint8_t lane, uint8_t value) {
+    uint32_t *word = &g_seq.patterns[pattern].kit_steps[track][step];
+    *word = kit_set(*word, lane, value);
+    sequencer_refresh_track_playback(track, pattern);
+}
+
+static void set_gate(uint8_t track, uint8_t pct) {
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        g_seq.patterns[p].tracks[track].gate_length_pct = pct;
+        sequencer_refresh_track_playback(track, p);
+    }
+}
+
+static void test_kit_all_voices_order_and_levels(void) {
+    static const uint8_t notes[KIT_VOICES] = {36, 38, 39, 42, 46, 37, 45, 47, 50, 49, 51};
+    make_kit(1, KIT_CHANNEL);
+    for (uint8_t lane = 1; lane < KIT_LANES; lane++) set_kit(0, 1, 0, lane, KIT_NOTE);
+    transport_start();
+    tick();
+    CHECK(msgs() == KIT_VOICES);
+    for (unsigned i = 0; i < KIT_VOICES; i++) CHECK(msg_is(msg[i], KIT_STATUS, notes[i], 80));
+    CHECK(fake_gates == 0);
+    for (unsigned pulse = 0; pulse < 2 * PPQN; pulse++) {
+        tick();
+        CHECK(fake_gates == 0);
+    }
+    CHECK(fake_gate_rises == 0);
+    CHECK(count_kit_hits() == KIT_VOICES);
+}
+
+static void test_kit_levels(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_NOTE);
+    set_kit(0, 1, 0, KIT_LANE_SD, KIT_ACCENT);
+    set_kit(0, 1, 1, KIT_LANE_AC, 1);
+    set_kit(0, 1, 1, KIT_LANE_BD, KIT_NOTE);
+    set_kit(0, 1, 1, KIT_LANE_SD, KIT_ACCENT);
+    transport_start();
+    tick();
+    CHECK(msgs() == 2);
+    CHECK(msg_is(msg[0], KIT_STATUS, 36, 80));
+    CHECK(msg_is(msg[1], KIT_STATUS, 38, 110));
+    next_step();
+    unsigned count = msgs();
+    CHECK(count == 6);                      // two releases at the gate between them
+    CHECK(msg_is(msg[4], KIT_STATUS, 36, 110));
+    CHECK(msg_is(msg[5], KIT_STATUS, 38, 127));
+}
+
+static void test_kit_note_off_at_gate_is_velocity_zero(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 50);                        // 12 pulses
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_NOTE);
+    set_kit(0, 1, 0, KIT_LANE_CH, KIT_NOTE);
+    transport_start();
+    tick();
+    CHECK(msgs() == 2);
+    for (unsigned pulse = 1; pulse < 12; pulse++) {
+        tick();
+        CHECK(msgs() == 2);
+    }
+    tick();                                 // pulse 12
+    CHECK(msgs() == 4);
+    CHECK(msg_is(msg[2], KIT_STATUS, 36, 0));
+    CHECK(msg_is(msg[3], KIT_STATUS, 42, 0));
+    CHECK(fake_midi_count(MIDI_NOTE_OFF | KIT_CHANNEL) == 0);
+}
+
+static void test_kit_gate_100_releases_before_new_hits(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) set_kit(0, 1, step, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();
+    CHECK(msgs() == 1);
+    for (unsigned step = 1; step < 2 * STEPS_PER_PATTERN; step++) {
+        unsigned before = msgs();
+        pulses(PULSES_PER_STEP - 1);
+        CHECK(msgs() == before);            // nothing within the step
+        tick();
+        CHECK(msgs() == before + 2);        // one release, then the hit, in the boundary pulse
+        CHECK(msg_is(msg[before], KIT_STATUS, 36, 0));
+        CHECK(msg_is(msg[before + 1], KIT_STATUS, 36, 80));
+    }
+}
+
+static void test_kit_length_wraps(void) {
+    static const uint8_t expected_step[] = {0, 1, 2, 3, 0, 1, 2, 3, 0};
+    make_kit(1, KIT_CHANNEL);
+    set_length(0, 1, 4);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();
+    for (unsigned i = 0; i < sizeof(expected_step); i++) {
+        if (i) next_step();
+        CHECK(g_seq.transport.current_track_step[1] == expected_step[i]);
+        CHECK(count_kit(36, 80) == i / 4 + 1);
+    }
+
+    reset();
+    make_kit(1, KIT_CHANNEL);
+    set_length(0, 1, 6);
+    set_kit(0, 1, 7, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();
+    for (unsigned step = 0; step < 2 * STEPS_PER_PATTERN; step++) next_step();
+    CHECK(count_kit_hits() == 0);
+    CHECK(!(sequencer_clip_mask(0) & (1ull << (1 * 8 + 0))));
+}
+
+// The first hit of a flam is at the note level (its second hit is not checked here).
+static void test_kit_flam_first_hit_at_note_level(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_FLAM);
+    set_kit(0, 1, 1, KIT_LANE_AC, 1);
+    set_kit(0, 1, 1, KIT_LANE_BD, KIT_FLAM);
+    transport_start();
+    tick();
+    CHECK(msgs() == 1 && msg_is(msg[0], KIT_STATUS, 36, 80));
+    pulses(PULSES_PER_STEP - 1);
+    unsigned before = msgs();
+    tick();
+    unsigned count = msgs();
+    CHECK(count > before && msg_is(msg[count - 1], KIT_STATUS, 36, 110));
+}
+
+static void test_kit_stored_mute_and_clip_mask(void) {
+    make_kit(1, KIT_CHANNEL);
+    for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) set_kit(0, 1, step, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();
+    CHECK(count_kit(36, 80) == 1);
+    g_seq.patterns[0].tracks[1].muted = true;
+    sequencer_refresh_track_playback(1, 0);
+    next_step();
+    next_step();
+    CHECK(count_kit(36, 80) == 1);          // the next steps play nothing
+    CHECK(count_kit(36, 0) == 1);           // the sounding voice ended at its countdown
+    CHECK(sequencer_clip_mask(0) & (1ull << (1 * 8 + 0)));
+
+    set_kit(9, 1, 2, KIT_LANE_AC, 1);       // bank 1, slot 1: AC only
+    CHECK(!(sequencer_clip_mask(1) & (1ull << (1 * 8 + 1))));
+    set_kit(9, 1, 2, KIT_LANE_BD, KIT_NOTE);
+    CHECK(sequencer_clip_mask(1) & (1ull << (1 * 8 + 1)));
+}
+
+static void test_kit_live_mute_releases_next_pulse(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) set_kit(0, 1, step, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();
+    seq_toggle_track_mute(1);
+    CHECK(g_seq.track_mutes == 1u << 1);
+    unsigned before = msgs();
+    tick();
+    CHECK(msgs() == before + 1);
+    CHECK(msg_is(msg[before], KIT_STATUS, 36, 0));
+    pulses(PPQN);
+    CHECK(msgs() == before + 1);            // muted: no hits, no second release
+}
+
+// Gate 100: BD and SD sounding on track 1.
+static void sound_kit(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_NOTE);
+    set_kit(0, 1, 0, KIT_LANE_SD, KIT_NOTE);
+    transport_start();
+    tick();
+    CHECK(count_kit_hits() == 2);
+}
+
+static void test_kit_stop_releases_before_stop_byte(void) {
+    sound_kit();
+    transport_stop();
+    CHECK(msg_is(last_msg(2), KIT_STATUS, 36, 0));
+    CHECK(msg_is(last_msg(1), KIT_STATUS, 38, 0));
+    CHECK(msg_is(last_msg(0), MIDI_STOP, 0, 0));
+    CHECK(fake_midi_count(MIDI_NOTE_OFF | KIT_CHANNEL) == 0);
+}
+
+static void test_kit_panic_releases(void) {
+    sound_kit();
+    sequencer_panic();
+    unsigned count = decode_midi();
+    CHECK(count >= 35);
+    CHECK(msg_is(midi_msgs[count - 35], KIT_STATUS, 36, 0));
+    CHECK(msg_is(midi_msgs[count - 34], KIT_STATUS, 38, 0));
+    CHECK(msg_is(midi_msgs[count - 33], MIDI_STOP, 0, 0));
+    CHECK(msg_is(midi_msgs[count - 32], MIDI_CC, MIDI_CC_ALL_SOUND_OFF, 0));
+    CHECK(count_kit(36, 0) == 1 && count_kit(38, 0) == 1);
+}
+
+static void test_kit_restart_releases(void) {
+    sound_kit();
+    transport_start();
+    CHECK(msg_is(last_msg(3), KIT_STATUS, 36, 0));
+    CHECK(msg_is(last_msg(2), KIT_STATUS, 38, 0));
+    CHECK(msg_is(last_msg(1), MIDI_STOP, 0, 0));
+    CHECK(msg_is(last_msg(0), MIDI_START, 0, 0));
+    tick();                                 // the new run's first hits
+    CHECK(msg_is(last_msg(1), KIT_STATUS, 36, 80));
+    CHECK(msg_is(last_msg(0), KIT_STATUS, 38, 80));
+    CHECK(count_kit(36, 0) == 1 && count_kit(38, 0) == 1);
+}
+
+static void test_kit_mode_change_releases(void) {
+    sound_kit();
+    transport_set_mode(PLAY_MODE_SONG);
+    CHECK(msg_is(last_msg(2), KIT_STATUS, 36, 0));
+    CHECK(msg_is(last_msg(1), KIT_STATUS, 38, 0));
+    CHECK(msg_is(last_msg(0), MIDI_STOP, 0, 0));
+}
+
+static void test_kit_settings_edit_keeps_sounding_note(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    set_kit(0, 1, 0, KIT_LANE_CH, KIT_NOTE);
+    set_kit(0, 1, 1, KIT_LANE_CH, KIT_NOTE);
+    transport_start();
+    tick();
+    CHECK(msgs() == 1 && msg_is(msg[0], KIT_STATUS, 42, 80));
+    g_seq.kit_config[1].note[7] = 44;
+    sequencer_refresh_track_playback(1, 0);
+    next_step();
+    CHECK(msgs() == 3);
+    CHECK(msg_is(msg[1], KIT_STATUS, 42, 0));
+    CHECK(msg_is(msg[2], KIT_STATUS, 44, 80));
+}
+
+// The release goes on the channel the voice was sent on.
+static void test_kit_channel_edit_releases_on_old_channel(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_NOTE);
+    set_kit(0, 1, 1, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();
+    make_kit(1, 3);
+    next_step();
+    CHECK(msgs() == 3);
+    CHECK(msg_is(msg[1], KIT_STATUS, 36, 0));
+    CHECK(msg_is(msg[2], MIDI_NOTE_ON | 3, 36, 80));
+}
+
+// Voices still sounding at a step boundary (left by a kind change, whose countdown is 0)
+// are released first, before the step's hits.
+static void test_kit_step_releases_leftover_voices_first(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_NOTE);
+    set_kit(0, 1, 0, KIT_LANE_SD, KIT_NOTE);
+    set_kit(0, 1, 1, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();
+    kit_runtime[1].countdown = 0;           // no release due: as after a kind change
+    pulses(PULSES_PER_STEP - 1);
+    CHECK(msgs() == 2);
+    tick();
+    CHECK(msgs() == 5);
+    CHECK(msg_is(msg[2], KIT_STATUS, 36, 0));
+    CHECK(msg_is(msg[3], KIT_STATUS, 38, 0));
+    CHECK(msg_is(msg[4], KIT_STATUS, 36, 80));
+}
+
 int main(void) {
     unsigned tests = 0;
     seq_lock_init();
@@ -1264,6 +1575,21 @@ int main(void) {
     RUN(test_track_config_keeps_each_stored_mute);
     RUN(test_mute_button_undoes_a_stored_mute);
     RUN(test_sequencer_init_sets_kit_defaults);
+    RUN(test_kit_all_voices_order_and_levels);
+    RUN(test_kit_levels);
+    RUN(test_kit_note_off_at_gate_is_velocity_zero);
+    RUN(test_kit_gate_100_releases_before_new_hits);
+    RUN(test_kit_length_wraps);
+    RUN(test_kit_flam_first_hit_at_note_level);
+    RUN(test_kit_stored_mute_and_clip_mask);
+    RUN(test_kit_live_mute_releases_next_pulse);
+    RUN(test_kit_stop_releases_before_stop_byte);
+    RUN(test_kit_panic_releases);
+    RUN(test_kit_restart_releases);
+    RUN(test_kit_mode_change_releases);
+    RUN(test_kit_settings_edit_keeps_sounding_note);
+    RUN(test_kit_channel_edit_releases_on_old_channel);
+    RUN(test_kit_step_releases_leftover_voices_first);
 #ifdef REBIRTH_THREADED_TEST
     RUN(test_stop_during_pending_gate_commit);
     RUN(test_panic_during_pending_gate_commit);
