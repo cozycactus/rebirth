@@ -31,7 +31,7 @@ void panel_input_init(void);
 // between agreeing; a change that does not last until then is lost, as is one
 // that starts and ends while its column is not sampled (bus down, scanner
 // being reconfigured). A sample that would settle a key (report its change or
-// end its suppression) is followed in its own pass by a read of the reset
+// end its suppression) is followed in the same pass as the sample, before it is applied, by a read of the reset
 // canaries and counts only if they hold, so a chip that resets never supplies
 // one: a pass makes at most 6 transfers for columns 0-7 and 8 for columns 8-9
 // (the column, then the canaries), a configuration attempt 6. Any I2C error,

@@ -74,8 +74,9 @@ bool key_scan_check(bool *intact) {
 // Only the canaries a reset clears, read after the sample of col: U801's IODIR
 // (the rows), and U802's too for COL8/9 (it drives them). A U802 reset only
 // floats COL8/COL9, which cannot pull a row low while a U801 column is
-// sampled. IPOL is not read: nothing but a reset or a stray write changes it,
-// and key_scan_check, which starts every scan, covers it. The selection stays.
+// sampled. IPOL is not read: a reset leaves it at 0x00, the configured value,
+// so only a stray write changes it, and key_scan_check, which starts every
+// scan, still covers it. The selection stays.
 bool key_scan_verify(uint8_t col, bool *intact) {
     if (col >= KEY_SCAN_COLS) return false;     // no transfer
     uint8_t row[2];     // U801 IODIRA, IODIRB

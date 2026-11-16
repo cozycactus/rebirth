@@ -23,7 +23,7 @@ the board of PR #10 (branch `session-panel-pcb`, `hardware/schematic/README.md`,
 - Press-to-event within 15 ms for pads, SCENE and MUTE, with the Core 0 loop as it is and a
   working bus (a failing transfer costs up to its 2 ms timeout; a flash save/load or a
   panic ends in a resync). *Changed after the final review:* a playing requirement (one
-  key, chords, fast playing); sustained traffic far beyond playing can pass it (see
+  key, chords, fast playing); bursts of presses far beyond playing can pass it (see
   "Timing and bus budget").
 - Keep what the current driver guarantees: debounce, no event from a stall or a panic
   (resync), chip health readback, retries paced at 100 ms, every I2C transfer bounded
@@ -129,7 +129,7 @@ is free-running: the loop is the clock. A pass never blocks for a whole scan (2-
 reset canaries right after the row read, in the same pass (`key_scan_verify`; the settle
 proof, under "Chip health"). Such a pass makes at most 6 transfers for COL0-7 (4 for the
 column, 2 for U801 IODIR) and 8 for COL8/9 (4, and 4 for both chips' IODIR). Every other
-step makes at most 4, a configuration attempt 6. The next scan still starts with the full
+scan step makes at most 4; a configuration attempt makes 6 writes. The next scan still starts with the full
 `key_scan_check`.
 
 ### Debounce at sample time
@@ -289,7 +289,10 @@ The 16-bit step word and `step_buttons_t` stay; bit n = step n+1.
 - **Press-to-event:** at most one scan until the key's column is sampled, then the first
   sample at least 5 ms later: <= S + 5 ms + S, plus at most one frame pass and one step-row
   sample inside that window, plus the canaries in the settling pass: about 3 + 5 + 3 + 2.5
-  + 0.5 + 0.2 = 14.2 ms worst for a key changing alone, 7-10 ms typical.
+  + 0.5 + 0.2 = 14.2 ms worst for a key changing alone, 7-10 ms typical. A scan in which
+  all ten columns settle is about 1.35 ms longer (see above), so a ten-key chord is about
+  15.3 ms worst by estimate, against 12.86 ms in the model below. The bench must measure
+  chords as well as single keys.
   `now_ms` is whole milliseconds; flooring both stamps can only make a settle earlier. With
   the old 8 ms debounce the worst case would pass 15 ms; hence 5 ms, the low end of the
   spec's 5-10 ms (the knob if the bench finds the frame pass longer).
@@ -305,13 +308,12 @@ The 16-bit step word and `step_buttons_t` stay; bit n = step n+1.
   model figures, not device measurements, and the bench item stays.
 - **Heavy traffic can pass 15 ms.** A settle costs bus time (its canaries), so keys changing
   together slow each other down. Under a scan just under 5 ms long a key needs a third scan
-  after it is first seen. Sustained traffic far beyond playing does this: in the model,
-  presses every 0.37-2 ms, each held 30 ms (thousands of key changes a second), reach
-  15.59 ms, and first pass 15 ms at a press every 0.85 ms (about 2,350 changes a second).
-  The device's call overhead, which the model leaves out, lowers that threshold, so
-  sustained traffic of hundreds of key changes a second can push press-to-event past 15 ms.
-  No held press is lost: the stress test checks that each press held 30 ms gets exactly
-  one down, within 25 ms.
+  after it is first seen. Bursts of presses far beyond playing do this: the stress test
+  (three lanes of 80 presses, one every 0.37-2 ms, each held 30 ms, then a quiet span)
+  reaches 15.59 ms in the model. The device's call overhead, which the model leaves out,
+  lowers the point at which this starts, so such traffic, far beyond playing, can pass
+  15 ms on the device. No held press is lost: the test checks that each press held 30 ms
+  gets exactly one down, within 25 ms.
 
 ## Tests
 
@@ -401,7 +403,7 @@ steps 8 and 16 on U703.
    every sample, no long press from an untrusted chip (changed after review from GPPU read
    before the data).
 6. The settle proof (after the final review, found by three reviewers): a column sample
-   that would settle a key is followed in its own pass by a read of the reset canaries
+   that would settle a key is followed in the same pass as the sample, before it is applied, by a read of the reset canaries
    (`key_scan_verify`: U801 IODIR, and U802 IODIR for COL8/9) and applied only if they
    hold; up to 6 transfers in such a pass for COL0-7 and 8 for COL8/9, the full scan-start
    check kept. The 15 ms press-to-event requirement is tested on playing (one key, a chord,

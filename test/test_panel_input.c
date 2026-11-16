@@ -1236,9 +1236,10 @@ static void test_press_to_event_within_15_ms(void) {
 
 enum { KEY_FREE, KEY_WAITING, KEY_CLOSED, KEY_HELD, KEY_RELEASING, KEY_DONE };
 
-// A press every step_us, sustained: thousands of key changes a second, far
-// beyond playing. Case i closes key i % KEYS (so column i % 10) at
-// SWEEP_FROM_US + i * step_us, over the 660 ms period; it opens at its down
+// Bursts of presses, one every step_us (thousands of key changes a second
+// within a burst, far beyond playing), then a quiet span. Case i closes key
+// i % KEYS (so column i % 10) at SWEEP_FROM_US + i * step_us, over the 660 ms
+// period; it opens at its down
 // event or 30 ms after its press, whichever is later. Lane l takes the blocks
 // of KEYS cases with (i / KEYS) % STRESS_LANES == l, so a key is reused at
 // most every 88.8 ms and must be free again by then. Each press gets exactly

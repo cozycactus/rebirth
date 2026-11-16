@@ -183,17 +183,18 @@ A sample that would settle a key (report it, or end its suppression) is followed
 in the same pass by a read of the reset canaries (`key_scan_verify`) and counts
 only if they hold, so a chip that resets after the scan's check never supplies it;
 such a pass makes at most 6 transfers for columns 0-7 and 8 for columns 8-9 (the
-column, then the canaries), any other at most 4. Press to event is about 7-10 ms
-typical and about 14.2 ms worst by estimate for a key changing alone, target 15 ms
-(bench item). The host loop model, which counts wire bytes only (no START/STOP or
+column, then the canaries), any other scan step at most 4 (a configuration attempt makes 6 writes). Press to event is
+about 7-10 ms typical and about 14.2 ms worst by estimate for a key changing alone and
+about 15.3 ms for a ten-key chord, target 15 ms (bench item, chords as well as single
+keys). The host loop model, which counts wire bytes only (no START/STOP or
 SDK call overhead) and is not a device measurement, gives 11.69 ms worst for one
 key, 12.86 ms for a ten-key chord and 11.77 ms for 50 presses a second held 60 ms.
 Each settle costs bus time, so keys changing together slow each other down, and
-sustained traffic far beyond playing can push press-to-event past 15 ms: in the
-model a press every 0.37-2 ms (thousands of key changes a second) reaches 15.59
-ms, bounded at 25 ms with no held press lost. The device's call overhead lowers
-that threshold, so sustained traffic of hundreds of key changes a second can pass
-15 ms there. Contract: the scan has no event FIFO. A tap shorter than the
+bursts of presses far beyond playing can push press-to-event past 15 ms: in the
+model, bursts of presses every 0.37-2 ms (thousands of key changes a second)
+reach 15.59 ms, and the test asserts a 25 ms bound with no held press lost. The
+device's call overhead, which the model leaves out, lowers that threshold, so
+such traffic, far beyond playing, can pass 15 ms on the device. Contract: the scan has no event FIFO. A tap shorter than the
 debounce, or one that starts and ends while the bus is down or the scanner is
 being reconfigured, is lost. On any I2C error, failed check or mismatch the
 scanner is configured again before any further sample; every pending key change
