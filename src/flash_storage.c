@@ -156,6 +156,9 @@ bool flash_storage_save(void) {
     // Finish any Stop/Note Off bytes before UART interrupts are suspended.
     midi_wait_output_idle();
     multicore_lockout_start_blocking();
+    // Until Core 1 was parked, its timer ISR could still queue an overflow
+    // panic. Send that too while the UART interrupt can still run.
+    midi_wait_output_idle();
     uint32_t ints = save_and_disable_interrupts();
 
     flash_range_erase(STORE_OFFSET, STORE_ERASE);

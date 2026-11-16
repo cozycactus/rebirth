@@ -166,6 +166,14 @@ static void test_song_mode_has_a_return_to_pattern_playback(void) {
     CHECK(transport_queue_track_pattern(0, 2));
 }
 
+static void test_song_editor_lights_its_three_buttons(void) {
+    press_encoder(1, BTN_LONG_PRESS);
+    press_encoder(0, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_SONG_EDIT);
+    ui_update();
+    CHECK(led_mask == ((1u << 0) | (1u << 1) | (1u << 2)));
+}
+
 static void test_nonplaying_editor_hides_playhead(void) {
     transport_start();
     g_seq.active_pattern[0] = 3;
@@ -226,6 +234,7 @@ int main(int argc, char **argv) {
     RUN(test_selector_short_press_mutes_on_release);
     RUN(test_flash_controls_are_blocked_during_playback);
     RUN(test_song_mode_has_a_return_to_pattern_playback);
+    RUN(test_song_editor_lights_its_three_buttons);
     RUN(test_nonplaying_editor_hides_playhead);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);

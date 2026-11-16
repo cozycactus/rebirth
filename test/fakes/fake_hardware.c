@@ -20,6 +20,7 @@ uint32_t fake_gates;
 unsigned fake_gate_rises;
 void (*fake_before_gate_commit)(void);
 void (*fake_before_lock)(spin_lock_t *lock);
+void (*fake_before_lockout)(void);
 void (*fake_irq_handlers[2])(void);
 static spin_lock_t locks[32];
 static unsigned next_lock;
@@ -39,6 +40,7 @@ void fake_hardware_reset(void) {
     fake_gate_rises = 0;
     fake_before_gate_commit = NULL;
     fake_before_lock = NULL;
+    fake_before_lockout = NULL;
     uart_drained = false;
     fake_flash_erases = 0;
     fake_flash_programs = 0;
@@ -115,12 +117,15 @@ void uart_tx_wait_blocking(void *uart) { (void)uart; uart_drained = true; }
 uint32_t save_and_disable_interrupts(void) { return 0; }
 void restore_interrupts(uint32_t state) { (void)state; }
 void multicore_lockout_start_blocking(void) {
+    // Core 1 may still run its timer ISR until it is parked here.
+    if (fake_before_lockout) fake_before_lockout();
     assert(g_seq.transport.state == TRANSPORT_STOPPED);
-    assert(uart_drained);
-    assert(!fake_uart_tx_irq);
 }
 void multicore_lockout_end_blocking(void) {}
 void flash_range_erase(uint32_t offset, size_t count) {
+    // UART interrupts are off from here until the write ends.
+    assert(uart_drained);
+    assert(!fake_uart_tx_irq);
     assert(offset + count <= sizeof(fake_flash));
     assert(offset % 4096 == 0 && count % 4096 == 0);
     memset(fake_flash + offset, 0xFF, count);

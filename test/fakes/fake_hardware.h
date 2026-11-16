@@ -12,6 +12,7 @@ extern uint32_t fake_gates;
 extern unsigned fake_gate_rises;
 extern void (*fake_before_gate_commit)(void);
 extern void (*fake_before_lock)(spin_lock_t *lock);
+extern void (*fake_before_lockout)(void);
 extern void (*fake_irq_handlers[2])(void);
 void fake_hardware_reset(void);
 #endif

@@ -97,6 +97,8 @@ Unix builds also exercise concurrent Stop/Panic during a pending gate commit.
   configuration without muting. Save/load (9/10) require stopped playback.
 - Manual queues are unavailable in Song mode. In the song editor, button 2
   starts Song mode and button 3 returns to Pattern playback.
+- Song entries can be inserted or removed while Song mode plays: the playing
+  entry finishes, then the entry after it in the edited list plays.
 - Slide/tie connect a step to the following step. Gate length controls MIDI
   note duration as well as CV gates.
 - Step editor: encoder 1 short toggles accent, long toggles slide; encoder 2

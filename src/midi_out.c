@@ -101,6 +101,8 @@ void midi_init(void) {
 static void midi_send_message(const uint8_t *data, uint16_t length) {
 #ifndef MOCK_HARDWARE
     uint32_t lock_state = midi_tx_lock();
+    // Move bytes into a UART FIFO that has room before its TX IRQ runs.
+    midi_tx_drain_locked();
     uint16_t free_bytes = (midi_tx_tail - midi_tx_head - 1u) & (MIDI_TX_QUEUE_SIZE - 1u);
     if (length > free_bytes) {
         midi_tx_dropped_bytes += length;

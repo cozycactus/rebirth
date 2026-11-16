@@ -609,7 +609,7 @@ static void update_step_leds(void) {
 
         case UI_SONG_EDIT:
             // Button 1 = loop/stop, button 2 = song, button 3 = pattern playback.
-            mask = (1u << 0) | (1u << 1);
+            mask = (1u << 0) | (1u << 1) | (1u << 2);
             break;
     }
 

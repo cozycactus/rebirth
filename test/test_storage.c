@@ -7,6 +7,12 @@
 sequencer_state_t g_seq;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%d: %s\n", __LINE__, #x); exit(1); } } while (0)
 
+// Core 1's timer ISR clears a MIDI overflow with a panic even while stopped.
+// Here that happens after the save's first drain, before Core 1 is parked.
+static void core1_panics_before_lockout(void) {
+    sequencer_panic();
+}
+
 int main(void) {
     seq_lock_init();
     midi_init();
@@ -61,6 +67,12 @@ int main(void) {
     fake_flash_program_limit = UINT32_MAX;
     CHECK(flash_storage_save());
     CHECK(header->version == VERSION);
-    puts("PASS storage round-trip, playback guard, checksum, legacy validation, interrupted save");
+
+    // MIDI queued by Core 1 just before the lockout is sent before the erase.
+    fake_before_lockout = core1_panics_before_lockout;
+    CHECK(flash_storage_save());
+    fake_before_lockout = NULL;
+    puts("PASS storage round-trip, playback guard, checksum, legacy validation, "
+         "interrupted save, late MIDI before erase");
     return 0;
 }

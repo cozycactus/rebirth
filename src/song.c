@@ -15,6 +15,14 @@ pattern_t *seq_playing_pattern(uint8_t track) {
 
 // ─── Song editing ───────────────────────────────────────────────
 
+// While Song mode plays, list edits keep the playing entry where it is, so the
+// entry that follows it in the edited list plays next. Caller holds seq_lock.
+static transport_t *playing_song_transport(void) {
+    transport_t *t = (transport_t *)&g_seq.transport;
+    if (t->mode != PLAY_MODE_SONG || t->state != TRANSPORT_PLAYING) return NULL;
+    return t;
+}
+
 bool song_append(uint8_t pattern_index, uint8_t repeats) {
     if (pattern_index >= MAX_PATTERNS) return false;
 
@@ -83,6 +91,8 @@ bool song_insert_patterns(uint16_t position, const uint8_t pattern_index[NUM_TRA
            sizeof(g_seq.song.entries[position].pattern_index));
     g_seq.song.entries[position].repeats = repeats;
     g_seq.song.length++;
+    transport_t *t = playing_song_transport();
+    if (t && position <= t->song_position) t->song_position++;
     seq_unlock(lock_state);
     return true;
 }
@@ -101,6 +111,15 @@ bool song_remove(uint16_t position) {
                 count * sizeof(song_entry_t));
     }
     g_seq.song.length--;
+    transport_t *t = playing_song_transport();
+    if (t && position < t->song_position) {
+        t->song_position--;
+    } else if (t && position == t->song_position) {
+        // The removed entry finishes its pass, then the entry after it plays.
+        // Past the end means "restart at entry 0" to the song advance.
+        t->song_repeat_count = 1;
+        t->song_position = (position > 0) ? (uint16_t)(position - 1) : g_seq.song.length;
+    }
     seq_unlock(lock_state);
     return true;
 }
@@ -128,6 +147,18 @@ bool song_move(uint16_t from, uint16_t to) {
                 (from - to) * sizeof(song_entry_t));
     }
     g_seq.song.entries[to] = tmp;
+    transport_t *t = playing_song_transport();
+    if (t && t->song_position < g_seq.song.length) {
+        uint16_t pos = t->song_position;
+        if (from == pos) {
+            pos = to;
+        } else if (from < pos && to >= pos) {
+            pos--;
+        } else if (from > pos && to <= pos) {
+            pos++;
+        }
+        t->song_position = pos;
+    }
     seq_unlock(lock_state);
     return true;
 }

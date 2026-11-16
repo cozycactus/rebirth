@@ -395,27 +395,28 @@ static uint8_t advance_song_position(void) {
     }
 
     if (t->song_position >= s->length) {
+        // A list edit removed the playing first entry (song.c): entry 0 is next.
         t->song_position = 0;
-    }
-
-    if (t->song_repeat_count > 1) {
-        t->song_repeat_count--;
-        seq_unlock(lock_state);
-        return 0;
-    }
-
-    // Move to next song entry
-    t->song_position++;
-
-    if (t->song_position >= s->length) {
-        // Song finished
-        if (s->end_mode == SONG_END_STOP) {
-            t->state = TRANSPORT_STOPPED;
-            should_stop = true;
-            goto done;
+    } else {
+        if (t->song_repeat_count > 1) {
+            t->song_repeat_count--;
+            seq_unlock(lock_state);
+            return 0;
         }
-        // SONG_END_LOOP
-        t->song_position = 0;
+
+        // Move to next song entry
+        t->song_position++;
+
+        if (t->song_position >= s->length) {
+            // Song finished
+            if (s->end_mode == SONG_END_STOP) {
+                t->state = TRANSPORT_STOPPED;
+                should_stop = true;
+                goto done;
+            }
+            // SONG_END_LOOP
+            t->song_position = 0;
+        }
     }
 
     // Skip entries with 0 repeats

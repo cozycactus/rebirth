@@ -457,6 +457,77 @@ static void test_uart_overflow_never_sends_partial_message(void) {
     CHECK(!fake_uart_tx_irq);
 }
 
+static void test_full_queue_drains_free_uart_before_dropping(void) {
+    fake_uart_writable = false;
+    for (unsigned note = 0; note < 85; note++) midi_send_note_on(0, note, 100);
+    CHECK(!midi_output_overflowed()); // 255 bytes: the queue is full.
+    fake_uart_writable = true;        // The UART can take bytes before its IRQ runs.
+    midi_send_note_on(1, 42, 100);
+    CHECK(!midi_output_overflowed());
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(fake_midi_length == 258);
+    CHECK(fake_midi[256] == 42);
+}
+
+static void play_song_entries(unsigned entries) {
+    for (unsigned entry = 0; entry < entries; entry++) {
+        for (unsigned step = 0; step < STEPS_PER_PATTERN; step++) next_step();
+    }
+}
+
+static void start_three_entry_song_at_second_entry(void) {
+    CHECK(song_append(0, 1));
+    CHECK(song_append(1, 1));
+    CHECK(song_append(2, 1));
+    transport_set_mode(PLAY_MODE_SONG);
+    transport_start();
+    tick();
+    play_song_entries(1);
+    CHECK(g_seq.transport.song_position == 1);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+}
+
+static void test_removing_earlier_song_entry_keeps_next_entry(void) {
+    start_three_entry_song_at_second_entry();
+    CHECK(song_remove(0)); // [1, 2]: entry 1 still plays, 2 follows.
+    play_song_entries(1);
+    CHECK(g_seq.transport.current_pattern[0] == 2);
+}
+
+static void test_inserting_earlier_song_entry_keeps_next_entry(void) {
+    start_three_entry_song_at_second_entry();
+    CHECK(song_insert(0, 3, 1)); // [3, 0, 1, 2]: entry 1 still plays, 2 follows.
+    play_song_entries(1);
+    CHECK(g_seq.transport.current_pattern[0] == 2);
+}
+
+static void test_removing_playing_song_entry_moves_to_following_entry(void) {
+    start_three_entry_song_at_second_entry();
+    CHECK(song_remove(1)); // [0, 2]: the removed entry finishes, then 2 plays.
+    play_song_entries(1);
+    CHECK(g_seq.transport.current_pattern[0] == 2);
+}
+
+static void test_removing_playing_first_song_entry_moves_to_following_entry(void) {
+    CHECK(song_append(0, 2));
+    CHECK(song_append(1, 1));
+    CHECK(song_append(2, 1));
+    transport_set_mode(PLAY_MODE_SONG);
+    transport_start();
+    tick();
+    CHECK(song_remove(0)); // [1, 2]: its remaining repeat is dropped.
+    play_song_entries(1);
+    CHECK(g_seq.transport.song_position == 0);
+    CHECK(g_seq.transport.current_pattern[0] == 1);
+}
+
+static void test_moving_song_entry_keeps_playing_entry_anchor(void) {
+    start_three_entry_song_at_second_entry();
+    CHECK(song_move(2, 0)); // [2, 0, 1]: entry 1 is last, so the loop returns to 2.
+    play_song_entries(1);
+    CHECK(g_seq.transport.current_pattern[0] == 2);
+}
+
 static void test_staging_overflow_never_sends_partial_message(void) {
     for (unsigned note = 0; note < 22; note++) midi_buf_note_on(0, note, 100);
     midi_buf_flush();
@@ -607,6 +678,12 @@ int main(void) {
     RUN(test_missed_alarm_rearms_in_future);
     RUN(test_timer_wrap_is_normal);
     RUN(test_uart_overflow_never_sends_partial_message);
+    RUN(test_full_queue_drains_free_uart_before_dropping);
+    RUN(test_removing_earlier_song_entry_keeps_next_entry);
+    RUN(test_inserting_earlier_song_entry_keeps_next_entry);
+    RUN(test_removing_playing_song_entry_moves_to_following_entry);
+    RUN(test_removing_playing_first_song_entry_moves_to_following_entry);
+    RUN(test_moving_song_entry_keeps_playing_entry_anchor);
     RUN(test_staging_overflow_never_sends_partial_message);
     RUN(test_output_overflow_stops_transport);
 #ifdef REBIRTH_THREADED_TEST
