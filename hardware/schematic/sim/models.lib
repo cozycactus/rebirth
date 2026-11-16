@@ -53,7 +53,7 @@ Do2 vss out DESD
 * resistance ROUT. Rail = vcc.
 *   74AHCT125 on VBUS: TTL input (VIH 2.0 / VIL 0.8 V, VTH ~1.5 V), VOH >= 3.94 V
 *     at -8 mA and VOL <= 0.36 V at 8 mA with VCC = 4.5 V -> ROUT <= 70 / 45 R.
-*   74LVC1G17 on +3V3: VOL <= 0.55 V at 24 mA, VOH >= 2.3 V at -24 mA (VCC 3 V)
+*   74LVC1G14 on +3V3: VOL <= 0.55 V at 24 mA, VOH >= 2.3 V at -24 mA (VCC 3 V)
 *     -> ROUT <= 23 R sinking, <= 30 R sourcing.
 .subckt CMOSBUF in out vcc gnd params: VTH=1.5 TE=2n ROUT=40
 Bsw int gnd V='V(vcc,gnd)*(0.5+0.5*tanh((V(in,gnd)-VTH)/0.05))'
@@ -61,6 +61,22 @@ Rte int int2 1
 Cte int2 gnd {TE/2.2}
 Rout int2 out {ROUT}
 .ends CMOSBUF
+
+* Inverting version (74LVC1G14: Schmitt inverter; the UART edge is clean, so the
+* hysteresis does not matter here).
+.subckt CMOSINV in out vcc gnd params: VTH=1.65 TE=2n ROUT=20
+Bsw int gnd V='V(vcc,gnd)*(0.5-0.5*tanh((V(in,gnd)-VTH)/0.05))'
+Rte int int2 1
+Cte int2 gnd {TE/2.2}
+Rout int2 out {ROUT}
+.ends CMOSINV
+
+* ------------------------------------------------------------------ transistors
+* MMBT3904 = 2N3904 die in SOT-23. The classic 2N3904 model (as published by
+* National/Fairchild and shipped with most SPICE libraries).
+.model Q2N3904 NPN(IS=6.734f XTI=3 EG=1.11 VAF=74.03 BF=416.4 NE=1.259 ISE=6.734f IKF=66.78m
++ XTB=1.5 BR=.7371 NC=2 ISC=0 IKR=0 RC=1 CJC=3.638p MJC=.3085 VJC=.75 FC=.5 CJE=4.493p
++ MJE=.2593 VJE=.75 TR=239.5n TF=301.2p ITF=.4 VTF=4 XTF=2 RB=10)
 
 * ------------------------------------------------------------------ diodes
 * 1N4148W (D401, receiver protection diodes)
@@ -71,6 +87,8 @@ Rout int2 out {ROUT}
 .model LED6N138 D(IS=1.2e-14 N=2.1 RS=1 CJO=30p)
 .model LED6N138MAX D(IS=4.9e-17 N=2.1 RS=1 CJO=30p)
 .model LEDH11L1 D(IS=9.5e-13 N=2.0 RS=1 CJO=30p)
+* CA-033's worst receiver LED: 1.9 V forward drop (PC900V class) at ~4.5 mA
+.model LEDVF19 D(IS=2.9e-18 N=2.1 RS=1 CJO=30p)
 .model LEDH11L1MAX D(IS=5.8e-15 N=2.0 RS=1 CJO=30p)
 
 * ------------------------------------------------------------------ ferrite bead
