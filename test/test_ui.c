@@ -253,8 +253,10 @@ static void test_panic_drops_queued_panel_events(void) {
     press_encoder(0, BTN_LONG_PRESS);
     CHECK(ui.panic_latched);
     CHECK(panel_resyncs == 1);
-    // A pad pressed while the panic is still held is dropped too.
+    // A pad and a step pressed while the panic is still held are dropped too.
     push_panel(PANEL_PAD, 0, 6);
+    step_buttons.pressed = 1u << 6;
+    step_buttons.held |= 1u << 6;
     ui_update();
     held[0] = held[1] = false;
     ui_update();
@@ -262,8 +264,30 @@ static void test_panic_drops_queued_panel_events(void) {
     ui_update();
     CHECK(g_seq.transport.queued_pattern[0] == NO_QUEUED_PATTERN);
     CHECK(g_seq.transport.current_pattern[0] == 0);
-    release_step(2);
+    // Their long presses arrive after the latch clears: no step editor.
+    long_step(2);
+    CHECK(ui.mode == UI_SESSION);
+    long_step(6);
+    CHECK(ui.mode == UI_SESSION);
+    step_buttons.held = 0;
+    step_buttons.released = (1u << 2) | (1u << 6);
+    ui_update();
     CHECK(!(g_seq.patterns[0].steps[0][2].flags & STEP_FLAG_ACTIVE));
+    CHECK(!(g_seq.patterns[0].steps[0][6].flags & STEP_FLAG_ACTIVE));
+}
+
+static void test_step_held_from_editor_does_not_reopen_it(void) {
+    open_editor_from_session();
+    CHECK(ui.mode == UI_STEP_EDIT);
+    press_step(6); // selects step 7 in the editor and stays held
+    CHECK(ui.edit_step == 6);
+    press_encoder(1, BTN_PRESS);
+    CHECK(ui.mode == UI_SESSION);
+    long_step(6);
+    CHECK(ui.mode == UI_SESSION);
+    release_step(6);
+    CHECK(ui.mode == UI_SESSION);
+    CHECK(!(g_seq.patterns[3].steps[2][6].flags & STEP_FLAG_ACTIVE));
 }
 
 static void test_panic_consumes_staggered_holds_and_releases(void) {
@@ -446,6 +470,7 @@ int main(int argc, char **argv) {
     RUN(test_value_long_opens_pattern_select_on_focus);
     RUN(test_launch_in_song_mode_notifies);
     RUN(test_panic_drops_queued_panel_events);
+    RUN(test_step_held_from_editor_does_not_reopen_it);
     RUN(test_panic_consumes_staggered_holds_and_releases);
     RUN(test_accent_can_combine_with_slide_or_tie);
     RUN(test_long_config_press_never_mutes);

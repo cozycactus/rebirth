@@ -79,6 +79,33 @@ static uint8_t clamp_pattern_length(uint8_t len) {
     return len;
 }
 
+// Short-press-on-release detector. Keys pressed within `mask` wait in *pending
+// until they are released (returned as short presses) or long-pressed (dropped).
+// If long_presses is given it receives the long presses of pending keys only,
+// so a key pressed on another screen or before a panic never counts.
+static uint16_t take_short_releases(uint16_t *pending, const step_buttons_t *steps,
+                                    uint16_t mask, uint16_t *long_presses) {
+    *pending |= steps->pressed & mask;
+    if (long_presses) *long_presses = steps->long_pressed & *pending & mask;
+    *pending &= (uint16_t)~steps->long_pressed;
+    uint16_t short_releases = steps->released & *pending & mask;
+    *pending &= (uint16_t)~steps->released;
+    return short_releases;
+}
+
+// Toggles the steps in `mask` of one track at one location and refreshes its
+// playback. Takes seq_lock: call with no lock held.
+static void toggle_steps(uint8_t track, uint8_t location, uint16_t mask) {
+    if (!mask) return;
+    uint32_t lock_state = seq_lock();
+    pattern_t *pat = &g_seq.patterns[location];
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (mask & (1u << s)) pattern_toggle_step(pat, track, s);
+    }
+    seq_unlock(lock_state);
+    sequencer_refresh_track_playback(track, location);
+}
+
 static void show_notify(const char *msg) {
     snprintf(ui.notify_msg, sizeof(ui.notify_msg), "%s", msg);
     ui.notify_ticks = 30;
@@ -244,25 +271,13 @@ static void handle_session_view(int8_t e1d, int8_t e2d,
         pattern_get_track_length(&g_seq.patterns[focus.location], focus.track));
     uint16_t in_length = (uint16_t)((1u << len) - 1u);
 
-    // A short press toggles on release, unless it became a long press.
-    ui.step_short_pending |= steps->pressed & in_length;
-    ui.step_short_pending &= (uint16_t)~steps->long_pressed;
-    uint16_t short_releases = steps->released & ui.step_short_pending & in_length;
-    ui.step_short_pending &= (uint16_t)~steps->released;
-    if (short_releases) {
-        uint32_t lock_state = seq_lock();
-        pattern_t *pat = &g_seq.patterns[focus.location];
-        for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
-            if (short_releases & (1u << s)) {
-                pattern_toggle_step(pat, focus.track, s);
-            }
-        }
-        seq_unlock(lock_state);
-        sequencer_refresh_track_playback(focus.track, focus.location);
-    }
+    // Only keys pressed in this view count: a short press toggles on release,
+    // a long press opens the step editor on that step without toggling it.
+    uint16_t long_presses;
+    uint16_t short_releases = take_short_releases(&ui.step_short_pending, steps,
+                                                  in_length, &long_presses);
+    toggle_steps(focus.track, focus.location, short_releases);
 
-    // A long press opens the step editor on that step without toggling it.
-    uint16_t long_presses = steps->long_pressed & in_length;
     if (long_presses) {
         for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
             if (long_presses & (1u << s)) {
@@ -311,25 +326,9 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
         ui.select_pattern = g_seq.active_pattern[ui.selected_track];
     }
 
-    // Step buttons: toggle steps on current track
-    if (steps->pressed) {
-        bool changed = false;
-        uint8_t track = ui.selected_track;
-        uint8_t pattern_index;
-        uint32_t lock_state = seq_lock();
-        pattern_index = g_seq.active_pattern[track];
-        pattern_t *pat = &g_seq.patterns[pattern_index];
-        for (int s = 0; s < STEPS_PER_PATTERN; s++) {
-            if (steps->pressed & (1u << s)) {
-                pattern_toggle_step(pat, track, s);
-                changed = true;
-            }
-        }
-        seq_unlock(lock_state);
-        if (changed) {
-            sequencer_refresh_track_playback(track, pattern_index);
-        }
-    }
+    // Step buttons: toggle steps on current track (active_pattern is Core 0's)
+    toggle_steps(ui.selected_track, g_seq.active_pattern[ui.selected_track],
+                 steps->pressed);
 }
 
 // ─── Step Edit Handler ─────────────────────────────────────────
@@ -461,10 +460,8 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
 
     // In the selector only, defer short presses until release so opening
     // track configuration never changes the audible mute state.
-    ui.select_short_pending |= steps->pressed & 0xFFu;
-    ui.select_short_pending &= (uint16_t)~steps->long_pressed;
-    uint16_t short_releases = steps->released & ui.select_short_pending;
-    ui.select_short_pending &= (uint16_t)~steps->released;
+    uint16_t short_releases = take_short_releases(&ui.select_short_pending, steps,
+                                                  0xFFu, NULL);
     if (short_releases) {
         for (int t = 0; t < NUM_TRACKS; t++) {
             if (short_releases & (1u << t)) {
