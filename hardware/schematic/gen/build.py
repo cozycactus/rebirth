@@ -76,25 +76,6 @@ def _props(ref, value, fp, ds, desc, ref_at, val_at):
 def project_symbols(lib):
     head = '(pin_names (offset 1.016)) (exclude_from_sim no) (in_bom yes) (on_board yes) (in_pos_files yes) (duplicate_pin_numbers_are_jumpers no)'
     out = []
-    # TCA8418, pins grouped by function: bus on the left, matrix on the right.
-    pins = []
-    for r in range(8):
-        pins.append(_pin("bidirectional", 15.24, 22.86 - 2.54 * r, 180, 5.08, "ROW%d" % r, 8 - r))
-    for c in range(10):
-        pins.append(_pin("bidirectional", 15.24, -2.54 * c, 180, 5.08, "COL%d" % c, 9 + c))
-    pins += [_pin("input", -15.24, 20.32, 0, 5.08, "~{RESET}", 20),
-             _pin("open_collector", -15.24, 17.78, 0, 5.08, "~{INT}", 24),
-             _pin("input", -15.24, 10.16, 0, 5.08, "SCL", 23),
-             _pin("bidirectional", -15.24, 7.62, 0, 5.08, "SDA", 22),
-             _pin("power_in", 0, 33.02, 270, 5.08, "VCC", 21),
-             _pin("power_in", -2.54, -33.02, 90, 5.08, "GND", 19),
-             _pin("passive", 2.54, -33.02, 90, 5.08, "EP", 25)]
-    out.append('(symbol "TCA8418RTW" %s %s (symbol "TCA8418RTW_0_1" (rectangle (start -10.16 27.94) (end 10.16 -27.94) '
-               '(stroke (width 0.254) (type default)) (fill (type background)))) (symbol "TCA8418RTW_1_1" %s) (embedded_fonts no))'
-               % (head, _props("U", "TCA8418RTW", "Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm_EP2.5x2.5mm",
-                               "https://www.ti.com/lit/ds/symlink/tca8418.pdf",
-                               "I2C keypad scan controller, up to 8x10 keys, 1.65-3.6 V, address 0x34, WQFN-24 (RTW). Pin numbers per TI SCPS215G.",
-                               (-10.16, 29.21), (-10.16, -29.21)), " ".join(pins)))
     # TPS2553 current-limited load switch (DBV, SOT-23-6), active-high enable.
     pins = [_pin("power_in", -15.24, 2.54, 0, 5.08, "IN", 1),
             _pin("input", -15.24, -2.54, 0, 5.08, "EN", 3),
@@ -159,9 +140,9 @@ def rail(sh, name, x, y):
     sh.pwr(name, (x, y))
 
 
-def decap(sh, ref, val, x, y, railname, fp=FP_C, polar=False):
+def decap(sh, ref, val, x, y, railname, fp=FP_C, polar=False, dnp=False):
     """Decoupling capacitor between its own rail symbol above and ground below."""
-    cap(sh, ref, val, x, y, {"1": railname, "2": "GND"}, fp=fp, polar=polar)
+    cap(sh, ref, val, x, y, {"1": railname, "2": "GND"}, fp=fp, polar=polar, dnp=dnp)
     sh.wire((x, y - 3.81), (x, y - 6.35))
     rail(sh, railname, x, y - 6.35)
     sh.wire((x, y + 3.81), (x, y + 6.35))
@@ -250,7 +231,7 @@ def sheet_power(d):
     note(sh, 20.32, 146.05,
          "VBUS    5 V from USB, Pico pin 40. Loads: U201 (LED chain), U503 MCP6004, U504 74AHCT125, Pico VSYS (through its own diode).",
          "+3V3    Pico's RT6150B buck-boost, pin 36; external load <= 300 mA (Pico datasheet), this board ~100 mA:",
-         "        OLED ~25 mA, step LEDs 16 x 3 mA, MIDI OUT 7 mA, expanders, TCA8418, DACs, pull-ups.",
+         "        OLED ~25 mA, step LEDs 16 x 3 mA, MIDI OUT 7 mA, five expanders, DACs, pull-ups.",
          "+5V_LED switched VBUS for the RGB chain only (sheet 9).",
          "GND     one ground. On the board, return the LED-chain current to the Pico's GND pins on its own path,",
          "        apart from the DAC/op-amp ground of sheet 5 (CV noise check in HARDWARE_STATUS.md).",
@@ -340,7 +321,8 @@ def sheet_mcu(d):
          "VBUS (pin 40) and 3V3 (pin 36) are the board's 5 V and 3.3 V sources (power-output pins); sheet 2 has the budget.")
     note(sh, 20.32, 76.2,
          "I2C0 400 kHz: 0x20 + 0x24 step buttons, 0x21 step LEDs",
-         "(sheet 7), 0x34 TCA8418 key matrix (sheet 8).",
+         "(sheet 7), 0x22 + 0x23 key scanner (sheet 10) for the",
+         "key matrix (sheet 8).",
          "R301/R302: external pull-ups, the firmware turns the",
          "internal ones off. 2.2 k suits up to ~150 pF; fit up",
          "to 4.7 k when the measured bus allows it.")
@@ -870,56 +852,23 @@ def sheet_steps(d):
 # ------------------------------------------------------------------ sheet 8: key matrix
 
 def sheet_keys(d):
-    sh = d.sheet("Key_matrix", "key_matrix.kicad_sch", "Key matrix: 64 pads, 8 SCENE, 8 MUTE on a TCA8418", "A3", 8)
-    sh.heading("Key matrix: TCA8418 (0x34) scans 8 rows x 10 columns = 80 keys", (20.32, 27.94))
-    Xi, Yi = 66.04, 215.9
-    conn = {"20": "TCA_RESET_N", "24": "TCA_INT_N", "23": "I2C_SCL", "22": "I2C_SDA", "21": "+3V3", "19": "GND",
-            "25": "GND"}
-    for r in range(8):
-        conn[str(8 - r)] = "ROW%d" % r
-    for c in range(10):
-        conn[str(9 + c)] = "COL%d" % c
-    place(sh, "rebirth:TCA8418RTW", "U801", "TCA8418RTW", Xi, Yi, conn=conn,
-          fp="Package_DFN_QFN:QFN-24-1EP_4x4mm_P0.5mm_EP2.5x2.5mm",
-          ref_at=(-10.16, -29.21, "left"), val_at=(2.54, -29.21, "left"))
-    # left side
-    for pin, net, shape in (("23", "I2C_SCL", "input"), ("22", "I2C_SDA", "bidirectional")):
-        px, py = sh.pin("U801", pin)
-        sh.wire((px, py), (px - 10.16, py))
-        sh.hlabel(net, (px - 10.16, py), shape, "left")
-    ix, iy = sh.pin("U801", "24")
-    sh.wire((ix, iy), (35.56, iy))
-    pull_up(sh, "R802", "10k", 35.56, iy, "+3V3", "TCA_INT_N", fields=LEFT)
-    rx, ry = sh.pin("U801", "20")
-    sh.wire((rx, ry), (rx - 5.08, ry), (rx - 5.08, ry - 3.81))
-    res(sh, "R801", "10k", rx - 5.08, ry - 7.62, {"1": "+3V3", "2": "TCA_RESET_N"}, fields=LEFT)
-    sh.wire((rx - 5.08, ry - 11.43), (rx - 5.08, ry - 13.97))
-    rail(sh, "+3V3", rx - 5.08, ry - 13.97)
-    vx, vy = sh.pin("U801", "21")
-    sh.wire((vx, vy), (vx, vy - 2.54))
-    rail(sh, "+3V3", vx, vy - 2.54)
-    decap(sh, "C801", "100n", 76.2, 172.72, "+3V3")
-    decap(sh, "C802", "1u", 22.86, 172.72, "+3V3")
-    for pin in ("19", "25"):
-        px, py = sh.pin("U801", pin)
-        sh.wire((px, py), (px, py + 2.54))
-        gnd(sh, px, py + 2.54)
-    # matrix geometry
+    sh = d.sheet("Key_matrix", "key_matrix.kicad_sch", "Key matrix: 64 pads, 8 SCENE, 8 MUTE", "A3", 8)
+    sh.heading("Key matrix: 8 rows x 10 columns = 80 keys, scanned by the MCP23017 pair of sheet 10", (20.32, 25.4))
+    # matrix geometry; rows enter from the left, columns leave at the top, both as ports
     X0, Y0, PX, PY = 114.3, 50.8, 27.94, 20.32
-    xr = [Xi + 15.24 + 2.54 * (r + 1) for r in range(8)]
     X = [X0 + PX * c for c in range(10)]
     col_x = [x + 15.24 for x in X]
+    xs = X0 - 25.4
     for r in range(8):
-        px, py = sh.pin("U801", str(8 - r))
         yr = Y0 + PY * r
-        sh.wire((px, py), (xr[r], py), (xr[r], yr), (X[9], yr))
-        sh.text("SLOT %d" % (r + 1), (xr[r] + 2.54, yr - 0.635))
+        sh.hlabel("ROW%d" % r, (xs, yr), "bidirectional", "left")
+        sh.wire((xs, yr), (X[9], yr))
+        sh.text("SLOT %d" % (r + 1), (xs + 3.81, yr - 0.635))
     for c in range(10):
-        px, py = sh.pin("U801", str(9 + c))
-        sh.wire((px, py), (col_x[c], py), (col_x[c], Y0 + 15.24))
+        sh.wire((col_x[c], Y0 + PY * 7 + 15.24), (col_x[c], Y0 - 12.7))
+        sh.hlabel("COL%d" % c, (col_x[c], Y0 - 12.7), "bidirectional", "up")
         head = "TRACK %d" % (c + 1) if c < 8 else ("SCENE" if c == 8 else "MUTE")
         sh.text(head, (X[c] + 1.27, Y0 - 6.35), size=1.524, bold=True)
-        sh.text("COL%d" % c, (X[c] + 1.27, Y0 - 3.81))
     for r in range(8):
         yr = Y0 + PY * r
         for c in range(10):
@@ -931,18 +880,99 @@ def sheet_keys(d):
                   conn={"2": "ROW%d" % r, "1": "K%02d" % k}, ref_at=(-7.62, 0, "center"),
                   val_at=(-7.62, 2.54, "center"), hide_val=True)
             sh.wire((x, yr + 12.7), (x, yr + 15.24), (x + 5.08, yr + 15.24))
-            place(sh, "Diode:1N4148W", dd, "1N4148W", x + 8.89, yr + 15.24, rot=180, fp=FP_D,
+            place(sh, "Diode:BAT54J", dd, "BAT54J", x + 8.89, yr + 15.24, rot=180, fp="Diode_SMD:D_SOD-323F",
                   conn={"2": "K%02d" % k, "1": "COL%d" % c}, ref_at=(0, -3.302, "center"),
                   val_at=(0, 3.302, "center"), hide_val=True)
             sh.wire((x + 12.7, yr + 15.24), (col_x[c], yr + 15.24))
-    note(sh, 111.76, 243.84,
-         "Scan (TCA8418 datasheet 8.4.2): columns are driven low one at a time, rows are inputs with pull-ups. Each key is",
+    note(sh, 111.76, 228.6,
+         "Scan (sheet 10): the columns are driven low one at a time, the others high; the rows are inputs with pull-ups. Each key is",
          "row -> switch -> diode anode -> cathode -> column, so a held key can never feed a row back through another column: no ghost presses.",
-         "Key event code k = 10 x row + column + 1 (1..80) = the last two digits of SW8kk and D8kk. Firmware table (row, col):",
-         "col 0-7 = pad (track col+1, slot row+1), col 8 = SCENE row+1, col 9 = MUTE track row+1. Chip debounce off, firmware 5-10 ms.",
-         "Latency: the datasheet (8.6.2.15) scans the keypad every 25 ms and reports a press after 25-40 ms, with debounce disabled",
-         "too; the design asks for <= 15 ms. Open point, see README. Keys: MX-type switches (assumed). Diodes: 1N4148W.",
-         "INT is not read by the firmware (polled); R802 pulls the open-drain output up as the datasheet asks.")
+         "Diodes D801-D880: BAT54J Schottky (SOD-323F): a pressed key pulls its row to ~0.25 V, well below the MCP23017's VIL of",
+         "0.2 VDD = 0.66 V (a silicon 1N4148 would leave only ~0.1 V of margin at the 40-115 uA pull-up current).",
+         "Key number k = 10 x row + column + 1 (1..80) = the last two digits of SW8kk and D8kk. Firmware table (row, col):",
+         "col 0-7 = pad (track col+1, slot row+1), col 8 = SCENE row+1, col 9 = MUTE track row+1. Keys: MX-type switches (assumed).")
+    return sh
+
+
+# ------------------------------------------------------------------ sheet 10: key scanner
+
+# Rows are inputs and columns outputs, so the output-only GPA7/GPB7 only ever drive columns.
+SCAN = {
+    "U801": dict([(str(21 + k), "ROW%d" % k) for k in range(7)] + [("28", "COL7"), ("1", "ROW7")]
+                 + [(str(2 + k), "COL%d" % k) for k in range(7)]),
+    "U802": {"21": "COL8", "22": "COL9"},
+}
+
+
+def scanner_chip(sh, ref, X, Y, addr, rref, cref):
+    nets = SCAN[ref]
+    a0, a1, a2 = addr
+    conn = {"9": "+3V3", "10": "GND", "12": "I2C_SCL", "13": "I2C_SDA", "18": ref + "_RESET_N",
+            "15": "+3V3" if a0 else "GND", "16": "+3V3" if a1 else "GND", "17": "+3V3" if a2 else "GND",
+            "19": None, "20": None, "11": None, "14": None}
+    for p in list(range(1, 9)) + list(range(21, 29)):
+        conn[str(p)] = nets.get(str(p))
+    place(sh, "Interface_Expansion:MCP23017x-x-SO", ref, "MCP23017", X, Y, fp=FP_SO28W, conn=conn,
+          ref_at=(2.54, -26.67, "left"), val_at=(2.54, 26.67, "left"))
+    for pin, net, shape in (("12", "I2C_SCL", "input"), ("13", "I2C_SDA", "bidirectional")):
+        px, py = sh.pin(ref, pin)
+        sh.wire((px, py), (X - 27.94, py))
+        sh.hlabel(net, (X - 27.94, py), shape, "left")
+    for pin in ("19", "20"):
+        sh.nc(sh.pin(ref, pin))
+    rx, ry = sh.pin(ref, "18")
+    sh.wire((rx, ry), (X - 17.78, ry), (X - 17.78, ry - 2.54))
+    res(sh, rref, "10k", X - 17.78, ry - 6.35, {"1": "+3V3", "2": ref + "_RESET_N"}, fields=LEFT)
+    sh.wire((X - 17.78, ry - 10.16), (X - 17.78, ry - 12.7))
+    rail(sh, "+3V3", X - 17.78, ry - 12.7)
+    p0, p1, p2 = sh.pin(ref, "15"), sh.pin(ref, "16"), sh.pin(ref, "17")
+    if addr == (0, 1, 0):
+        sh.wire(p2, (X - 15.24, p2[1]))
+        gnd(sh, X - 15.24, p2[1])
+        sh.wire(p1, (X - 20.32, p1[1]))
+        rail(sh, "+3V3", X - 20.32, p1[1])
+        sh.wire(p0, (X - 15.24, p0[1]), (X - 15.24, p0[1] - 5.08), (X - 27.94, p0[1] - 5.08),
+                (X - 27.94, p2[1] + 5.08))
+        gnd(sh, X - 27.94, p2[1] + 5.08)
+    elif addr == (1, 1, 0):
+        sh.wire(p0, (X - 17.78, p0[1]), (X - 17.78, p1[1]))
+        sh.wire(p1, (X - 17.78, p1[1]))
+        sh.wire((X - 17.78, p0[1]), (X - 17.78, p0[1] - 2.54))
+        rail(sh, "+3V3", X - 17.78, p0[1] - 2.54)
+        sh.wire(p2, (X - 15.24, p2[1]))
+        gnd(sh, X - 15.24, p2[1])
+    else:
+        raise ValueError(addr)
+    sh.wire((X, Y - 25.4), (X, Y - 27.94))
+    rail(sh, "+3V3", X, Y - 27.94)
+    sh.wire((X, Y + 25.4), (X, Y + 27.94))
+    gnd(sh, X, Y + 27.94)
+    decap(sh, cref, "100n", X - 22.86, Y - 33.02, "+3V3")
+    for p in list(range(21, 29)) + list(range(1, 9)):
+        px, py = sh.pin(ref, str(p))
+        net = nets.get(str(p))
+        if net:
+            sh.wire((px, py), (px + 5.08, py))
+            sh.hlabel(net, (px + 5.08, py), "bidirectional", "right")
+        else:
+            sh.nc((px, py))
+
+
+def sheet_scanner(d):
+    sh = d.sheet("Key_scanner", "key_scanner.kicad_sch", "Key scanner: two MCP23017 at 0x22 and 0x23", "A4", 10)
+    sh.heading("Key scanner: two MCP23017 (0x22, 0x23) scan the 8 x 10 key matrix of sheet 8", (20.32, 30.48))
+    note(sh, 20.32, 36.83,
+         "Chosen instead of the design's TCA8418 for latency: the TCA8418 scans its keypad every 25 ms and reports",
+         "a press after 25-40 ms (TI SCPS215G, 8.6.2.15); the design asks for <= 15 ms. This is the design's own",
+         "fallback scanner. Core 0 scans: a full 10-column scan takes about 2-3 ms of I2C time at 400 kHz.")
+    scanner_chip(sh, "U801", 76.2, 106.68, (0, 1, 0), "R801", "C801")
+    scanner_chip(sh, "U802", 203.2, 106.68, (1, 1, 0), "R802", "C802")
+    note(sh, 20.32, 152.4,
+         "Columns are outputs, one driven low at a time, the others high; rows are inputs with the internal pull-ups.",
+         "U801 GPA0-6 = ROW0-6, GPB0 = ROW7 (all rows in one 2-byte read of U801); U801 GPB1-7 = COL0-6,",
+         "GPA7 = COL7; U802 GPA0/GPA1 = COL8/COL9. The output-only GPA7/GPB7 only ever drive columns.",
+         "A pressed key pulls its row to ~0.25 V through its BAT54J, below VIL = 0.2 VDD = 0.66 V.",
+         "Unused U802 pins and all INTA/INTB are left open (configure them as outputs). No interrupt line: polled.")
     return sh
 
 
@@ -1081,18 +1111,26 @@ def root_sheet(d, sheets):
             y += 2.54
         boxes.append((name, top - 5.08, y - top + 7.62, dpins))
         y += 17.78
-    # key matrix shares the I2C pins of the step row
+    # the key scanner shares the I2C bus of the step row and drives the key matrix
     sda_y = [p[2][1] for p in mcu_pins if p[0] == "I2C_SDA"][0]
     scl_y = sda_y + 2.54
     ky = scl_y + 25.4
     kpins = [("I2C_SDA", "bidirectional", (xd, ky), "left"), ("I2C_SCL", "input", (xd, ky + 2.54), "left")]
     root.wire((152.4, sda_y), (152.4, ky), (xd, ky))
     root.wire((157.48, scl_y), (157.48, ky + 2.54), (xd, ky + 2.54))
-    boxes.append(("Key_matrix", ky - 5.08, 15.24, kpins))
+    xb, wb = 266.7, 50.8
+    mpins = []
+    mat = [("ROW%d" % r, ky + 2.54 * r) for r in range(8)] + [("COL%d" % c, ky + 22.86 + 2.54 * c) for c in range(10)]
+    for net, yy in mat:
+        kpins.append((net, "bidirectional", (xd + wd, yy), "right"))
+        mpins.append((net, "bidirectional", (xb, yy), "left"))
+        root.wire((xd + wd, yy), (xb, yy))
     top_m = 40.64
     d.add_sheet_symbol(by["MCU"], (xm, top_m), (wm, y - top_m - 12.7), mcu_pins)
     for name, top, h, dpins in boxes:
         d.add_sheet_symbol(by[name], (xd, top), (wd, h), dpins)
+    d.add_sheet_symbol(by["Key_scanner"], (xd, ky - 5.08), (wd, 55.88), kpins)
+    d.add_sheet_symbol(by["Key_matrix"], (xb, ky - 5.08), (wb, 55.88), mpins)
     d.add_sheet_symbol(by["Power"], (xm, 215.9), (wm, 15.24), [])
     root.heading("ReBirth RP2040 sequencer with the session-style live panel", (20.32, 22.86))
     note(root, 20.32, 30.48,
@@ -1114,14 +1152,15 @@ def root_sheet(d, sheets):
          "7  JITTER_PROBE (TP301)      0x20  MCP23017 step buttons 1-7, 9-15",
          "8  I2C_SDA                   0x21  MCP23017 step LEDs",
          "9  I2C_SCL                   0x24  MCP23017 step buttons 8, 16",
-         "10 DAC_SCK (SPI1)            0x34  TCA8418 key matrix",
+         "10 DAC_SCK (SPI1)            0x22, 0x23  MCP23017 key scanner",
          "11 DAC_MOSI",
          "12 DAC_CS1_N (U501: CV1 CV2)",
          "13 DAC_CS2_N (U502: CV3 CV4)")
     note(root, 254.0, 104.14,
          "Reference designators: the hundreds digit is the sheet",
          "(U2xx power, U3xx Pico, ... D9nn RGB LED number nn in the chain).",
-         "Key matrix: SW8kk/D8kk = TCA8418 key event code kk.")
+         "Key matrix: SW8kk/D8kk = key number kk = 10 x row + column + 1.",
+         "Sheet 10 (key scanner) belongs to the key matrix: 8xx.")
 
 
 # ------------------------------------------------------------------ project files
@@ -1143,7 +1182,7 @@ def write_project(d):
         f.write("\n")
     with open(os.path.join(OUT, "sym-lib-table"), "w") as f:
         f.write('(sym_lib_table\n  (version 7)\n  (lib (name "rebirth") (type "KiCad") (uri "${KIPRJMOD}/rebirth.kicad_sym") '
-                '(options "") (descr "ReBirth project symbols: TCA8418RTW, TPS2553DBV, +5V_LED"))\n)\n')
+                '(options "") (descr "ReBirth project symbols: TPS2553DBV, +5V_LED"))\n)\n')
 
 
 def build():
@@ -1153,7 +1192,7 @@ def build():
     d.lib = sch.Library(project_lib)
     d.sheet("Root", sch.PROJECT + ".kicad_sch", "ReBirth RP2040 sequencer with session-style live panel", "A3", 1)
     sheets = [sheet_power(d), sheet_mcu(d), sheet_midi(d), sheet_cv(d), sheet_top(d), sheet_steps(d),
-              sheet_keys(d), sheet_rgb(d)]
+              sheet_keys(d), sheet_rgb(d), sheet_scanner(d)]
     root_sheet(d, sheets)
     write_project(d)
     d.write()

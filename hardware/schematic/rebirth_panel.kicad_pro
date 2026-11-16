@@ -50,6 +50,10 @@
     [
       "ecf67454-182a-5f58-819d-89fad3d3925b",
       "RGB_chain"
+    ],
+    [
+      "a3831c90-0386-5c7a-afd3-28f926a7088a",
+      "Key_scanner"
     ]
   ],
   "text_variables": {}

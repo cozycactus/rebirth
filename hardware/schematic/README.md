@@ -28,23 +28,26 @@ fails if the drawing connects anything differently, then runs ERC.
 | 5 | `cv_gate.kicad_sch` | U501/U502 MCP4822, U503 MCP6004 buffers, CV 1-4 jacks; U504 74AHCT125 gates 1-4 |
 | 6 | `top_strip.kicad_sch` | OLED header J601 (SSD1309, SPI0), encoders TRACK/VALUE with RC filters, PLAY |
 | 7 | `step_row.kicad_sch` | MCP23017 0x20 (step buttons 1-7, 9-15), 0x24 (steps 8, 16), 0x21 (16 step LEDs) |
-| 8 | `key_matrix.kicad_sch` | U801 TCA8418 (0x34), 8 x 10 matrix: 64 pads, 8 SCENE, 8 MUTE, one 1N4148W per key |
+| 8 | `key_matrix.kicad_sch` | 8 x 10 key matrix: 64 pads, 8 SCENE, 8 MUTE, one BAT54J per key; ROW/COL ports |
 | 9 | `rgb_chain.kicad_sch` | U901 74AHCT1G125, 82 x SK6812MINI-E with 100 nF each, bulk C984 (A2 sheet) |
+| 10 | `key_scanner.kicad_sch` | Key scanner: U801/U802 MCP23017 at 0x22/0x23 driving the matrix columns and reading its rows |
 
-Reference designators: the hundreds digit is the sheet. In the key matrix SW8kk and
-D8kk carry the TCA8418 key event code kk (= 10 x row + column + 1). In the RGB chain
-D9nn is chain position nn, which equals firmware logical index nn-1.
+Reference designators: the hundreds digit is the sheet (sheet 10 uses 8xx, it belongs to
+the key matrix). In the key matrix SW8kk and D8kk carry the key number kk
+(= 10 x row + column + 1, as in the plan's table). In the RGB chain D9nn is chain
+position nn, which equals firmware logical index nn-1.
 
 ## Interfaces the firmware relies on
 
 - GPIO map exactly as in the design: MIDI 0/1, OLED SPI0 2-6, jitter probe 7, I2C0 8/9,
   DAC SPI1 10-13 (CS 12 = U501 = CV1/CV2, CS 13 = U502 = CV3/CV4, channel A = odd CV),
   gates 14-17, encoder 1 = 18/19/20, encoder 2 = 21/22/26, LED data 27, PLAY 28.
-- I2C: 0x20 buttons 1-7 and 9-15, 0x24 buttons 8 and 16, 0x21 LEDs, 0x34 TCA8418;
-  external 2.2 k pull-ups. The 0x24 expander is new and needs firmware support
-  (decision 10).
+- I2C: 0x20 buttons 1-7 and 9-15, 0x24 buttons 8 and 16, 0x21 LEDs, 0x22 + 0x23 key
+  scanner; external 2.2 k pull-ups. **No TCA8418 (0x34) on this board** (decision 11):
+  0x24, 0x22 and 0x23 need firmware support (decisions 10 and 11).
 - Key matrix: ROW r = slot r+1; COL 0-7 = track 1-8, COL 8 = SCENE (row), COL 9 = MUTE
-  (track = row + 1), as in the plan's table. TCA8418 INT not connected (polled).
+  (track = row + 1), as in the plan's table. Scanner pins: U801 (0x22) GPA0-6 = ROW0-6,
+  GPB0 = ROW7, GPB1-7 = COL0-6, GPA7 = COL7; U802 (0x23) GPA0 = COL8, GPA1 = COL9.
 - RGB chain order is the plan's logical order (`LED_PAD(track,row) = row*8 + track`,
   scene 64-71, mute 72-79, PLAY 80, BEAT 81), so `chain_order[]` can stay the identity.
 
@@ -59,11 +62,11 @@ D9nn is chain position nn, which equals firmware logical index nn-1.
 | DACs | 2 x MCP4822 on +3V3, LDAC tied low | design; outputs update on CS rising edge |
 | CV buffers | MCP6004 (RRIO, 1.8-6 V) on VBUS | 0-2.048 V with headroom, quad = one package |
 | Gate buffer | 74AHCT125 on VBUS | TTL inputs take 3.3 V, outputs give 5 V gates |
-| Key scanner | TCA8418RTW (WQFN-24, footprint QFN-24 4x4 EP 2.5) | design; project symbol `rebirth:TCA8418RTW` |
+| Key scanner | 2 x MCP23017 (SOIC-28W) at 0x22/0x23 | the design's fallback, chosen for latency (decision 11) |
 | RGB LEDs | SK6812MINI-E | design; reverse-mount part under MX-style keycaps |
 | LED data buffer | 74AHCT1G125 on +5V_LED, OE low, 10 k pull-downs before and after, 390 R series | design (330-470 R) |
 | LED rail bulk | C984 470 uF 10 V low-ESR | PWM current peaks; final value from a scope check |
-| Key diodes | 1N4148W (SOD-123) | any small-signal diode |
+| Key diodes | BAT54J Schottky (SOD-323F) | low Vf keeps a pressed row well below the MCP23017's VIL |
 | Keys | MX-type switches (footprint SW_Cherry_MX_1.00u_PCB) | assumption; any momentary switch works |
 | Step buttons / LEDs | 6 mm tactile, red 3 mm LEDs with 470 R (~3 mA) | unchanged hardware; values are a choice |
 | Encoders | EC11 with switch | unchanged hardware |
@@ -93,7 +96,7 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
    note 24 with the op-amp offset, and the DAC's gain/offset errors (about +-2 % FSR)
    need a per-channel calibration in firmware, which does not exist yet.
 3. **Gates are 5 V** (74AHCT125 on VBUS, 1 k series, 100 k pull-downs at the inputs and at
-   the jacks). ARCHITECTURE.md only says the GPIOs are 3.3 V logic; see open point 3.
+   the jacks). ARCHITECTURE.md only says the GPIOs are 3.3 V logic; see open point 2.
 4. **Encoder RC filters** (10 k pull-up, 10 k series, 10 nF) on A/B; the internal
    pull-ups stay on in firmware and do no harm.
 5. **AGND** of the Pico joins GND through R303 (0 R) at one point. The Pico symbol
@@ -107,35 +110,46 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
    3.3 V / 10 R into its output with pin 5 shorted to ground. U401 (74LVC1G14) inverts
    the UART, Q401 (MMBT3904) sinks the loop: pin 5 to GND costs nothing, pins 4-5 shorted
    pass <= 85 mA through Q401 (200 mA max). Same polarity as before, no firmware change.
-9. **Defined states**: R802 pulls the TCA8418's open-drain INT up (datasheet), R903 holds
-   the first LED's DIN low while U901 is unpowered, C506/C507 add local bulk at U502 and
+9. **Defined states**: R903 holds the first LED's DIN low while U901 is unpowered, C506/C507 add local bulk at U502 and
    the VBUS buffers.
 10. **Steps 8 and 16 on a third MCP23017 (U703, 0x24; decided by the owner).** The current
     MCP23017 datasheet (DS20001952 rev. D, 2022, and later) makes GPA7/GPB7 output-only;
     Microchip's support note, as quoted on EEVblog, says a level change on them during a
     read can corrupt SDA, so buttons there could upset the whole I2C bus. SW708/SW716 now
-    sit on U703 GPA0/GPA1 (A2 = 1, A1 = A0 = 0; 0x22/0x23 stay free for the design's
-    matrix fallback). U701 GPA7/GPB7 and all unused U703 pins are left open.
+    sit on U703 GPA0/GPA1 (A2 = 1, A1 = A0 = 0; 0x22/0x23 are the key scanner of
+    decision 11). U701 GPA7/GPB7 and all unused U703 pins are left open.
     **Firmware change needed** (the firmware is not touched here): read U703 GPA0/GPA1 as
     steps 8/16 (same register setup as 0x20: inputs, pull-ups, inverted polarity), stop
     using U701 bits 7 and 15 as buttons, and configure GPA7/GPB7 of U701 and U703 as
-    outputs. U703's spare pins can later drive U201 EN or TCA8418 RESET (open point 2).
+    outputs. U703's spare pins can later drive U201 EN (open point 1).
+11. **Key matrix scanned by two MCP23017, no TCA8418 (decided by the owner: low latency
+    first).** TI's datasheet (SCPS215G, 8.6.2.15) scans the keypad every 25 ms and reports
+    a press after 25-40 ms, debounce disabled or not; a faster I2C clock does not change
+    that. The design asks for <= 15 ms press-to-event, so the board uses the design's own
+    fallback: U801 (0x22) + U802 (0x23) MCP23017 on ROW0-7/COL0-9 (sheet 10). This is a
+    change to the approved design ("Grid electronics" and "Hardware interface" name the
+    TCA8418) and the firmware's TCA8418 driver is not used on this board.
+    Pin map: U801 GPA0-6 = ROW0-6, GPB0 = ROW7 (all rows in one 2-byte read), GPB1-7 =
+    COL0-6, GPA7 = COL7; U802 GPA0/GPA1 = COL8/COL9. Rows are inputs with the internal
+    pull-ups, columns push-pull outputs, one low at a time, the others high; the
+    output-only GPA7/GPB7 only drive columns. Key diodes are BAT54J Schottky: a pressed
+    key pulls its row to ~0.25 V against the MCP23017's VIL of 0.2 VDD = 0.66 V
+    (DS20001952, D031); a silicon 1N4148 at the 40-115 uA pull-up current would leave only
+    ~0.1 V of margin. **Firmware change needed**: a scan driver on Core 0. One column step
+    is a 3-byte write plus a 2-byte read, about 0.2 ms at 400 kHz, so a full scan takes
+    2-3 ms; scanning every ~4 ms keeps press-to-event (scan + 5 ms debounce) near 10 ms.
+    The I2C bus then carries the scan next to the step-row traffic.
 
 ## Open points for the owner (design-level, not changed here)
 
-1. **TCA8418 latency.** TI's datasheet (SCPS215G, 8.6.2.15) scans the keypad every 25 ms
-   and reports a press after 25-40 ms; disabling debounce does not change that. The design
-   asks for <= 15 ms press-to-event. Either accept 25-40 ms (plus firmware debounce), or
-   switch the matrix to the design's fallback scanner (two MCP23017), or lay out both on
-   the board and fit one after a bench test.
-2. **LED rail before enumeration.** EN = +3V3 turns the chain on before any firmware runs;
+1. **LED rail before enumeration.** EN = +3V3 turns the chain on before any firmware runs;
    82 x ~1 mA idle plus the Pico exceed the 100 mA an unconfigured USB device may draw.
    If the design's fallback (minimal USB enumeration asking for 500 mA) is ever needed,
    EN must be firmware-controlled (a spare U703 output with a pull-down). Enumeration
    goes through the Pico's own micro-USB (D+/D- are not on its header).
-3. **Gate level.** Gates are 5 V here; confirm that the target synths want 5 V gates
+2. **Gate level.** Gates are 5 V here; confirm that the target synths want 5 V gates
    (most do), or drop U504 for 3.3 V gates through 1 k.
-4. **DAC gain 2x is not possible on this board.** With the DACs on +3V3 only the default
+3. **DAC gain 2x is not possible on this board.** With the DACs on +3V3 only the default
    1x (0-2.048 V, about two octaves) works. `-DREBIRTH_CV_DAC_GAIN=2` would need the DACs
    on VBUS and 3.3 V -> 5 V buffers on their SPI lines (ARCHITECTURE.md already says so);
    a firmware `#error` for gain 2 on this board would prevent a wrong build.
@@ -170,10 +184,10 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
   no MPNs/datasheets (DS-001, SS-001) is expected at this stage; no ESD parts on the
   jacks and MIDI sockets (protection is series resistors and the opto) is a PCB-stage
   choice.
-- Pin numbers checked against datasheets for TCA8418 (TI SCPS215G, RTW), TPS2553
-  (SLVS841, DBV), SK6812MINI-E (see above) and the CA-033 resistor values; the KiCad
+- Pin numbers checked against datasheets for TPS2553 (SLVS841, DBV), SK6812MINI-E (see
+  above), MCP23017 thresholds (DS20001952) and the CA-033 resistor values; the KiCad
   library symbols of MCP4822, MCP23017, MCP6004, 74AHCT125, 74AHCT1G125, 74LVC1G14,
-  MMBT3904, H11L1 and the Pico match their standard pinouts.
+  MMBT3904, BAT54J, H11L1 and the Pico match their standard pinouts.
 - Independent review (2026-11-16) by Codex and Grok, plus DeepSeek's complete answer
   from a run that ended with an error afterwards; Gemini could not run (API credits).
   All three found the MCP23017 GPA7/GPB7 problem, two the TCA8418 latency, all three the
