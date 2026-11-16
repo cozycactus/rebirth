@@ -60,8 +60,9 @@ Use a logic analyzer or oscilloscope:
 - Decode MIDI Clock separately: 24 messages per quarter, approximately 20.833 ms
   apart at 120 BPM. GPIO 7 measures the 96 PPQN timer, not wire-level MIDI jitter.
 - DIN messages share a serial link at 320 us per byte. Behind a note burst a
-  Clock byte waits for about the rest of one message, not for the whole burst;
-  gate alignment does not prove MIDI alignment.
+  Clock byte waits for the byte being shifted out and at most one complete
+  channel message (four byte times, 1.28 ms, before interrupt latency), not for
+  the whole burst; gate alignment does not prove MIDI alignment.
 - Session panel load case: in pattern select, press step button 13 to reset the
   counters, then return to the Session view (encoder 2 long press) and run the
   load there: scenes launching every bar, the 82 LEDs animating, the TCA8418
@@ -81,9 +82,11 @@ Use a logic analyzer or oscilloscope:
   use its densest synth/drum pattern. The GPIO 7 maximum pulse width (`I`) may
   rise by at most 20 us over that baseline; `J` and `P` and the wire-level MIDI
   Clock interval (GPIO 0 decoded) must be no worse than the baseline. A Clock
-  waits for the rest of one message plus one byte at most (the PL011 keeps a
-  one-byte holding register with the FIFO off): about 1.3 ms worst case, against
-  up to about 10 ms behind a kit burst on the earlier path. At 300 BPM with every
+  byte may wait for the byte being shifted out and a complete channel message
+  whose status is already in the holding register (the PL011 keeps a one-byte
+  holding register with the FIFO off): up to four byte times, 1.28 ms, before
+  interrupt latency, against up to about 10 ms behind a kit burst on the earlier
+  path. At 300 BPM with every
   voice of both kits flammed the queue is overloaded by design: second hits are
   dropped and counted as `FLAM DROP <n>` on the pattern-select screen; nothing
   else may be dropped and playback must not stop.

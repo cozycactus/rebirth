@@ -38,6 +38,10 @@ static bool uart_drained;
 #define FAKE_UART_BYTE_US 320u      // 10 bits at 31,250 baud
 static bool wire_time;              // set by fake_uart_run_until()
 static uint32_t wire_free_at;       // when the last byte written has left the line
+// The PL011 with its FIFO off: a shift register and a one-byte holding register.
+// The holding register empties when its byte starts on the line, so the UART is
+// writable one byte time before the line is free: two bytes may be committed.
+static uint32_t uart_writable_at(void) { return wire_free_at - FAKE_UART_BYTE_US; }
 
 void fake_hardware_reset(void) {
     memset(&timer, 0, sizeof(timer));
@@ -140,22 +144,27 @@ void uart_set_irq_enables(void *uart, bool rx, bool tx) {
 bool uart_is_writable(void *uart) {
     (void)uart;
     if (!fake_uart_writable || fake_uart_budget == 0) return false;
-    return !wire_time || (int32_t)(timer.timerawl - wire_free_at) >= 0;
+    return !wire_time || (int32_t)(timer.timerawl - uart_writable_at()) >= 0;
 }
 void uart_putc_raw(void *uart, uint8_t value) {
     assert(uart_is_writable(uart));
     assert(fake_midi_length < FAKE_MIDI_CAPACITY);
-    fake_midi_time_us[fake_midi_length] = timer.timerawl;
+    // A byte starts on the line when the byte before it has left, or now.
+    uint32_t start = timer.timerawl;
+    if (wire_time && (int32_t)(wire_free_at - start) > 0) start = wire_free_at;
+    fake_midi_time_us[fake_midi_length] = start;
     fake_midi[fake_midi_length++] = value;
     if (fake_uart_budget != UINT_MAX) fake_uart_budget--;
-    wire_free_at = timer.timerawl + FAKE_UART_BYTE_US;
+    wire_free_at = start + FAKE_UART_BYTE_US;
     uart_drained = false;
 }
 void fake_uart_run_until(uint32_t until_us) {
     wire_time = true;
-    // The TX interrupt fires when the line has sent the previous byte.
-    while (fake_uart_tx_irq && (int32_t)(until_us - wire_free_at) > 0) {
-        if ((int32_t)(wire_free_at - timer.timerawl) > 0) timer.timerawl = wire_free_at;
+    // The TX interrupt fires when the holding register empties: when the byte in it
+    // starts on the line, one byte time before the line is free.
+    while (fake_uart_tx_irq && (int32_t)(until_us - uart_writable_at()) > 0) {
+        uint32_t writable_at = uart_writable_at();
+        if ((int32_t)(writable_at - timer.timerawl) > 0) timer.timerawl = writable_at;
         unsigned written = fake_midi_length;
         assert(fake_irq_handlers[UART0_IRQ]);
         fake_irq_handlers[UART0_IRQ]();

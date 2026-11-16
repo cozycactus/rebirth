@@ -456,9 +456,11 @@ static void play_kit_step(uint8_t track, const prepared_track_pattern_t *row, ui
     }
 }
 
-// Free TX queue bytes a flam's second hits must leave: the most one pulse adds in
-// mandatory messages (two kits' note-offs and the worst step burst, 168 bytes as queued).
-#define KIT_FLAM_RESERVE 192u
+// Free TX queue bytes a flam's second hits must leave. The headroom covers the releases
+// and new first hits of an immediate restart (Start while playing, or Stop then Start) as
+// well as scheduled playback (two kits' note-offs and the worst step burst, 168 bytes as
+// queued in one pulse): with 192 a restart under two dense kits overflowed the queue.
+#define KIT_FLAM_RESERVE 288u
 
 // Pulse order step 4: the second hits of a kit's flam, per voice Note On velocity 0
 // then Note On at the flam velocity, in one send of their own, never through midi_buf.

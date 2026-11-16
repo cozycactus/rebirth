@@ -51,7 +51,10 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
   warnings): lane helpers, prepared kit rows, the pulse order, velocity levels,
   flams at exactly `flam_pulses`, note-offs as Note On velocity 0, releases on
   mute, Stop, Panic and type change, the two-kit limit, running status and Clock
-  ahead of note bytes over a fake UART, the 192-byte flam reserve, save format v6
+  ahead of note bytes over a fake UART (shift and holding register, no FIFO), the
+  288-byte flam reserve (flam second hits must leave 288 TX queue bytes free; the
+  headroom covers the releases and new first hits of an immediate restart as well
+  as scheduled playback), a restart under two dense kits, save format v6
   and loading real v4/v5 images, encoder clicks with detent-rate acceleration
   for numbers only, and the kit OLED screens. The sanitizer build passes too.
 - RAM from `arm-none-eabi-size -A build/fw1/rp2040_sequencer.elf` after a fresh
@@ -101,8 +104,10 @@ measured first with the same densest pattern load.
 - `NOT VERIFIED` GPIO 7 maximum ISR duration with two dense kits (every voice,
   every step, flams on) within +20 us of the baseline.
 - `NOT VERIFIED` Wire-level MIDI Clock interval (GPIO 0 decoded) with two dense
-  kits no worse than the baseline; the worst wait for a Clock behind a note
-  burst is about 1.3 ms by design.
+  kits no worse than the baseline. By design a Clock byte may wait for the byte
+  being shifted out and a complete channel message whose status is already in
+  the holding register: up to four byte times, 1.28 ms, before interrupt
+  latency.
 - `NOT VERIFIED` Longest Core 0 interrupts-off window while playing (editing,
   launching, track-config edits, Song edits) under 100 us, Song list edits near
   the front of a long song excepted (Known Follow-Ups).

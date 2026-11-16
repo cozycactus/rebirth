@@ -1708,7 +1708,8 @@ static void test_flam_overload_drops_second_hits(void) {
     tick();                                 // pulse 0: the first hits go out at once
     CHECK(count_kit_hits() == KIT_VOICES);
     fake_uart_writable = false;
-    // 255 bytes queued, 256 free: under 192 + 66, the 11-voice flam message as queued.
+    // 255 bytes queued, 256 free: under KIT_FLAM_RESERVE (288) + 66, the 11-voice flam
+    // message as queued.
     for (unsigned i = 0; i < 85; i++) midi_send_note_on(0, 60, 100);
     pulses(3);                              // pulse 3: flam 3
     CHECK(flam_drops() == 1);
@@ -1726,6 +1727,49 @@ static void test_flam_overload_drops_second_hits(void) {
     tick();
     CHECK(flam_drops() == 0);
 }
+
+// Review focus: a restart under dense kit load, in wire time. Kits on tracks 0 and 4
+// (channels 10 and 9), ten voices each (no OH) flammed on every step, six SYNTH tracks
+// with a note on every step, 300 BPM. At pulse 768 the transport restarts: Start while
+// playing, or (`stop_first`) Stop then an immediate Start, as from the PLAY button. The
+// old run's releases join the TX backlog; the new run's first step must still fit.
+static void dense_kit_restart(bool stop_first) {
+    static const uint8_t gates[NUM_TRACKS] = {65, 27, 51, 87, 20, 49, 71, 21};
+    fake_uart_run_until(0);                 // wire-time mode
+    transport_set_bpm(300);
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        bool kit = t == 0 || t == 4;
+        if (kit) make_kit(t, t == 0 ? 10 : 9);
+        else g_seq.patterns[0].tracks[t].type = TRACK_TYPE_SYNTH;
+        g_seq.patterns[0].tracks[t].gate_length_pct = gates[t];
+        if (kit) g_seq.kit_config[t].flam_pulses = t == 0 ? 7 : 12;
+        for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+            if (kit) {
+                uint32_t word = 0;
+                for (uint8_t l = 1; l < KIT_LANES; l++)
+                    if (l != KIT_LANE_OH) word = kit_edit(word, l, KIT_FLAM);
+                g_seq.patterns[0].kit_steps[t][s] = word;
+            } else {
+                pattern_set_step(&g_seq.patterns[0], t, s, 60 + s, 100, STEP_FLAG_ACTIVE);
+            }
+        }
+        sequencer_refresh_track_playback(t, 0);
+    }
+    transport_start();
+    for (unsigned p = 0; p < 1000; p++) {
+        fake_uart_run_until(timer_hw->alarm[0]);
+        tick();
+        if (p == 768) {
+            if (stop_first) transport_stop();
+            transport_start();
+        }
+        CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+        CHECK(!midi_output_overflowed());
+    }
+}
+
+static void test_dense_kit_restart_does_not_overflow(void) { dense_kit_restart(false); }
+static void test_dense_kit_stop_start_does_not_overflow(void) { dense_kit_restart(true); }
 
 typedef struct {
     float bpm;
@@ -1777,13 +1821,14 @@ static uint32_t play_load(const load_case_t *c) {
     CHECK(!midi_output_overflowed());
     fake_uart_run_until(timer_hw->timerawl + 1000000); // the queue drains
     CHECK(!fake_uart_tx_irq);
-    // Each Clock starts on the wire within 3 byte times (960 us) of its pulse: at most
-    // the rest of the byte on the line and of the message it belongs to.
+    // Each Clock starts on the wire within 4 byte times (1,280 us) of its pulse: at most
+    // the byte being shifted out and a whole channel message whose status is already in
+    // the holding register.
     unsigned clock = 0;
     for (unsigned i = 0; i < fake_midi_length; i++) {
         if (fake_midi[i] != MIDI_CLOCK) continue;
         CHECK(clock < clocks);
-        CHECK(fake_midi_time_us[i] - clock_due[clock] <= 3u * 320u);
+        CHECK(fake_midi_time_us[i] - clock_due[clock] <= 4u * 320u);
         clock++;
     }
     CHECK(clock == clocks);
@@ -2207,6 +2252,8 @@ int main(void) {
     RUN(test_live_mute_cancels_pending_flam);
     RUN(test_edit_during_flam_keeps_second_hit);
     RUN(test_flam_overload_drops_second_hits);
+    RUN(test_dense_kit_restart_does_not_overflow);
+    RUN(test_dense_kit_stop_start_does_not_overflow);
     RUN(test_kits_at_wire_rate);
     RUN(test_kit_launch_every_quant);
     RUN(test_kit_song_mode);

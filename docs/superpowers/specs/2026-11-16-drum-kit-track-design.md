@@ -261,13 +261,16 @@ the kit's Note Ons; SYNTH and DRUM tracks keep sending 0x80 as today.
 on what is queued: after a dense step burst the second hit leaves only when the burst has gone.
 With one kit of six voices the burst is 13 bytes (4 ms) and a 12 ms flam stays a flam.
 
-**Overload rule (A).** A flam's second hit is the only kit message that may be dropped. The flam
-message is queued only if at least 192 bytes of the TX queue stay free after it; otherwise that
-step's second hits are skipped, the voices stay sounding until their note-off, and a counter shown
-with the jitter stats goes up. 192 bytes cover the most one pulse ever adds in mandatory messages
-(two kits' note-offs and the worst step burst, 168 bytes as stored in the queue with every status
-byte). Everything else fits the DIN rate at every tempo up to 300 BPM (see "MIDI load"), so kit
-traffic never trips the TX-overflow panic.
+**Overload rule (A).** A flam's second hit is the only kit message that may be dropped. Flam
+second hits must leave 288 TX queue bytes free; the headroom covers the releases and new first
+hits of an immediate restart as well as scheduled playback. Otherwise that step's second hits are
+skipped, the voices stay sounding until their note-off, and a counter shown with the jitter stats
+goes up. Scheduled playback adds at most 168 bytes in mandatory messages in one pulse (two kits'
+note-offs and the worst step burst, as stored in the queue with every status byte); the first
+design reserve of 192 bytes left no room for a restart (Start while playing, or Stop then an
+immediate Start) under two dense kits, whose releases join the backlog before the new run's first
+step, and the queue overflowed (multi-model review). Everything else fits the DIN rate at every
+tempo up to 300 BPM (see "MIDI load"), so kit traffic never trips the TX-overflow panic.
 
 ### Mutes, stop, panic, launches
 
@@ -299,8 +302,8 @@ therefore known in the queue without re-parsing a compressed stream.
 
 `MIDI_BUF_SIZE` grows from 64 to 160 bytes and the TX queue from 256 to 512 bytes (A): the worst
 step burst is 102 bytes as stored (82 on the wire, below), a pulse with two kits' note-offs as well
-holds 168, and the overload rule keeps a 192-byte reserve. Host tests check the worst designed
-burst fits.
+holds 168, and the overload rule keeps a 288-byte reserve. Host tests check the worst designed
+burst fits, and a restart under two dense kits.
 
 The step burst is built in track order, so the kick and kit on the leftmost columns get the
 earliest bytes; the README says so. Within one step the last Note On leaves after the earlier ones:
@@ -326,22 +329,23 @@ path changes (A):
 - At a message boundary the drain sends, in this order: a queued Start / Continue / Stop, then a
   pending Clock, then the next note message. A receiver never sees a Clock before the Start it
   belongs to (the existing test expects Start, Clock, Note On), and a Clock never waits longer
-  than one message.
+  than the byte on the line and one message.
 - Stop and Panic clear the pending Clock in the same critical section in which they queue their
   bytes, so no Clock leaves after a Stop. `midi_clear_output_queue()` clears it too, and
   `midi_wait_output_idle()` (used before a flash save) also waits for it and for the real-time
   bytes.
 - The UART's hardware FIFO is turned off, so nothing is committed in front of a pending Clock
-  beyond the byte being shifted out. The UART interrupt then fires once per byte on Core 0: at most
+  beyond the byte being shifted out and the one in the holding register. The UART interrupt then fires once per byte on Core 0: at most
   3,125 per second, each a few microseconds.
 - Core 0 must not keep interrupts off for longer than 100 us (a third of a byte time), or bytes
   start to have gaps and a Clock waits longer. The bench measures the longest such window (the
   shared-state lock sections, the I2C and SPI drivers); a longer one is shortened, the FIFO stays
   off.
 
-Result: a Clock byte waits at most for the rest of one message (3 bytes, under 1 ms) whatever the
-burst length, which is no worse than today. Note messages keep their order among themselves, and
-Start, Continue and Stop among themselves.
+Result: A Clock byte may wait for the byte being shifted out and a complete channel message whose
+status is already in the holding register: up to four byte times, 1.28 ms, before interrupt
+latency. Comparison with the baseline remains a bench requirement. Note messages keep their order
+among themselves, and Start, Continue and Stop among themselves.
 
 ### MIDI load
 

@@ -74,10 +74,10 @@ static void midi_tx_unlock(uint32_t irq_state) {
 // The writable check, dequeue, write and IRQ mask change share one lock across
 // both cores and the UART ISR. No second consumer can overtake a byte.
 // One byte per writable check; with the UART FIFO off the UART holds at most the
-// byte on the line and one in its holding register. A pending Clock waits for one
-// message plus the holding-register byte at worst (the byte on the line, then a
-// whole message whose status already sits in the holding register): four byte
-// times, about 1.3 ms. At a message boundary a queued Start/Continue/Stop goes
+// byte on the line and one in its holding register. A pending Clock may wait for
+// the byte being shifted out and a complete channel message whose status is
+// already in the holding register: four byte times, 1.28 ms, before interrupt
+// latency. At a message boundary a queued Start/Continue/Stop goes
 // first, then a pending Clock, then the next message.
 // A message whose status equals the last one written goes without it, unless the
 // queue ran empty since: the first message after a gap always carries its status,
@@ -163,8 +163,8 @@ void midi_init(void) {
 
     // MIDI is 8N1
     uart_set_format(MIDI_UART, 8, 1, UART_PARITY_NONE);
-    // One byte at a time: a Clock waits at most for one message plus the
-    // holding-register byte, about 1.3 ms.
+    // One byte at a time: a Clock waits at most for the byte being shifted out
+    // and one whole message, four byte times (1.28 ms).
     uart_set_fifo_enabled(MIDI_UART, false);
 
     irq_set_exclusive_handler(UART0_IRQ, midi_uart_irq_handler);

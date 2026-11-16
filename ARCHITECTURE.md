@@ -88,11 +88,11 @@ lane order.
   voice before the MIDI Stop byte. The Stop, a real-time byte, may overtake
   them on the wire; every voice is still released before the next run.
 - **Flam reserve.** A flam's second hits are the only kit message that may be
-  dropped: they are queued only if at least 192 bytes of the TX queue stay free
-  after them (`KIT_FLAM_RESERVE`, the most one pulse adds in mandatory messages:
-  two kits' note-offs and the worst step burst, 168 bytes as queued). Otherwise
-  the voices sound until their note-off and `flam_drops` goes up, one per kit per
-  flam pulse. It shows on the pattern-select screen as `FLAM DROP <n>` when
+  dropped. Flam second hits must leave 288 TX queue bytes free
+  (`KIT_FLAM_RESERVE`); the headroom covers the releases and new first hits of an
+  immediate restart as well as scheduled playback (two kits' note-offs and the
+  worst step burst, 168 bytes as queued in one pulse). Otherwise the voices sound
+  until their note-off and `flam_drops` goes up, one per kit per flam pulse. It shows on the pattern-select screen as `FLAM DROP <n>` when
   non-zero.
 
 ## Playback Rules
@@ -163,9 +163,10 @@ Clock and transport bytes go ahead of note bytes. `midi_send_clock()` sets one
 pending-Clock flag (never a counter, so Clocks are not released in a bunch).
 Start, Continue and Stop wait in their own small queue. At each message
 boundary the drain sends a queued Start/Continue/Stop, then a pending Clock,
-then the next note message, so a Clock waits at most for the rest of one message
-plus the byte in the UART's holding register: about 1.3 ms worst case on real
-hardware, against up to about 10 ms behind a kit burst without this rule. Stop,
+then the next note message. A Clock byte may wait for the byte being shifted out
+and a complete channel message whose status is already in the holding register:
+up to four byte times, 1.28 ms, before interrupt latency, against up to about
+10 ms behind a kit burst without this rule. Stop,
 Panic and `midi_clear_output_queue()` clear the Clock flag, so no Clock follows
 a Stop; `midi_wait_output_idle()` waits for it too.
 
