@@ -15,6 +15,15 @@ add_executable(test_pattern
 target_include_directories(test_pattern PRIVATE ${REBIRTH_INC})
 target_compile_definitions(test_pattern PRIVATE ${REBIRTH_HOST_DEFS})
 
+add_executable(test_kit
+    test_kit.c
+    ${REBIRTH_SRC}/kit.c
+    ${REBIRTH_SRC}/pattern.c
+)
+target_include_directories(test_kit PRIVATE ${REBIRTH_INC})
+target_compile_definitions(test_kit PRIVATE ${REBIRTH_HOST_DEFS})
+add_test(NAME kit_tests COMMAND test_kit)
+
 # Test 2: sync layer (MIDI buffer + gate commit, mocked hardware)
 add_executable(test_sync
     test_sync.c
@@ -30,6 +39,7 @@ add_executable(test_song
     fakes/fake_hardware.c
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/kit.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/sequencer.c
     ${REBIRTH_SRC}/midi_out.c
@@ -43,6 +53,7 @@ add_executable(test_playback
     fakes/fake_hardware.c
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/kit.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/midi_out.c
 )
@@ -68,6 +79,7 @@ add_executable(test_storage
     fakes/fake_hardware.c
     ${REBIRTH_SRC}/sequencer.c
     ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/kit.c
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/midi_out.c
@@ -79,6 +91,7 @@ add_executable(test_ui
     test_ui.c
     fakes/fake_hardware.c
     ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/kit.c
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/midi_out.c
@@ -97,6 +110,7 @@ add_executable(test_session
     ${REBIRTH_SRC}/session.c
     ${REBIRTH_SRC}/sequencer.c
     ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/kit.c
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/midi_out.c
@@ -139,3 +153,11 @@ add_executable(test_key_scan
 )
 target_include_directories(test_key_scan PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME key_scan_tests COMMAND test_key_scan)
+
+add_executable(test_encoder
+    test_encoder.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/encoder.c
+)
+target_include_directories(test_encoder PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME encoder_tests COMMAND test_encoder)

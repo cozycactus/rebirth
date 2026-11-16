@@ -41,6 +41,8 @@
 #define MIDI_START          0xFA
 #define MIDI_STOP           0xFC
 #define MIDI_CONTINUE       0xFB
+// The UART TX queue (a power of two; one byte stays unused, so it holds one less).
+#define MIDI_TX_QUEUE_SIZE  1024
 
 // Jitter measurement
 #define JITTER_PROBE_PIN    7       // High while sequencer timer ISR runs
@@ -62,7 +64,42 @@ typedef struct {
 typedef enum {
     TRACK_TYPE_SYNTH,       // Melodic — uses note field
     TRACK_TYPE_DRUM,        // Percussive — fixed note per track
+    TRACK_TYPE_KIT,         // 909 drum machine over MIDI — 12 lanes per step
 } track_type_t;
+
+// Kit lanes: 0 AC, 1 BD, 2 SD, 3 LT, 4 MT, 5 HT, 6 RS, 7 CP, 8 CH, 9 OH, 10 CC, 11 RC.
+// Voice v is lane v + 1. A step word holds lane i in bits 2i..2i+1.
+#define KIT_LANES       12
+#define KIT_VOICES      11
+#define KIT_LANE_AC     0
+#define KIT_LANE_BD     1
+#define KIT_LANE_SD     2
+#define KIT_LANE_CH     8
+#define KIT_LANE_OH     9
+#define MAX_KIT_TRACKS  2
+#define KIT_FLAM_MIN    1
+#define KIT_FLAM_MAX    12
+
+typedef enum { KIT_OFF = 0, KIT_NOTE = 1, KIT_ACCENT = 2, KIT_FLAM = 3 } kit_value_t;
+
+typedef struct {
+    uint8_t note[KIT_VOICES];          // lane order BD..RC
+    uint8_t vel_normal, vel_accent, vel_max;
+    uint8_t flam_pulses;
+} kit_config_t;
+
+// Rows of a kit track's config screen, in order (OUTPUT and CV are not used by a kit).
+typedef enum {
+    KIT_PARAM_TYPE,
+    KIT_PARAM_CHANNEL,
+    KIT_PARAM_GATE,
+    KIT_PARAM_FLAM,
+    KIT_PARAM_VEL_NORMAL,
+    KIT_PARAM_VEL_ACCENT,
+    KIT_PARAM_VEL_MAX,
+    KIT_PARAM_NOTE,                     // NOTE BD; voice v is KIT_PARAM_NOTE + v
+    KIT_PARAM_COUNT = KIT_PARAM_NOTE + KIT_VOICES,
+} kit_param_t;
 
 typedef enum {
     OUTPUT_MIDI_ONLY,
@@ -87,6 +124,7 @@ typedef struct {
     uint8_t        track_length[NUM_TRACKS]; // Per-track/section step count: 1-16
     uint8_t        swing;           // 0–99, percentage of swing
     char           name[9];         // 8 chars + null
+    uint32_t       kit_steps[NUM_TRACKS][STEPS_PER_PATTERN]; // Kit step words
 } pattern_t;
 
 // Song mode
@@ -154,6 +192,9 @@ typedef struct {
     uint32_t last_isr_duration_us;
     uint32_t max_isr_duration_us;
     uint32_t overruns;                  // ISR entered later than one pulse interval
+    uint32_t flam_drops;                // dropped flam sends: one per kit per flam pulse whose
+                                        // second hits were skipped: the TX queue would
+                                        // have held more than the flam cap
 } sequencer_jitter_stats_t;
 
 // ─── Shared State (accessed by both cores) ──────────────────────
@@ -163,6 +204,7 @@ typedef struct {
     pattern_t            patterns[MAX_PATTERNS];
     song_t               song;
     uint8_t              active_pattern[NUM_TRACKS]; // Edited pattern per track/section
+    kit_config_t         kit_config[NUM_TRACKS];     // Kit settings per track
     volatile uint8_t     launch_quant;       // launch_quant_t; not saved
     volatile uint8_t     track_mutes;        // Bitmask: bit N = track N muted for playback
     // Spinlock index for mutex
@@ -265,9 +307,17 @@ uint64_t sequencer_clip_mask(uint8_t bank);
 // Track mutes (bitmask, instant)
 void seq_set_track_mute(uint8_t track, bool muted);
 // Copies a track's routing into all 32 locations, each keeping its own stored
-// `muted`, then refreshes that track's prepared rows. Takes seq_lock: call with
-// none held.
-void seq_set_track_config(uint8_t track, const track_config_t *config);
+// `muted`, then refreshes that track's prepared rows. Returns false, nothing
+// changed, when `config` makes a third track a kit: its type is KIT, the track is
+// a kit in no location and MAX_KIT_TRACKS other tracks are. Takes seq_lock: call
+// with none held.
+bool seq_set_track_config(uint8_t track, const track_config_t *config);
+// Stores the track's kit settings, clamped to their ranges, then refreshes that
+// track's prepared rows. Takes seq_lock: call with none held.
+void seq_set_kit_config(uint8_t track, const kit_config_t *config);
+// Bit t set when track t is a kit in any location. Takes seq_lock: call with none
+// held.
+uint8_t seq_kit_tracks(void);
 // The MUTE button. A track that is muted (live, or stored at the location it
 // plays) becomes audible: the live bit and the stored mute of every location
 // are cleared and its prepared rows refreshed. An audible track gets the live
@@ -280,9 +330,18 @@ uint8_t seq_get_track_mutes(void);
 
 // midi_out.c
 void midi_init(void);
+// Whole channel messages, each with its status byte (the drain applies running
+// status). Sets the overflow flag when they do not fit in the TX queue.
+void midi_send_bytes(const uint8_t *data, uint16_t length);
+// Queues them only if the TX queue then holds at most `max_queued` bytes; otherwise
+// returns false and leaves the overflow flag alone. One call under the TX lock.
+bool midi_try_send_bytes_capped(const uint8_t *data, uint16_t length, uint16_t max_queued);
 void midi_send_note_on(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_note_off(uint8_t channel, uint8_t note);
 void midi_send_cc(uint8_t channel, uint8_t cc, uint8_t value);
+// Clock sets a pending flag (no queue byte); Start, Continue and Stop wait in a
+// small queue of their own. Both go out at the next message boundary, ahead of
+// queued note messages; Stop also cancels a pending Clock.
 void midi_send_clock(void);
 void midi_send_start(void);
 void midi_send_stop(void);
@@ -312,19 +371,37 @@ void display_clear(void);
 void display_update(void);
 // common_row: session_common_row(&snap), 0xFF = MIXED. bar_step: global step in the
 // bar (0-15); 16 or more lights none (stopped). mode: shown as P or S at the end
-// of line 0.
+// of line 0. On a kit focus kit_lane names the lane ("SD"), kit_strip comes from
+// kit_lane_glyphs and kit_playhead is the cell's step (16 = none); kit_lane NULL
+// on any other focus.
 void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mode,
                                uint8_t focus_track, uint8_t focus_location, uint8_t focus_length,
-                               float bpm, launch_quant_t quant, uint8_t bar_step);
+                               float bpm, launch_quant_t quant, uint8_t bar_step,
+                               const char *kit_lane, const char *kit_strip, uint8_t kit_playhead);
+// Session screen on a kit focus: the pixel rows of the lane strip and its playhead.
+#define DISPLAY_KIT_STRIP_Y 37
+#define DISPLAY_KIT_STRIP_H 11
 const char *display_launch_quant_name(launch_quant_t quant);
-void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step);
+// held_step: the step held for editing (its values replace the track info
+// line, the step is marked in the grid); -1 = none.
+void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step, int8_t held_step);
+// Pattern view on a kit cell: lane names the lane, strip from kit_lane_glyphs,
+// playhead the cell's step (16 = none). The BPM is drawn by the caller.
+void display_draw_kit_lane_view(uint8_t track, uint8_t location, const char *lane,
+                                const char *strip, uint8_t playhead);
 void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step);
+// One kit step word: the 12 lane values, the cursor on cursor_lane.
+void display_draw_kit_step_edit(uint8_t track, uint8_t step, uint32_t word, uint8_t cursor_lane);
 void display_draw_pattern_select(uint8_t pattern,
                                   uint8_t length,
                                   uint8_t queued_pat,
                                   uint8_t mutes);
 void display_draw_track_config(const track_config_t *tc, uint8_t track,
                                 uint8_t param_cursor);
+// A kit track's config: param is a kit_param_t row; FLAM shows its time at the
+// current tempo.
+void display_draw_kit_config(const track_config_t *tc, const kit_config_t *kc,
+                             uint8_t track, uint8_t param);
 void display_draw_song_view(const song_t *s, uint16_t pos, uint8_t track);
 void display_draw_bpm(float bpm);
 void display_draw_text(uint8_t x, uint8_t y, const char *text);

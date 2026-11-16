@@ -4,8 +4,24 @@
 #include "hardware/sync.h"
 #include "hardware/irq.h"
 #include "sequencer.h"
+#include "kit.h"
 #include <string.h>
 #include <math.h>
+
+// Host builds check playback invariants; on the target the check compiles away (no
+// flash call from the ISR path that runs from RAM).
+#if defined(__arm__)
+#define PLAYBACK_INVARIANT(condition) ((void)0)
+#else
+#include <stdio.h>
+#include <stdlib.h>
+#define PLAYBACK_INVARIANT(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "%s:%d: invariant %s\n", __FILE__, __LINE__, #condition); \
+        abort(); \
+    } \
+} while (0)
+#endif
 
 // ─── Internal state ─────────────────────────────────────────────
 
@@ -35,9 +51,20 @@ typedef struct {
     uint8_t gate_pulses;
 } prepared_track_event_t;
 
+enum { PREPARED_EVENTS = 0, PREPARED_KIT = 1 };
+
 typedef struct {
-    uint8_t length;
-    prepared_track_event_t step[STEPS_PER_PATTERN];
+    uint8_t kind;                    // PREPARED_EVENTS or PREPARED_KIT
+    uint8_t length;                  // shared, outside the union
+    union {
+        prepared_track_event_t step[STEPS_PER_PATTERN];
+        struct {
+            uint32_t lanes[STEPS_PER_PATTERN]; // zero at and beyond the length, and muted
+            uint8_t note[KIT_VOICES];
+            uint8_t vel[3];          // normal, accent, max
+            uint8_t channel, gate_pulses, flam_pulses;
+        } kit;
+    };
 } prepared_track_pattern_t;
 
 typedef struct {
@@ -59,6 +86,24 @@ static active_note_state_t active_note_state[NUM_TRACKS];
 
 // Note durations share one countdown for MIDI and CV/Gate on each track.
 static uint8_t note_off_countdown[NUM_TRACKS];
+
+// What a track playing a kit row has sounding. One release channel per kit track:
+// every voice is released at the latest at the next step boundary, before that step's
+// hits, so all sounding voices come from one step and share the channel stored at that
+// step (play_kit_step checks it before it stores a channel). Each voice keeps the note
+// it was sent on. A flam's second hits come before that release and use the same notes
+// and channel.
+typedef struct {
+    uint16_t sounding;               // bit v: voice v
+    uint16_t flam;                   // voices whose second hit is due; within sounding
+    uint8_t  note[KIT_VOICES];
+    uint8_t  channel;                // of every sounding voice: the step's channel
+    uint8_t  countdown;              // pulses to the release; 0 = none due
+    uint8_t  flam_countdown;         // pulses to the second hits; 0 = none due
+    uint8_t  flam_velocity;          // one level above the step's note level
+} kit_runtime_t;
+
+static kit_runtime_t kit_runtime[NUM_TRACKS];
 
 static prepared_playback_t prepared_playback;
 static prepared_track_pattern_t prepared_patterns[MAX_PATTERNS][NUM_TRACKS];
@@ -96,6 +141,7 @@ static void jitter_reset_now(void) {
     jitter_stats.last_isr_duration_us = 0;
     jitter_stats.max_isr_duration_us = 0;
     jitter_stats.overruns = 0;
+    jitter_stats.flam_drops = 0;
     jitter_last_irq_us = 0;
     jitter_have_last_irq = false;
     jitter_reset_pending = false;
@@ -170,14 +216,44 @@ static inline uint8_t clamp_pattern_steps(uint8_t steps) {
 static bool fill_prepared_track(prepared_track_pattern_t *dst,
                                 uint8_t track,
                                 uint8_t pattern_index) {
+    step_t steps[STEPS_PER_PATTERN];
+    uint32_t words[STEPS_PER_PATTERN];
+    kit_config_t kit;
     uint32_t lock_state = seq_lock();
     const pattern_t *pat = &g_seq.patterns[pattern_index];
     dst->length = pattern_get_track_length(pat, track);
-    step_t steps[STEPS_PER_PATTERN];
     track_config_t config = pat->tracks[track];
-    memcpy(steps, pat->steps[track], sizeof(steps));
+    // Only what the cell's own type plays.
+    bool is_kit = kit_is_cell(pat, track);
+    if (is_kit) {
+        memcpy(words, pat->kit_steps[track], sizeof(words));
+        kit = g_seq.kit_config[track];
+    } else {
+        memcpy(steps, pat->steps[track], sizeof(steps));
+    }
     seq_unlock(lock_state);
 
+    uint8_t gate_pulses = (config.gate_length_pct * PULSES_PER_STEP) / 100;
+    if (gate_pulses < 1) gate_pulses = 1;
+
+    if (is_kit) {
+        dst->kind = PREPARED_KIT;
+        for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
+            dst->kit.lanes[step] = (config.muted || step >= dst->length) ? 0 : words[step];
+        }
+        // Masked here so the ISR builds its release bytes from them as they are.
+        for (uint8_t v = 0; v < KIT_VOICES; v++) dst->kit.note[v] = kit.note[v] & 0x7F;
+        dst->kit.vel[0] = kit.vel_normal;
+        dst->kit.vel[1] = kit.vel_accent;
+        dst->kit.vel[2] = kit.vel_max;
+        dst->kit.channel = config.midi_channel & 0x0F;
+        dst->kit.gate_pulses = gate_pulses;
+        dst->kit.flam_pulses = kit.flam_pulses;
+        // From the words before the blanking: a stored mute does not hide the clip.
+        return kit_cell_has_clip(words, dst->length);
+    }
+
+    dst->kind = PREPARED_EVENTS;
     bool has_clip = false;
     for (uint8_t step = 0; step < dst->length; step++) {
         if (steps[step].flags & STEP_FLAG_ACTIVE) has_clip = true;
@@ -202,46 +278,12 @@ static bool fill_prepared_track(prepared_track_pattern_t *dst,
         dst_event->midi_channel = tc->midi_channel;
         dst_event->output_mode = (uint8_t)tc->output_mode;
         dst_event->cv_channel = tc->cv_channel;
-
-        uint8_t gate_pulses = (tc->gate_length_pct * PULSES_PER_STEP) / 100;
-        if (gate_pulses < 1) gate_pulses = 1;
         dst_event->gate_pulses = gate_pulses;
     }
     return has_clip;
 }
 
-static void load_prepared_track(uint8_t track) {
-    uint32_t lock_state = seq_lock();
-    uint8_t pattern = g_seq.transport.current_pattern[track];
-    if (pattern >= MAX_PATTERNS) pattern = 0;
-    if (playback_pattern[track] != pattern ||
-        playback_revision[track] != prepared_revision[pattern][track]) {
-        prepared_playback.track[track] = prepared_patterns[pattern][track];
-        playback_revision[track] = prepared_revision[pattern][track];
-        playback_pattern[track] = pattern;
-    }
-    seq_unlock(lock_state);
-}
-
-// Applies the queued pattern; returns true when the playing location changed.
-static bool apply_track_queue_if_ready(uint8_t track) {
-    transport_t *t = (transport_t *)&g_seq.transport;
-    if (t->queued_pattern[track] == NO_QUEUED_PATTERN) return false;
-
-    bool changed = false;
-    uint32_t lock_state = seq_lock();
-    uint8_t queued = t->queued_pattern[track];
-    if (queued != NO_QUEUED_PATTERN) {
-        changed = t->current_pattern[track] != queued;
-        t->current_pattern[track] = queued;
-        t->queued_pattern[track] = NO_QUEUED_PATTERN;
-    }
-    seq_unlock(lock_state);
-    load_prepared_track(track);
-    return changed;
-}
-
-// Immediate note-off (used by transport_stop)
+// Immediate note-off: live mutes, note-off countdowns and a kind change.
 static void send_note_off_if_active(uint8_t track) {
     if (!note_is_on[track]) return;
 
@@ -353,6 +395,169 @@ static void commit_step(void) {
     midi_buf_flush();
 }
 
+// ─── Kit tracks ─────────────────────────────────────────────────
+// MIDI only: a kit never touches CV or gates. Its Note Off is Note On velocity 0.
+
+// Writes a release for every voice the kit on `track` has sounding into `out`, each on
+// the note it was sent on and all on the one channel stored at their step; the voices
+// stop sounding and a pending flam is cancelled. Returns the byte count. In RAM: the
+// timer ISR calls it on every release.
+static uint8_t __not_in_flash_func(kit_take_release)(uint8_t track, uint8_t *out) {
+    kit_runtime_t *k = &kit_runtime[track];
+    uint8_t length = 0;
+    if (k->sounding) {
+        uint8_t status = (uint8_t)(MIDI_NOTE_ON | k->channel);
+        for (uint8_t i = 0; i < KIT_VOICES; i++) {
+            uint8_t v = kit_voice_order[i];
+            if (!(k->sounding & (1u << v))) continue;
+            out[length++] = status;
+            out[length++] = k->note[v];
+            out[length++] = 0;
+        }
+        k->sounding = 0;
+    }
+    k->countdown = 0;
+    k->flam = 0;
+    k->flam_countdown = 0;
+    return length;
+}
+
+// Live mutes, note-off countdowns and a step's leftovers: a send of its own, never
+// through midi_buf. In RAM, as the rest of the kit path the timer ISR runs.
+static void __not_in_flash_func(kit_release)(uint8_t track) {
+    uint8_t message[KIT_VOICES * 3];
+    uint8_t length = kit_take_release(track, message);
+    if (length) midi_send_bytes(message, length);
+}
+
+// Stop, Panic, Start while playing and a play-mode change: every kit voice in one send,
+// queued before the Stop byte. The Stop, and a restart's Start and Clock, are real-time
+// bytes and may overtake it on the wire; it still goes before the next run's notes.
+// Its buffer is guarded by the playback lock all callers hold.
+static void kit_release_all(void) {
+    static uint8_t message[NUM_TRACKS * KIT_VOICES * 3];
+    uint16_t length = 0;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        length += kit_take_release(track, &message[length]);
+    }
+    if (length) midi_send_bytes(message, length);
+}
+
+// A kit step on an audible track: leftovers released first, then the step's Note Ons
+// into midi_buf in kit_voice_order. A flam plays its first hit at the note level and
+// arms its second hit, one level up, `flam_pulses` later; the step's note-off then
+// waits for the second hit's gate, up to the step boundary. In RAM.
+static void __not_in_flash_func(play_kit_step)(uint8_t track, const prepared_track_pattern_t *row,
+                                               uint8_t step) {
+    kit_release(track);              // leftovers only: the countdown ends by now
+    uint32_t word = row->kit.lanes[step];
+    if (!(word & 0x00FFFFFCu)) return;  // no voice lane set
+    kit_runtime_t *k = &kit_runtime[track];
+    // One release channel: no voice of an earlier step may still sound on another.
+    PLAYBACK_INVARIANT(k->sounding == 0 || k->channel == row->kit.channel);
+    k->channel = row->kit.channel;
+    uint8_t accent = (word & 3u) != 0;  // lane 0: AC
+    uint16_t flam = 0;
+    for (uint8_t i = 0; i < KIT_VOICES; i++) {
+        uint8_t v = kit_voice_order[i];
+        uint8_t value = (uint8_t)((word >> (2u * (v + 1u))) & 3u);
+        if (value == KIT_OFF) continue;
+        // note: AC ? accent : normal; accent: AC ? max : accent; flam: as a note.
+        uint8_t velocity = row->kit.vel[(value == KIT_ACCENT) + accent];
+        midi_buf_note_on(row->kit.channel, row->kit.note[v], velocity);
+        k->note[v] = row->kit.note[v];
+        k->sounding |= (uint16_t)(1u << v);
+        if (value == KIT_FLAM) flam |= (uint16_t)(1u << v);
+    }
+    k->countdown = row->kit.gate_pulses;
+    if (flam) {
+        unsigned off = (unsigned)row->kit.gate_pulses + row->kit.flam_pulses;
+        k->countdown = (uint8_t)(off < PULSES_PER_STEP ? off : PULSES_PER_STEP);
+        k->flam = flam;
+        k->flam_countdown = row->kit.flam_pulses;
+        k->flam_velocity = row->kit.vel[1 + accent];  // AC ? max : accent
+    }
+}
+
+// The most bytes the TX queue may hold once a flam's second hits are in it: 319, the
+// fill the first design allowed in a 512-byte queue (192 bytes left free). The cap
+// limits flams only; mandatory messages may fill the whole queue, whose headroom above
+// the cap covers scheduled playback (168 bytes in one pulse) and the releases and first
+// hits of an immediate restart (Start while playing, or Stop then Start).
+#define KIT_FLAM_MAX_QUEUED 319u
+_Static_assert(KIT_FLAM_MAX_QUEUED < MIDI_TX_QUEUE_SIZE - 1u, "the flam cap leaves headroom");
+
+// Pulse order step 4: the second hits of a kit's flam, per voice Note On velocity 0
+// then Note On at the flam velocity, in one send of their own, never through midi_buf.
+// The only kit message that may be dropped: skipped when the TX queue would then hold
+// more than KIT_FLAM_MAX_QUEUED bytes; the voices then sound on until their note-off.
+// In RAM.
+static void __not_in_flash_func(kit_play_flam)(uint8_t track) {
+    kit_runtime_t *k = &kit_runtime[track];
+    uint8_t message[KIT_VOICES * 6];
+    uint8_t length = 0;
+    uint8_t status = (uint8_t)(MIDI_NOTE_ON | k->channel);
+    for (uint8_t i = 0; i < KIT_VOICES; i++) {
+        uint8_t v = kit_voice_order[i];
+        if (!(k->flam & (1u << v))) continue;
+        message[length++] = status;
+        message[length++] = k->note[v];
+        message[length++] = 0;
+        message[length++] = status;
+        message[length++] = k->note[v];
+        message[length++] = k->flam_velocity;
+    }
+    k->flam = 0;
+    if (length && !midi_try_send_bytes_capped(message, length, KIT_FLAM_MAX_QUEUED)) {
+        jitter_stats.flam_drops++;
+    }
+}
+
+// ─── Installing prepared rows ───────────────────────────────────
+
+// Installs the row of the track's playing location when it changed. A row of the other
+// kind first releases what the old kind left sounding, in sends of their own before the
+// new row plays: the event note on its stored route (a tie or slide note has no
+// countdown), or every kit voice with a pending flam cancelled. Called with the playback
+// lock held, or by transport_start() stopped with that state cleared: nothing to release.
+static void load_prepared_track(uint8_t track) {
+    uint8_t old_kind = prepared_playback.track[track].kind;
+    uint32_t lock_state = seq_lock();
+    uint8_t pattern = g_seq.transport.current_pattern[track];
+    if (pattern >= MAX_PATTERNS) pattern = 0;
+    if (playback_pattern[track] != pattern ||
+        playback_revision[track] != prepared_revision[pattern][track]) {
+        prepared_playback.track[track] = prepared_patterns[pattern][track];
+        playback_revision[track] = prepared_revision[pattern][track];
+        playback_pattern[track] = pattern;
+    }
+    seq_unlock(lock_state);
+    if (prepared_playback.track[track].kind == old_kind) return;
+    if (old_kind == PREPARED_KIT) {
+        kit_release(track);
+    } else {
+        send_note_off_if_active(track);
+    }
+}
+
+// Applies the queued pattern; returns true when the playing location changed.
+static bool apply_track_queue_if_ready(uint8_t track) {
+    transport_t *t = (transport_t *)&g_seq.transport;
+    if (t->queued_pattern[track] == NO_QUEUED_PATTERN) return false;
+
+    bool changed = false;
+    uint32_t lock_state = seq_lock();
+    uint8_t queued = t->queued_pattern[track];
+    if (queued != NO_QUEUED_PATTERN) {
+        changed = t->current_pattern[track] != queued;
+        t->current_pattern[track] = queued;
+        t->queued_pattern[track] = NO_QUEUED_PATTERN;
+    }
+    seq_unlock(lock_state);
+    load_prepared_track(track);
+    return changed;
+}
+
 static void clear_runtime_note_state(void) {
     pending_gate_on = 0;
     pending_gate_off = 0;
@@ -368,13 +573,17 @@ static void clear_runtime_note_state(void) {
     for (int i = 0; i < NUM_TRACKS; i++) {
         note_off_countdown[i] = 0;
     }
+    memset(kit_runtime, 0, sizeof(kit_runtime));
 }
 
 static void stop_playback_outputs(void) {
+    kit_release_all();
+    // All note-offs in one MIDI send: one short TX lock section, not one per track.
     midi_buf_clear();
-    for (int i = 0; i < NUM_TRACKS; i++) {
-        send_note_off_if_active(i);
+    for (uint8_t i = 0; i < NUM_TRACKS; i++) {
+        prepare_note_off(i);
     }
+    midi_buf_flush();
     cv_gate_all_off();
     clear_runtime_note_state();
     midi_send_stop();
@@ -485,18 +694,34 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
 
     if ((t->pulse_count % (PPQN / MIDI_PPQN)) == 0) midi_send_clock();
 
-    // A mute cuts an already sounding note on the next internal pulse.
+    // A mute cuts an already sounding note on the next internal pulse. A kit with
+    // nothing sounding and no flam pending has nothing to release.
     uint8_t track_mutes = g_seq.track_mutes;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if (track_mutes & (1u << track)) send_note_off_if_active(track);
+        if (track_mutes & (1u << track)) {
+            send_note_off_if_active(track);
+            if (kit_runtime[track].sounding || kit_runtime[track].flam_countdown) {
+                kit_release(track);
+            }
+        }
     }
 
-    for (int track = 0; track < NUM_TRACKS; track++) {
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         if (note_off_countdown[track] > 0) {
             note_off_countdown[track]--;
             if (note_off_countdown[track] == 0) {
                 send_note_off_if_active(track);
             }
+        }
+        if (kit_runtime[track].countdown > 0 && --kit_runtime[track].countdown == 0) {
+            kit_release(track);
+        }
+    }
+
+    // Flam countdowns, after every note-off of this pulse.
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        if (kit_runtime[track].flam_countdown > 0 && --kit_runtime[track].flam_countdown == 0) {
+            kit_play_flam(track);
         }
     }
 
@@ -563,11 +788,17 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
 
             uint8_t track_step = (uint8_t)t->track_step_count[tr];
             t->current_track_step[tr] = track_step;
-            const prepared_track_event_t *event = &prepared->track[tr].step[track_step];
-            if (!(event->flags & STEP_FLAG_ACTIVE) || (track_mutes & (1u << tr))) {
-                prepare_note_off(tr);
+            const prepared_track_pattern_t *row = &prepared->track[tr];
+            if (row->kind == PREPARED_KIT) {
+                // A live mute released the voices in this pulse already.
+                if (!(track_mutes & (1u << tr))) play_kit_step((uint8_t)tr, row, track_step);
             } else {
-                prepare_trigger(tr, event, track_mutes);
+                const prepared_track_event_t *event = &row->step[track_step];
+                if (!(event->flags & STEP_FLAG_ACTIVE) || (track_mutes & (1u << tr))) {
+                    prepare_note_off(tr);
+                } else {
+                    prepare_trigger(tr, event, track_mutes);
+                }
             }
             t->track_step_count[tr]++;
         }
@@ -618,6 +849,9 @@ void sequencer_init(void) {
     jitter_reset_now();
     clear_runtime_note_state();
     memset(playback_pattern, NO_QUEUED_PATTERN, sizeof(playback_pattern));
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        kit_config_defaults(&g_seq.kit_config[track]);
+    }
     for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
         for (uint8_t track = 0; track < NUM_TRACKS; track++) {
             sequencer_refresh_track_playback(track, pattern);
@@ -685,9 +919,13 @@ void transport_start(void) {
     }
 
     seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
 
+    // Stopped, the timer ISR leaves the prepared rows alone: load them with
+    // interrupts on between tracks, not inside one long playback-lock section.
     for (uint8_t track = 0; track < NUM_TRACKS; track++) load_prepared_track(track);
 
+    playback_irq_state = playback_lock();
     lock_state = seq_lock();
     t = (transport_t *)&g_seq.transport;
     t->state = TRANSPORT_PLAYING;
@@ -923,6 +1161,7 @@ void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out) {
     out->last_isr_duration_us = jitter_stats.last_isr_duration_us;
     out->max_isr_duration_us = jitter_stats.max_isr_duration_us;
     out->overruns = jitter_stats.overruns;
+    out->flam_drops = jitter_stats.flam_drops;
     playback_unlock(playback_irq_state);
 }
 

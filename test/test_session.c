@@ -179,6 +179,67 @@ static void test_common_row(void) {
     CHECK(common_row() == 0xFF);
 }
 
+#define LANE_SD 2
+#define LANE_RC 11
+
+static void test_walk_stops_across_kit(void) {
+    uint8_t kits = 1u << 2;
+    uint8_t track = 1, lane = 0;
+    session_walk_stops(&track, &lane, 1, kits);         // right into the kit: AC
+    CHECK(track == 2 && lane == KIT_LANE_AC);
+    session_walk_stops(&track, &lane, 11, kits);
+    CHECK(track == 2 && lane == LANE_RC);
+    session_walk_stops(&track, &lane, 1, kits);         // out of it: one stop per track
+    CHECK(track == 3 && lane == 0);
+    session_walk_stops(&track, &lane, -1, kits);        // left into the kit: RC
+    CHECK(track == 2 && lane == LANE_RC);
+    track = 0;
+    lane = 0;
+    session_walk_stops(&track, &lane, 100, kits);       // clamped at the last stop
+    CHECK(track == 7 && lane == 0);
+    session_walk_stops(&track, &lane, -100, kits);      // and at the first
+    CHECK(track == 0 && lane == 0);
+}
+
+static void make_kit(uint8_t track) {
+    track_config_t config = g_seq.patterns[0].tracks[track];
+    config.type = TRACK_TYPE_KIT;
+    CHECK(seq_set_track_config(track, &config));
+}
+
+static void test_pad_on_kit_uses_remembered_lane(void) {
+    reset();
+    make_kit(1);
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) CHECK(session_kit_lane(t) == KIT_LANE_BD);
+    session_pad(1, 0, true);
+    session_focus_t f = session_get_focus();
+    CHECK(f.track == 1 && f.location == 0 && f.lane == KIT_LANE_BD);
+    session_move_focus(1);
+    f = session_get_focus();
+    CHECK(f.track == 1 && f.lane == LANE_SD);
+    CHECK(session_kit_lane(1) == LANE_SD);
+    session_move_focus(-3);                             // BD, AC, then track 0
+    CHECK(session_get_focus().track == 0);
+    session_pad(1, 0, true);
+    f = session_get_focus();
+    CHECK(f.track == 1 && f.location == 0 && f.lane == LANE_SD);
+    session_set_kit_lane(1, LANE_RC);
+    CHECK(session_kit_lane(1) == LANE_RC);
+    session_init();
+    CHECK(session_kit_lane(1) == KIT_LANE_BD);
+}
+
+static void test_lane_walk_keeps_location(void) {
+    reset();
+    g_seq.patterns[5].tracks[1].type = TRACK_TYPE_KIT;  // a kit in location 5 only
+    transport_set_mode(PLAY_MODE_SONG);
+    CHECK(!session_pad(1, 5, true));                     // rejected: track 1 stays on 0
+    CHECK(snap().current[1] == 0);
+    session_move_focus(1);
+    session_focus_t f = session_get_focus();
+    CHECK(f.track == 1 && f.location == 5 && f.lane == LANE_SD);
+}
+
 int main(void) {
     seq_lock_init();
     RUN(test_pad_queues_and_focuses);
@@ -195,5 +256,8 @@ int main(void) {
     RUN(test_move_focus_follows_queue_then_current);
     RUN(test_bank_change_keeps_focus);
     RUN(test_common_row);
+    RUN(test_walk_stops_across_kit);
+    RUN(test_pad_on_kit_uses_remembered_lane);
+    RUN(test_lane_walk_keeps_location);
     return 0;
 }

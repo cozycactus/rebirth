@@ -1,5 +1,6 @@
 #undef NDEBUG
 #include <assert.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include "pico/stdlib.h"
@@ -7,6 +8,7 @@
 #include "hardware/sync.h"
 #include "hardware/uart.h"
 #include "hardware/flash.h"
+#include "hardware/irq.h"
 #include "fake_hardware.h"
 #include "sequencer.h"
 
@@ -15,7 +17,10 @@ fake_timer_t *timer_hw = &timer;
 uint8_t fake_midi[FAKE_MIDI_CAPACITY] = {0};
 unsigned fake_midi_length;
 bool fake_uart_writable = true;
+unsigned fake_uart_budget = UINT_MAX;
+bool fake_uart_fifo_enabled = true;
 bool fake_uart_tx_irq;
+uint32_t fake_midi_time_us[FAKE_MIDI_CAPACITY];
 uint32_t fake_gates;
 unsigned fake_gate_rises;
 void (*fake_before_gate_commit)(void);
@@ -30,6 +35,13 @@ unsigned fake_flash_programs;
 uint32_t fake_flash_last_program_offset;
 unsigned fake_flash_program_limit = UINT32_MAX;
 static bool uart_drained;
+#define FAKE_UART_BYTE_US 320u      // 10 bits at 31,250 baud
+static bool wire_time;              // set by fake_uart_run_until()
+static uint32_t wire_free_at;       // when the last byte written has left the line
+// The PL011 with its FIFO off: a shift register and a one-byte holding register.
+// The holding register empties when its byte starts on the line, so the UART is
+// writable one byte time before the line is free: two bytes may be committed.
+static uint32_t uart_writable_at(void) { return wire_free_at - FAKE_UART_BYTE_US; }
 
 void fake_hardware_reset(void) {
     memset(&timer, 0, sizeof(timer));
@@ -38,7 +50,11 @@ void fake_hardware_reset(void) {
     memset(fake_gpio_pulls_disabled, 0, sizeof(fake_gpio_pulls_disabled));
     fake_midi_length = 0;
     fake_uart_writable = true;
+    fake_uart_budget = UINT_MAX;
+    fake_uart_fifo_enabled = true;
     fake_uart_tx_irq = false;
+    wire_time = false;
+    wire_free_at = 0;
     fake_gates = 0;
     fake_gate_rises = 0;
     fake_before_gate_commit = NULL;
@@ -116,21 +132,84 @@ void multicore_lockout_victim_init(void) {}
 void irq_set_exclusive_handler(int irq, void (*handler)(void)) { fake_irq_handlers[irq] = handler; }
 void irq_set_enabled(int irq, bool enabled) { (void)irq; (void)enabled; }
 void irq_clear(int irq) { (void)irq; }
-void uart_init(void *uart, uint32_t baud) { (void)uart; (void)baud; }
+// As in the SDK, uart_init() leaves the FIFOs enabled.
+void uart_init(void *uart, uint32_t baud) { (void)uart; (void)baud; fake_uart_fifo_enabled = true; }
 void uart_set_format(void *uart, int bits, int stop, int parity) {
     (void)uart; (void)bits; (void)stop; (void)parity;
 }
-void uart_set_fifo_enabled(void *uart, bool enabled) { (void)uart; (void)enabled; }
+void uart_set_fifo_enabled(void *uart, bool enabled) { (void)uart; fake_uart_fifo_enabled = enabled; }
 void uart_set_irq_enables(void *uart, bool rx, bool tx) {
     (void)uart; (void)rx; fake_uart_tx_irq = tx;
 }
-bool uart_is_writable(void *uart) { (void)uart; return fake_uart_writable; }
-void uart_putc_raw(void *uart, uint8_t value) {
+bool uart_is_writable(void *uart) {
     (void)uart;
-    assert(fake_uart_writable);
+    if (!fake_uart_writable || fake_uart_budget == 0) return false;
+    return !wire_time || (int32_t)(timer.timerawl - uart_writable_at()) >= 0;
+}
+void uart_putc_raw(void *uart, uint8_t value) {
+    assert(uart_is_writable(uart));
     assert(fake_midi_length < FAKE_MIDI_CAPACITY);
+    // A byte starts on the line when the byte before it has left, or now.
+    uint32_t start = timer.timerawl;
+    if (wire_time && (int32_t)(wire_free_at - start) > 0) start = wire_free_at;
+    fake_midi_time_us[fake_midi_length] = start;
     fake_midi[fake_midi_length++] = value;
+    if (fake_uart_budget != UINT_MAX) fake_uart_budget--;
+    wire_free_at = start + FAKE_UART_BYTE_US;
     uart_drained = false;
+}
+void fake_uart_run_until(uint32_t until_us) {
+    wire_time = true;
+    // The TX interrupt fires when the holding register empties: when the byte in it
+    // starts on the line, one byte time before the line is free.
+    while (fake_uart_tx_irq && (int32_t)(until_us - uart_writable_at()) > 0) {
+        uint32_t writable_at = uart_writable_at();
+        if ((int32_t)(writable_at - timer.timerawl) > 0) timer.timerawl = writable_at;
+        unsigned written = fake_midi_length;
+        assert(fake_irq_handlers[UART0_IRQ]);
+        fake_irq_handlers[UART0_IRQ]();
+        if (fake_midi_length == written) break; // held back by fake_uart_writable or the budget
+    }
+    if ((int32_t)(until_us - timer.timerawl) > 0) timer.timerawl = until_us;
+}
+
+static uint8_t fake_midi_message_length(uint8_t status) {
+    return (status & 0xE0) == 0xC0 ? 2 : 3; // Program Change and Channel Pressure: one data byte
+}
+
+unsigned fake_midi_decode(fake_midi_msg_t *out, unsigned max) {
+    unsigned count = 0;
+    uint8_t running = 0;
+    uint8_t data[2];
+    unsigned have = 0;
+    for (unsigned i = 0; i < fake_midi_length && count < max; i++) {
+        uint8_t byte = fake_midi[i];
+        if (byte >= 0xF8) {              // real-time: in place, running status kept
+            out[count++] = (fake_midi_msg_t){byte, 0, 0};
+            continue;
+        }
+        assert(byte < 0xF0);             // the firmware sends no system common messages
+        if (byte & 0x80) {               // a status byte drops any unfinished message
+            running = byte;
+            have = 0;
+            continue;
+        }
+        assert(running != 0);            // a data byte needs a status before it
+        data[have++] = byte;
+        if (have + 1u == fake_midi_message_length(running)) {
+            out[count++] = (fake_midi_msg_t){running, data[0], have > 1 ? data[1] : 0};
+            have = 0;
+        }
+    }
+    return count;
+}
+
+unsigned fake_midi_count(uint8_t status) {
+    static fake_midi_msg_t messages[FAKE_MIDI_CAPACITY];
+    unsigned decoded = fake_midi_decode(messages, FAKE_MIDI_CAPACITY);
+    unsigned count = 0;
+    for (unsigned i = 0; i < decoded; i++) count += messages[i].status == status;
+    return count;
 }
 void uart_tx_wait_blocking(void *uart) { (void)uart; uart_drained = true; }
 uint32_t save_and_disable_interrupts(void) { return 0; }

@@ -1,0 +1,68 @@
+{
+  "meta": {
+    "filename": "rebirth_panel.kicad_pro",
+    "version": 3
+  },
+  "schematic": {
+    "drawing": {
+      "intersheets_ref_show": true,
+      "intersheets_ref_short": false,
+      "intersheets_ref_own_page": false,
+      "intersheets_ref_prefix": "",
+      "intersheets_ref_suffix": ""
+    },
+    "legacy_lib_dir": "",
+    "legacy_lib_list": []
+  },
+  "sheets": [
+    [
+      "65b82959-825d-5e45-a1dc-5d5be934b069",
+      "Root"
+    ],
+    [
+      "c2c41d6c-7ff4-5b01-81ae-69d9bf81bd5e",
+      "Power"
+    ],
+    [
+      "636e3802-934b-5812-8f5f-4755ba9f4d7d",
+      "MCU"
+    ],
+    [
+      "2d22a816-c18d-52da-a611-805c3e6ca5bf",
+      "MIDI"
+    ],
+    [
+      "07e67a92-2f95-5d8b-923b-ff5cdb8ff568",
+      "CV_Gate"
+    ],
+    [
+      "b6520ed5-ab35-5f06-9f39-846b92059bfe",
+      "Main_link"
+    ],
+    [
+      "b0d802e2-bac7-5af2-b1c3-4799ef590f95",
+      "Top_strip"
+    ],
+    [
+      "9c3f97dd-2aee-5949-ae95-c5d0637321be",
+      "Step_row"
+    ],
+    [
+      "f63fa98e-bd2b-5191-b3aa-762b9a628adc",
+      "Key_matrix"
+    ],
+    [
+      "ecf67454-182a-5f58-819d-89fad3d3925b",
+      "RGB_chain"
+    ],
+    [
+      "a3831c90-0386-5c7a-afd3-28f926a7088a",
+      "Key_scanner"
+    ],
+    [
+      "abf01dad-dd43-5af0-b025-526d5d95c059",
+      "Panel_link"
+    ]
+  ],
+  "text_variables": {}
+}

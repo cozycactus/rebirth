@@ -6,7 +6,7 @@
 | --- | --- |
 | Core 1 timer IRQ | 96 PPQN timing, playheads, note durations, MIDI production, CV/gate output |
 | Core 0 main loop | Panel I2C polling (key matrix scan on two MCP23017, one bus step per pass; MCP23017 step buttons and LEDs), PLAY and encoders, edits, transport commands and launches; per ~33 ms frame: one transport snapshot, the RGB frame build and its LED DMA start, the OLED; stopped-only storage |
-| Core 0 UART IRQ | Drain pending MIDI bytes into UART0 |
+| Core 0 UART IRQ | Drain pending MIDI bytes into UART0, one byte per interrupt (hardware FIFO off) |
 
 The playback lock serializes the complete timer handler with Start, Stop,
 Continue, mode changes, selection and Panic. Stop/Panic return after any
@@ -37,10 +37,74 @@ these at initialization and after edits. A revision and row are published
 together under the shared lock. Playback copies a row only when its location or
 revision changes, at a step boundary. Song mode uses the same cache.
 
-The event cache occupies 28,928 bytes, plus revision counters and active rows.
+A row is tagged with its kind: the 16 events of a SYNTH or DRUM cell, or a
+kit row (below), in one union. The event cache occupies 29,696 bytes (256 rows
+of 116 bytes), plus revision counters and active rows.
 Pattern and song data remain the editable source of truth. Code editing a
 pattern must call `sequencer_refresh_track_playback()` after releasing the shared
 lock, including for locations not currently playing.
+
+## Kit Tracks
+
+A kit track plays 12 lanes per step (AC, BD, SD, LT, MT, HT, RS, CP, CH, OH,
+CC, RC) over MIDI only. Voice `v` is lane `v + 1`; every per-voice array is in
+lane order.
+
+- **Data.** `pattern_t.kit_steps[track][step]` is one `uint32_t` per step, lane
+  `i` in bits `2i..2i+1` (0 off, 1 note, 2 accent, 3 flam; AC is 0 or 1; bits
+  24-31 zero). It is used only where that location's `tracks[c].type` is
+  `TRACK_TYPE_KIT`; the cell's `step_t` data is untouched, so a type change
+  erases nothing. Kit settings (`kit_config_t`: 11 notes, `vel_normal`,
+  `vel_accent`, `vel_max`, `flam_pulses`) belong to the track, not the location,
+  in `g_seq.kit_config[]`; channel, gate length and stored mute come from
+  `track_config_t`. `seq_set_kit_config()` stores the settings (clamped) and
+  refreshes that track's 32 prepared rows, like `seq_set_track_config()`.
+- **Prepared kit row.** `lanes[16]` (the cell's step words, zeroed at and beyond
+  the length and when the stored mute is set), the 11 notes, the three
+  velocities, channel, gate pulses and flam pulses. It is self-contained, so the
+  revision and refresh path is the one the event rows use. A kit cell has a clip
+  when any voice lane (not AC) is non-zero within the length; a stored mute does
+  not hide it.
+- **Two-kit limit.** A track counts as a kit when its type is KIT in any
+  location; at most two tracks may be (`MAX_KIT_TRACKS`), so at most two kits
+  play at once, also in Song mode and with mixed launches. `seq_set_track_config()`
+  refuses a third kit before it changes anything and the save validator enforces
+  the same rule.
+- **Pulse order.** Each pulse: 1 MIDI Clock; 2 live mutes (a muted kit releases
+  its sounding voices and cancels a pending flam); 3 note-off countdowns;
+  4 flam countdowns (the second hits); 5 on a step boundary, the step. Kit
+  messages of 2-4 go out through their own send call, never through `midi_buf`,
+  which step 5 clears. With the gate at 100 % the countdown ends in step 3 of the
+  pulse that begins the next step, before its Note Ons.
+- **A kit step.** The voices go in the fixed order BD, SD, CP, CH, OH, RS, LT,
+  MT, HT, CC, RC. A note is `AC ? vel_accent : vel_normal`, an accent
+  `AC ? vel_max : vel_accent`, a flam plays its first hit at the note level and
+  its second hit one level up `flam_pulses` later as Note On velocity 0 then Note
+  On. The note-off countdown is `gate_pulses`, or
+  `min(PULSES_PER_STEP, gate_pulses + flam_pulses)` on a step with a flam. Note
+  Off of a kit voice is Note On with velocity 0, so a kit's messages share one
+  status byte; SYNTH and DRUM tracks still send 0x80. One release channel per
+  kit track: every voice is released at the latest at the next step boundary,
+  before that step's hits, so all sounding voices come from one step and share
+  the channel stored at that step; each keeps the note it was sent on. A
+  settings edit therefore cannot strand a note (host builds check the invariant
+  before a channel is stored).
+- **Kind change.** When a row of another kind is installed (type change, load),
+  the ISR first releases what the old kind left sounding. Stop, Panic, Start
+  while playing and a play-mode change queue a release of every sounding kit
+  voice before the MIDI Stop byte. The Stop, a real-time byte, may overtake
+  them on the wire, and so may the Start and Clock of a restart, also real-time
+  bytes; every voice is still released before the next run's notes.
+- **Flam cap.** A flam's second hits are the only kit message that may be
+  dropped. They are queued only if the TX queue then holds at most 319 bytes
+  (`KIT_FLAM_MAX_QUEUED`, through `midi_try_send_bytes_capped()`). Otherwise
+  the voices sound until their note-off and `flam_drops` goes up, one per kit
+  per flam pulse. It shows on the pattern-select screen as `FLAM DROP <n>`
+  when non-zero. The cap limits flams only: mandatory messages may fill the
+  whole queue (1,023 bytes), so about 700 bytes stay for scheduled playback
+  (two kits' note-offs and the worst step burst, 168 bytes as queued in one
+  pulse) and for the releases and first hits of an immediate restart. Two kits
+  flamming every voice keep every second hit up to 200 BPM.
 
 ## Playback Rules
 
@@ -99,7 +163,27 @@ At a step boundary, the engine stages MIDI and CV/gate changes, commits gate
 GPIO masks, then submits the MIDI batch. Gate edges are grouped; DAC writes and
 DIN messages are sequential. This does not make all outputs simultaneous.
 
-The 256-byte UART queue accepts complete messages or complete step batches.
+The 1,024-byte UART queue (1,023 bytes usable) accepts complete messages or
+complete step batches (`MIDI_BUF_SIZE` is 160 bytes; the worst step burst is 102
+bytes as stored, 82 on the wire). It keeps whole messages with their status
+bytes, and the drain applies running status as it writes: a status equal to the
+last one written is skipped, except on the first message after the queue ran
+empty (its last byte written), which always carries its status. Real-time bytes
+do not change the running status. The UART hardware FIFO is off and the drain
+writes one byte per writable check, so the TX interrupt runs once per byte on
+Core 0.
+
+Clock and transport bytes go ahead of note bytes. `midi_send_clock()` sets one
+pending-Clock flag (never a counter, so Clocks are not released in a bunch).
+Start, Continue and Stop wait in their own small queue. At each message
+boundary the drain sends a queued Start/Continue/Stop, then a pending Clock,
+then the next note message. A Clock byte may wait for the byte being shifted out
+and a complete channel message whose status is already in the holding register:
+up to four byte times, 1.28 ms, before interrupt latency, against up to about
+10 ms behind a kit burst without this rule. Stop,
+Panic and `midi_clear_output_queue()` clear the Clock flag, so no Clock follows
+a Stop; `midi_wait_output_idle()` waits for it too.
+
 FIFO checks, dequeues, writes and TX interrupt changes share one lock. Overflow
 stops playback and sends All Sound Off / All Notes Off instead of continuing
 with a truncated message. Panic discards software-queued output; hardware FIFO
@@ -114,9 +198,29 @@ timing noise. See [JITTER_MEASUREMENT.md](JITTER_MEASUREMENT.md).
 
 The last 128 KiB of the Pico's 2 MiB flash holds patterns and song data.
 Save/load require stopped transport. Save drains MIDI before suspending XIP and
-programs the validity header last. Version 5 adds CRC32. Load validates indices,
-lengths and configuration before replacing RAM. Version 4 has the same payload
-layout and is accepted after validation without a checksum.
+programs the validity header last. Load validates indices, lengths and
+configuration before replacing RAM.
+
+Format version 6 lays out a header page, the patterns (`MAX_PATTERNS` x the
+current `pattern_t`, rounded to a page), the song (rounded to a page) and the
+kit settings (`kit_config[NUM_TRACKS]`, rounded to a page). Its CRC32 covers the
+three payloads at their unpadded lengths. Versions 4 and 5 are still loaded:
+their patterns are the legacy record, which is the start of today's
+`pattern_t` (a byte prefix, 459 bytes on the RP2040; `kit_steps` follows at
+offset 460, after one padding byte), so the song sits at the offset after the
+page-rounded legacy patterns and the checksum covers the legacy lengths. Each
+legacy record is copied into a zeroed `pattern_t`, so the kit steps are empty
+and every kit setting gets its default. Version 4 has no checksum and
+is accepted after validation. Every offset and length is taken from the version
+and the compiler's type sizes, never hard-coded. Validation also requires: type
+KIT in at most two tracks across all locations, kit step bits 24-31 zero, AC 0 or
+1, and kit settings in range. The patterns payload is 31,104 bytes and the save
+builds each payload in a static RAM copy buffer padded to whole pages, so
+`.data` + `.bss` is about 110.5 KiB (see [HARDWARE_STATUS.md](HARDWARE_STATUS.md)).
+The save and the load first wait for MIDI output to go idle, then copy the
+patterns one location per `seq_lock()` section (then the song and the kit
+settings in one more), so Core 0's interrupts are never off for the whole
+31 KB copy.
 
 This is one save region. Power loss during erase/program may lose the previous
 save; an incomplete new save is rejected. Preserving the old save across power
@@ -258,5 +362,6 @@ during a pending gate commit. DAC command tests cover both gains. These tests do
 not measure RP2040 timing or analog voltages.
 
 Inspect the linked ELF/map for memory usage. Measure GPIO 7 and physical outputs
-under load before claiming an ISR budget or timing margin. See
+under load before claiming an ISR budget or timing margin; the kit track's ISR
+budget, wire-level Clock interval and Core 0 interrupts-off window are bench items. See
 [HARDWARE_STATUS.md](HARDWARE_STATUS.md) for remaining checks.
