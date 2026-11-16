@@ -16,10 +16,11 @@ typedef struct {
 #define PANEL_DEBOUNCE_MS 5
 #define PLAY_DEBOUNCE_MS 20
 #define PLAY_BUTTON_PIN 28
-#define PANEL_RETRY_MS 100   // between failed scanner configuration attempts
+#define PANEL_RETRY_MS 100   // after a failed scanner configuration attempt
 
 // Call after mcp23017_init (I2C0 is already up). Configures the scanner once
-// (the first poll retries a failure) and takes every key as held, like a
+// (the first poll retries at once if that fails; if the check after it fails,
+// the retry waits PANEL_RETRY_MS) and takes every key as held, like a
 // resync: a key or PLAY held at power-up does nothing.
 void panel_input_init(void);
 // Call on every ui_update pass; now_ms is the only clock this module sees.
@@ -32,11 +33,13 @@ void panel_input_init(void);
 // being reconfigured). Any I2C error, or a check that finds a chip changed
 // (reset), cancels every pending change and configures both chips again (a
 // pass of its own) before the next sample; reported states stay, so a key
-// held through it is not reported again. A failed configuration is retried
-// after PANEL_RETRY_MS, with nothing emitted meanwhile.
+// held through it is not reported again. A configuration attempt fails when
+// the configuration or the check after it fails; the next attempt then waits
+// PANEL_RETRY_MS, with no key event meanwhile (PLAY keeps working).
 void panel_input_poll(uint32_t now_ms);
-// The next queued event. The queue holds 32; a change that finds it full stays
-// pending until its column's next sample.
+// The next queued event. The queue holds 32; a key change that finds it full
+// stays pending until its column's next sample, a PLAY change until the next
+// poll.
 bool panel_input_next(panel_event_t *out);
 // After a flash stall or a panic: drops every queued event (PLAY included),
 // does no I2C and restarts the scan at the check. Every key is taken as held

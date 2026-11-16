@@ -314,7 +314,8 @@ static void inject(int kind, int txn) {
     }
 }
 
-#define HELD_ROW 3          // its SCENE key held and accepted throughout
+#define HELD_ROW 7          // its SCENE key held and accepted throughout; ROW7 is GPIOB,
+                            // the byte a read cut by a reset returns as 0xFF (up)
 #define DOWN_ROW 1          // in every column: closed at the window, then seen once
 #define UP_ROW 2            // in every column: accepted down, opened at the window, then seen once
 #define LATER_ROW 6
@@ -406,6 +407,9 @@ static void test_failed_u802_write_never_ghosts(void) {
     CHECK(take(e, 4) == 0);                 // nothing for row 3's pads
 }
 
+// After the resync every key is suppressed, so the event checks alone cannot
+// see a ghost. The guard is the fake's CHECK(columns_low <= 1) in
+// note_row_read: COL8 still low at the read of column 0 fails the test there.
 static void test_resync_with_col8_selected_never_ghosts(void) {
     start();
     panel_event_t e[4];
@@ -530,6 +534,48 @@ static void test_dead_bus_is_retried_at_most_every_100_ms(void) {
     CHECK(take(e, 4) == 1 && e[0].kind == PANEL_PLAY && e[0].down);
 }
 
+// 1 s of passes: how many configurations, checking each is at least
+// PANEL_RETRY_MS after the one before.
+static int paced_configurations(bool reset_u802_every_pass) {
+    int configurations = 0;
+    uint32_t last = 0;
+    for (int i = 0; i < 1000; i++) {
+        if (reset_u802_every_pass) fake_matrix_chip_reset(U802);
+        int txn = fake_matrix_txn;
+        uint32_t t = now_ms;
+        pass();
+        if (fake_matrix_txn - txn != 6) continue;      // only a configuration makes 6
+        CHECK(configurations == 0 || t - last >= PANEL_RETRY_MS);
+        last = t;
+        configurations++;
+    }
+    return configurations;
+}
+
+// The check after a configuration ends that attempt: when it fails, the next
+// attempt waits PANEL_RETRY_MS, as after a failed key_scan_init. On a bus where
+// writes work but every read fails, an attempt is six good writes, then the
+// check's pointer write and its failed read (a 2 ms timeout on the device). So
+// 1 s holds at most 11 attempts (one at once after the loss, then one per
+// 100 ms), so at most 12 failed reads with the first loss: the dead bus's
+// bound of 12 timeouts. Transfers: at most 4 for the step that failed, plus 8
+// per attempt.
+static void test_failed_first_check_is_a_failed_attempt(void) {
+    start();
+    panel_event_t e[4];
+    fake_matrix_fail_reads = true;
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    int txn = fake_matrix_txn;
+    CHECK(paced_configurations(false) <= 11);
+    CHECK(fake_matrix_txn - txn <= 4 + 11 * (6 + 2));
+    CHECK(take(e, 4) == 1 && e[0].kind == PANEL_PLAY && e[0].down);
+
+    // The same when the check reads a chip changed: U802 keeps resetting.
+    start();
+    CHECK(paced_configurations(true) <= 11);
+    CHECK(take(e, 4) == 0);
+}
+
 // ---- PLAY ----------------------------------------------------------------------
 
 static void test_play_button_debounce(void) {
@@ -632,7 +678,8 @@ static void test_resync_drops_pending_events(void) {
     CHECK(take(e, 4) == 0);
 }
 
-// It restarts the scan at the check and keeps the column selection.
+// It restarts the scan at the check, and COL8, left low, is released before
+// column 0 is read.
 static void test_resync_does_no_i2c(void) {
     start();
     until_sample_of(SCENE_COL);             // COL8 selected
@@ -644,7 +691,7 @@ static void test_resync_does_no_i2c(void) {
     CHECK(fake_matrix_txn - txn == 4);
     txn = fake_matrix_txn;
     CHECK(pass_samples(0));
-    CHECK(fake_matrix_txn - txn == 4);      // COL8 released first
+    CHECK(fake_matrix_txn - txn == 4);      // the U802 release comes first
     pass();                                 // mid-scan
     txn = fake_matrix_txn;
     panel_input_resync();
@@ -962,6 +1009,7 @@ int main(void) {
     RUN(test_init_failure_at_boot_recovers);
     RUN(test_failed_init_stays_in_recovery);
     RUN(test_dead_bus_is_retried_at_most_every_100_ms);
+    RUN(test_failed_first_check_is_a_failed_attempt);
     RUN(test_play_button_debounce);
     RUN(test_held_play_survives_resync_silently);
     RUN(test_play_held_through_resync_needs_a_stable_release);

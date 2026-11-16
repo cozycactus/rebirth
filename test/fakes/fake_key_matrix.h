@@ -38,6 +38,7 @@ extern bool fake_matrix_float_low;             // a floating pin reads low (defa
 extern int fake_matrix_txn;                    // transfers so far (failed ones included), 1-based numbering
 extern int fake_matrix_fail_txn;               // this transfer fails once (0 = none)
 extern int fake_matrix_fail_from;              // this transfer and all later ones fail (0 = none)
+extern bool fake_matrix_fail_reads;            // every read fails; writes are unaffected
 extern int fake_matrix_fail_bytes;             // a failing write first applies this many data bytes (0 = none, -1 = all)
 extern int fake_matrix_short_txn;              // this transfer returns one byte less than asked, data applied/filled up to there
 extern int fake_matrix_reset_txn;              // before this transfer, fake_matrix_chip_reset(fake_matrix_reset_addr)

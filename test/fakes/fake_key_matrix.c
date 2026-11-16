@@ -52,6 +52,7 @@ bool fake_matrix_float_low = true;
 int fake_matrix_txn;
 int fake_matrix_fail_txn;
 int fake_matrix_fail_from;
+bool fake_matrix_fail_reads;
 int fake_matrix_fail_bytes;
 int fake_matrix_short_txn;
 int fake_matrix_reset_txn;
@@ -88,6 +89,7 @@ void fake_matrix_reset(void) {
     fake_matrix_float_low = true;
     fake_matrix_txn = 0;
     fake_matrix_fail_txn = fake_matrix_fail_from = fake_matrix_fail_bytes = 0;
+    fake_matrix_fail_reads = false;
     fake_matrix_short_txn = fake_matrix_reset_txn = fake_matrix_reset_in_read_txn = 0;
     fake_matrix_reset_addr = 0;
     fake_matrix_wire_bytes = 0;
@@ -260,7 +262,7 @@ int i2c_read_timeout_us(i2c_inst_t *i2c, uint8_t addr, uint8_t *dst, size_t len,
     pointer_pending = -1;
 
     memset(dst, 0, len);
-    if (failing()) {
+    if (failing() || fake_matrix_fail_reads) {
         end(0);
         return PICO_ERROR_TIMEOUT;
     }

@@ -44,6 +44,7 @@ static debounce_t play;
 // accepted and no failed transfer or check since. Every scan starts with the
 // check, so no column is read before a check has passed.
 static bool scanner_configured;
+static bool scanner_checked;    // a check has passed since key_scan_init
 static bool retry_armed;        // the last configuration attempt failed
 static uint32_t retry_from_ms;
 static uint8_t scan_step;       // CHECK_STEP, or 1 + the column to sample
@@ -105,10 +106,12 @@ static void forget_play(void) {
 // A failed transfer or check: a chip may have reset, or a failed write may
 // have left a column low, so nothing is sampled until both chips are
 // configured and checked again. A pending change may rest on a bogus sample
-// and is cancelled, so every event rests on two good samples; a reported
-// state stays, since a scanner reads levels and a held key reads as held
-// after the re-init, not as a new press. A suppressed key needs two up
-// samples again.
+// and is cancelled, so a bogus first sight never settles: every event rests
+// on at least two samples, the first of them good (a chip that resets after
+// a check can still supply the settling sample of a change that was really
+// seen). A reported state stays, since a scanner reads levels and a held key
+// reads as held after the re-init, not as a new press. A suppressed key needs
+// two up samples again.
 static void lose_scanner(uint32_t now_ms) {
     scanner_configured = false;
     for (uint8_t row = 0; row < PANEL_ROWS; row++) {
@@ -120,13 +123,15 @@ static void lose_scanner(uint32_t now_ms) {
     }
 }
 
-// A configuration attempt is the whole of its pass's bus work, and the scan
-// after it starts with the check. An attempt after a failed one waits
-// PANEL_RETRY_MS, so a dead bus costs one timeout per 100 ms instead of one
-// per pass.
+// A configuration attempt is key_scan_init, the whole of its pass's bus work,
+// and then the check that starts the next pass: the attempt fails if either
+// does. An attempt after a failed one waits PANEL_RETRY_MS, so a dead bus, or
+// one on which only reads fail, costs one timeout per 100 ms instead of one
+// every pass or two.
 static void configure(uint32_t now_ms) {
     if (retry_armed && (uint32_t)(now_ms - retry_from_ms) < PANEL_RETRY_MS) return;
     scanner_configured = key_scan_init();
+    scanner_checked = false;
     retry_armed = !scanner_configured;
     retry_from_ms = now_ms;
     scan_step = CHECK_STEP;
@@ -146,15 +151,23 @@ static void sample_column(uint8_t col, uint8_t down, uint32_t now_ms) {
     }
 }
 
-// One bus step: the check, which runs between any two samples of a column so
-// that a chip reset gives at most one bogus sample per key, or one column.
+// One bus step: either the check, or the sample of one column. The check runs
+// between any two samples of a column, so a chip that resets gives each key at
+// most one bogus sample before it is found.
 static void scan_step_once(uint32_t now_ms) {
     if (scan_step == CHECK_STEP) {
         bool intact;
         if (!key_scan_check(&intact) || !intact) {
+            // The first check after a configuration ends that attempt, and it
+            // failed; a later one only loses the scanner, configured again at once.
+            if (!scanner_checked) {
+                retry_armed = true;
+                retry_from_ms = now_ms;
+            }
             lose_scanner(now_ms);
             return;
         }
+        scanner_checked = true;
         scan_step++;
         return;
     }
@@ -179,8 +192,11 @@ void panel_input_init(void) {
     forget_play();              // PLAY held at power-up does nothing
     hold_keys();                // nor does a key
     scan_step = CHECK_STEP;
-    retry_armed = false;        // a failed boot attempt is retried by the first poll
+    // A failed boot configuration is retried by the first poll; a configuration
+    // whose first check fails waits PANEL_RETRY_MS from that check.
+    retry_armed = false;
     scanner_configured = key_scan_init();
+    scanner_checked = false;
 }
 
 void panel_input_resync(void) {
