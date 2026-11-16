@@ -12,6 +12,11 @@
 
 ## Global Constraints
 
+These were written for Tasks 1-3 on `48bac06`. Task 4 moves the work onto the
+Session-panel `master`, where three of them change: the Performance view is
+now the Session view, encoder 2 short no longer calls `toggle_transport()`,
+and the host tests report `out of 11`.
+
 - The gesture exists only in `UI_PATTERN_VIEW`. Performance, Step Edit, Pattern Select, Track Config and Song Edit keep their current behaviour; the sequencer engine, storage format and step LEDs are not touched.
 - Every pattern write, taps included, happens under `seq_lock()`, and the pattern index is read under it. `sequencer_refresh_track_playback(track, pattern_index)` is called once after `seq_unlock()` whenever anything changed; activating a step counts as a change even if its values did not move. `toggle_transport()` and mode changes never run while `seq_lock()` is held.
 - Nothing is added to the Core 1 timer path or under the playback lock.
@@ -879,7 +884,7 @@ branch. The spec's "Port to master" section is the authority on behaviour.
   `render`, `check_info_line`); drop the branch's duplicate `tick`.
 - Every test that exists on `master` stays exactly as on `master`, with its
   `RUN` line. Tests of the old base that `master` removed stay removed.
-- All 32 gesture tests of Tasks 1-3 stay, with their assertions. Change one
+- All 31 gesture tests of Tasks 1-3 stay, with their assertions. Change one
   only where `master` forces it, and say in the report which and why. Known
   cases:
   - `enter_pattern_view()` now runs from the Session view, where encoder 1
