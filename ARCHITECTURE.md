@@ -21,8 +21,12 @@ What can delay the timer: Core 0 sections that hold the playback lock, i.e.
 transport commands, pad/scene launches, Panic and the per-frame transport
 snapshot (one short copy per frame, never one per UI pass); shared-lock
 sections the timer waits on; and bus or flash contention from Core 0, such as
-the LED DMA and Core 0 code running from flash through the XIP cache. Panel
-I2C polling, the LED frame build, display SPI, pattern conversion and flash
+the LED DMA and Core 0 code running from flash through the XIP cache. The
+snapshot, the only one of these that runs about 30 times a second, runs from
+RAM together with the lock helpers it calls (`seq_lock`, `seq_unlock`, the
+playback lock helpers), so its hold is a fixed short copy that never waits on
+an XIP cache miss; the user-triggered sections run from flash. Panel I2C
+polling, the LED frame build, display SPI, pattern conversion and flash
 writes do not run under the playback lock. A dual-core split alone does not
 establish physical jitter.
 

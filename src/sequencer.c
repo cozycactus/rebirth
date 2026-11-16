@@ -14,11 +14,12 @@ static uint32_t pulse_interval_us;
 static uint32_t playback_spinlock_num;
 
 // Lock order: playback -> shared state / MIDI. UI edits only take shared state.
-static uint32_t playback_lock(void) {
+// In RAM, like sequencer_snapshot, when the compiler keeps them out of line.
+static uint32_t __not_in_flash_func(playback_lock)(void) {
     return spin_lock_blocking(spin_lock_instance(playback_spinlock_num));
 }
 
-static void playback_unlock(uint32_t irq_state) {
+static void __not_in_flash_func(playback_unlock)(uint32_t irq_state) {
     spin_unlock(spin_lock_instance(playback_spinlock_num), irq_state);
 }
 
@@ -836,7 +837,10 @@ bool transport_launch(uint8_t track_mask, uint8_t pattern_index) {
     return true;
 }
 
-void sequencer_snapshot(transport_snapshot_t *out) {
+// Runs from RAM, as do the lock helpers it calls: it holds the playback lock
+// about 30 times a second, and a cache-cold run from XIP flash could stretch
+// that hold and delay the timer (MIDI Clock, gate edges).
+void __not_in_flash_func(sequencer_snapshot)(transport_snapshot_t *out) {
     if (!out) return;
     uint32_t playback_irq_state = playback_lock();
     uint32_t lock_state = seq_lock();
