@@ -425,12 +425,64 @@ static void test_nonplaying_editor_hides_playhead(void) {
     CHECK(memcmp(without_playhead, ssd1309_get_framebuffer(), sizeof(without_playhead)) == 0);
 }
 
+static void test_step_release_toggles_the_cell_focused_at_press(void) {
+    press_step(4);                          // cell (track 0, location 0)
+    panel(PANEL_PAD, 2, 3);                 // the focus moves by a pad
+    release_step(4);
+    CHECK(g_seq.patterns[0].steps[0][4].flags & STEP_FLAG_ACTIVE);
+    CHECK(!(g_seq.patterns[3].steps[2][4].flags & STEP_FLAG_ACTIVE));
+    press_step(5);                          // cell (2, 3)
+    deltas[0] = 1;                          // the focus moves by TRACK
+    ui_update();
+    CHECK(session_get_focus().track == 3 && session_get_focus().location == 0);
+    release_step(5);
+    CHECK(g_seq.patterns[3].steps[2][5].flags & STEP_FLAG_ACTIVE);
+    CHECK(!(g_seq.patterns[0].steps[3][5].flags & STEP_FLAG_ACTIVE));
+}
+
+static void test_step_long_press_opens_the_cell_focused_at_press(void) {
+    panel(PANEL_PAD, 2, 3);
+    press_step(6);                          // cell (2, 3)
+    deltas[0] = 1;
+    ui_update();                            // focus (3, 0)
+    long_step(6);
+    CHECK(ui.mode == UI_STEP_EDIT);
+    CHECK(ui.selected_track == 2 && g_seq.active_pattern[2] == 3 && ui.edit_step == 6);
+    release_step(6);
+    CHECK(!(g_seq.patterns[3].steps[2][6].flags & STEP_FLAG_ACTIVE));
+    CHECK(!(g_seq.patterns[0].steps[3][6].flags & STEP_FLAG_ACTIVE));
+}
+
+static void test_long_press_begun_on_another_screen_is_dropped(void) {
+    press_step(0);                          // held in the Session view...
+    press_encoder(1, BTN_LONG_PRESS);       // ...then the selector opens
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    long_step(0);
+    CHECK(ui.mode == UI_PATTERN_SELECT);    // no track config
+    release_step(0);
+    CHECK(g_seq.track_mutes == 0);
+    press_step(0);                          // pressed in the selector: its own
+    long_step(0);                           // long press still opens track config
+    CHECK(ui.mode == UI_TRACK_CONFIG && ui.config_track == 0);
+}
+
+static void test_second_held_step_does_not_toggle_in_the_editor(void) {
+    step_buttons.pressed = step_buttons.held = (1u << 2) | (1u << 3);
+    ui_update();
+    long_step(2);
+    CHECK(ui.mode == UI_STEP_EDIT && ui.edit_step == 2);
+    long_step(3);                           // pressed in the Session view
+    CHECK(ui.mode == UI_STEP_EDIT);
+    CHECK(!(g_seq.patterns[0].steps[0][3].flags & STEP_FLAG_ACTIVE));
+    CHECK(!(g_seq.patterns[0].steps[0][2].flags & STEP_FLAG_ACTIVE));
+}
+
 static void test_track_config_edit_reaches_all_locations(void) {
     uint8_t old = g_seq.patterns[0].tracks[0].midi_channel;
     press_encoder(1, BTN_LONG_PRESS);
     CHECK(ui.mode == UI_PATTERN_SELECT);
-    step_buttons.long_pressed = 1;
-    ui_update();
+    press_step(0);                  // a long press needs a press on this screen
+    long_step(0);
     CHECK(ui.mode == UI_TRACK_CONFIG);
     step_buttons.long_pressed = 0;
     deltas[0] = 1;
@@ -696,6 +748,10 @@ int main(int argc, char **argv) {
     RUN(test_session_oled_renders);
     RUN(test_pad_launch_decides_and_writes_atomically);
     RUN(test_scene_cancel_decides_and_writes_atomically);
+    RUN(test_step_release_toggles_the_cell_focused_at_press);
+    RUN(test_step_long_press_opens_the_cell_focused_at_press);
+    RUN(test_long_press_begun_on_another_screen_is_dropped);
+    RUN(test_second_held_step_does_not_toggle_in_the_editor);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS all six OLED views render");

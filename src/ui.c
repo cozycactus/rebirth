@@ -33,8 +33,10 @@ typedef enum {
 typedef struct {
     ui_mode_t mode;
     bool panic_latched;
+    uint16_t step_gestures;         // steps pressed on this screen, still held
     uint16_t select_short_pending;
     uint16_t step_short_pending;    // SESSION: steps pressed here, toggled on release
+    session_focus_t step_cell[STEPS_PER_PATTERN]; // SESSION: cell focused at each press
 
     // PATTERN_VIEW
     uint8_t selected_track;         // 0–7
@@ -88,11 +90,19 @@ static uint8_t clamp_pattern_length(uint8_t len) {
 static uint16_t take_short_releases(uint16_t *pending, const step_buttons_t *steps,
                                     uint16_t mask, uint16_t *long_presses) {
     *pending |= steps->pressed & mask;
-    if (long_presses) *long_presses = steps->long_pressed & *pending & mask;
+    if (long_presses) *long_presses = steps->long_pressed & *pending;
     *pending &= (uint16_t)~steps->long_pressed;
-    uint16_t short_releases = steps->released & *pending & mask;
+    uint16_t short_releases = steps->released & *pending;
     *pending &= (uint16_t)~steps->released;
     return short_releases;
+}
+
+// Forgets every step gesture in progress: on a screen change, a panic and a
+// flash save/load. Keys still held then never act on release or long press.
+static void drop_step_gestures(void) {
+    ui.step_gestures = 0;
+    ui.select_short_pending = 0;
+    ui.step_short_pending = 0;
 }
 
 // Toggles the steps in `mask` of one track at one location and refreshes its
@@ -136,8 +146,7 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
         // Panel keys held through the panic must not fire afterwards.
         panel_input_resync();
         ui.panic_latched = true;
-        ui.select_short_pending = 0;
-        ui.step_short_pending = 0;
+        drop_step_gestures();
         ui.mode = UI_SESSION;
         show_notify("PANIC: ALL OFF");
         return true;
@@ -261,27 +270,34 @@ static void handle_session_view(int8_t e1d, int8_t e2d,
     // A step pressed here and released on another screen does nothing.
     if (ui.mode != UI_SESSION) return;
 
-    // Steps edit the focused cell; steps beyond its length do nothing.
+    // A step press belongs to the cell focused when it was made, whatever the
+    // focus does before release; steps beyond that cell's length do nothing.
     uint8_t len = clamp_pattern_length(
         pattern_get_track_length(&g_seq.patterns[focus.location], focus.track));
     uint16_t in_length = (uint16_t)((1u << len) - 1u);
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (steps->pressed & in_length & (1u << s)) ui.step_cell[s] = focus;
+    }
 
     // Only keys pressed in this view count: a short press toggles on release,
     // a long press opens the step editor on that step without toggling it.
     uint16_t long_presses;
     uint16_t short_releases = take_short_releases(&ui.step_short_pending, steps,
                                                   in_length, &long_presses);
-    toggle_steps(focus.track, focus.location, short_releases);
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (short_releases & (1u << s)) {
+            toggle_steps(ui.step_cell[s].track, ui.step_cell[s].location,
+                         (uint16_t)(1u << s));
+        }
+    }
 
-    if (long_presses) {
-        for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
-            if (long_presses & (1u << s)) {
-                target_focus(focus);
-                ui.edit_step = s;
-                ui.step_edit_return = UI_SESSION;
-                ui.mode = UI_STEP_EDIT;
-                break;
-            }
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (long_presses & (1u << s)) {
+            target_focus(ui.step_cell[s]);
+            ui.edit_step = s;
+            ui.step_edit_return = UI_SESSION;
+            ui.mode = UI_STEP_EDIT;
+            break;
         }
     }
 }
@@ -1018,6 +1034,11 @@ void ui_update(void) {
     // 4. Global panel controls (no lock held), then the screen's own handler
     handle_panel_events();
 
+    // A long press counts only for a step pressed on the screen it fires on.
+    ui_mode_t screen = ui.mode;
+    ui.step_gestures |= steps->pressed;
+    steps->long_pressed &= ui.step_gestures;
+
     switch (ui.mode) {
         case UI_SESSION:
             handle_session_view(e1d, e2d, e1b, e2b, steps);
@@ -1042,9 +1063,9 @@ void ui_update(void) {
     // 5. Update step-button LEDs for current UI mode.
     update_step_leds();
 
-    // 6. Clear consumed button events
-    if (ui.mode != UI_PATTERN_SELECT) ui.select_short_pending = 0;
-    if (ui.mode != UI_SESSION) ui.step_short_pending = 0;
+    // 6. Clear consumed button events; a screen change ends every gesture.
+    ui.step_gestures &= (uint16_t)~steps->released;
+    if (ui.mode != screen) drop_step_gestures();
     steps->pressed = 0;
     steps->released = 0;
     steps->long_pressed = 0;
