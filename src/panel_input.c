@@ -106,10 +106,10 @@ static void forget_play(void) {
 // A failed transfer or check: a chip may have reset, or a failed write may
 // have left a column low, so nothing is sampled until both chips are
 // configured and checked again. A pending change may rest on a bogus sample
-// and is cancelled, so a bogus first sight never settles: every event rests
-// on at least two samples, the first of them good (a chip that resets after
-// a check can still supply the settling sample of a change that was really
-// seen). A reported state stays, since a scanner reads levels and a held key
+// and is cancelled, so a bogus first sight never settles; and a settling
+// sample counts only once the check after it has passed (scan_step_once), so
+// every event, and every end of a suppression, rests on at least two good
+// samples. A reported state stays, since a scanner reads levels and a held key
 // reads as held after the re-init, not as a new press. A suppressed key needs
 // two up samples again.
 static void lose_scanner(uint32_t now_ms) {
@@ -137,6 +137,27 @@ static void configure(uint32_t now_ms) {
     scan_step = CHECK_STEP;
 }
 
+// True when this sample would settle the key: report its change, or end its
+// suppression. It runs see() and settle() on a copy, so it cannot disagree
+// with sample_column.
+static bool would_settle(const debounce_t *d, bool down, uint32_t now_ms) {
+    debounce_t next = *d;
+    see(&next, down, now_ms);
+    return settle(&next, now_ms, PANEL_DEBOUNCE_MS) || next.suppressed != d->suppressed;
+}
+
+static bool column_would_settle(uint8_t col, uint8_t down, uint32_t now_ms) {
+    for (uint8_t row = 0; row < PANEL_ROWS; row++) {
+        if (would_settle(&keys[row][col], (down >> row) & 1u, now_ms)) return true;
+    }
+    return false;
+}
+
+static bool scanner_intact(void) {
+    bool intact;
+    return key_scan_check(&intact) && intact;
+}
+
 // The column's eight keys, from its fresh sample (bit r = ROW r down).
 static void sample_column(uint8_t col, uint8_t down, uint32_t now_ms) {
     for (uint8_t row = 0; row < PANEL_ROWS; row++) {
@@ -151,13 +172,17 @@ static void sample_column(uint8_t col, uint8_t down, uint32_t now_ms) {
     }
 }
 
-// One bus step: either the check, or the sample of one column. The check runs
-// between any two samples of a column, so a chip that resets gives each key at
-// most one bogus sample before it is found.
+// One bus step: either the check, or the sample of one column. The check
+// starts every scan, so it runs between any two samples of a column and
+// cancels a bogus first sight before the key's next sample. A chip that resets
+// after that check could still give the sample that settles a change, so such
+// a sample is proved first: the check runs again right after it, in the same
+// pass (the canaries are read after the data), and the sample counts only if
+// the check passes. A pass is then at most 8 transfers: 4 for the column, 4
+// for the check. The next scan still starts with its own check.
 static void scan_step_once(uint32_t now_ms) {
     if (scan_step == CHECK_STEP) {
-        bool intact;
-        if (!key_scan_check(&intact) || !intact) {
+        if (!scanner_intact()) {
             // The first check after a configuration ends that attempt, and it
             // failed; a later one only loses the scanner, configured again at once.
             if (!scanner_checked) {
@@ -175,6 +200,10 @@ static void scan_step_once(uint32_t now_ms) {
     uint8_t down;
     if (!key_scan_column(col, &down)) {
         lose_scanner(now_ms);
+        return;
+    }
+    if (column_would_settle(col, down, now_ms) && !scanner_intact()) {
+        lose_scanner(now_ms);           // the sample is not applied
         return;
     }
     sample_column(col, down, now_ms);

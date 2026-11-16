@@ -141,6 +141,26 @@ static void start(void) {
     scans(3);
 }
 
+// One pass that must be the scan's check, and pass.
+static void pass_check(void) {
+    int txn = fake_matrix_txn;
+    CHECK(pass_samples(-1));
+    CHECK(fake_matrix_txn - txn == 4);
+}
+
+// The next two passes: a column (1-7, after the one before it) whose sample
+// would settle a key, on a chip that reset after the scan's check, then the
+// pass after it. True when the check followed the sample in its own pass and
+// found the reset, so the next pass configured the scanner again.
+static bool settling_sample_is_checked(void) {
+    int txn = fake_matrix_txn;
+    pass();
+    bool checked = fake_matrix_txn - txn == 3 + 4;  // the column step, then the check
+    txn = fake_matrix_txn;
+    pass();
+    return checked && fake_matrix_txn - txn == 6;   // a configuration
+}
+
 // ---- Matrix -------------------------------------------------------------------
 
 static void test_keys_map_to_controls(void) {
@@ -243,11 +263,18 @@ static void test_one_column_low_per_read_in_scan_order(void) {
     }
 }
 
+// A pass makes one bus step: a configuration (6 writes, nothing else), the
+// check (4), or a column (3-4), then the check after it when its sample would
+// settle a key (7-8). Keys keep changing, so samples settle.
 static void test_one_bus_step_per_poll(void) {
     start();
     for (int k = 0; k < KEYS; k += 7) fake_matrix_key[k / COLS][k % COLS] = true;
-    int faults = 0, configurations = 0;
+    int faults = 0, configurations = 0, checked_samples = 0;
     for (int i = 0; i < 40 * SCAN_PASSES; i++) {
+        if (i % 13 == 0) {
+            int k = (i / 13 * 11) % KEYS;
+            fake_matrix_key[k / COLS][k % COLS] = !fake_matrix_key[k / COLS][k % COLS];
+        }
         if (i % 37 == 5) {                  // this pass's first transfer fails
             fake_matrix_fail_txn = fake_matrix_txn + 1;
             faults++;
@@ -260,13 +287,15 @@ static void test_one_bus_step_per_poll(void) {
         fake_matrix_low_column = -1;
         pass();
         int transfers = fake_matrix_txn - txn;
-        if (transfers > 4) {
-            CHECK(transfers == 6);          // a configuration, and nothing else in its pass
+        CHECK(transfers <= 4 + 4);          // a column, then the check
+        if (transfers == 6) {               // a configuration, and nothing else in its pass
             CHECK(fake_matrix_low_column == -1);
             configurations++;
         }
+        if (transfers > 6) checked_samples++;
     }
     CHECK(faults > 0 && configurations == faults);
+    CHECK(checked_samples > 0);
 }
 
 // ---- Faults ----------------------------------------------------------------------
@@ -298,9 +327,120 @@ static void test_single_sample_never_settles(void) {
     CHECK(take(e, 4) == 0);
 }
 
+// A chip that resets after the scan's check can still give the sample that
+// would settle a change; the check after that sample must catch it. Four
+// cases on key (2, 5) or (7, 5): column 5 is sampled six passes after the
+// check, and five passes after column 4.
+
+// A tap seen closed on one good sample, then U801 resets and its rows float
+// low, so the next sample reads the key closed again: the tap is lost (the
+// contract), and the key works normally afterwards.
+static void test_reset_after_the_check_never_settles_a_tap(void) {
+    start();
+    panel_event_t e[4];
+    fake_matrix_key[2][5] = true;
+    until_sample_of(5);                     // seen closed once
+    fake_matrix_key[2][5] = false;
+    until_sample_of(MUTE_COL);
+    pass_check();
+    fake_matrix_chip_reset(U801);           // every row reads low: every key closed
+    passes(5);                              // columns 0-4: first sights
+    bool checked = settling_sample_is_checked();
+    scans(15);
+    CHECK(take(e, 4) == 0);
+    CHECK(checked);
+    fake_matrix_key[2][5] = true;
+    scans(3);
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 2, 5, true));
+    fake_matrix_key[2][5] = false;
+    scans(3);
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 2, 5, false));
+}
+
+// A held key chatters open for one good sample, then U801 resets and its rows
+// float high, so the next sample reads the key open again: no release, and no
+// second press when it reads held after the re-init.
+static void test_reset_after_the_check_never_settles_a_chatter(void) {
+    start();
+    panel_event_t e[4];
+    fake_matrix_key[2][5] = true;
+    scans(3);
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 2, 5, true));
+    fake_matrix_key[2][5] = false;
+    until_sample_of(5);                     // the chatter: seen open once
+    fake_matrix_key[2][5] = true;
+    until_sample_of(MUTE_COL);
+    pass_check();
+    fake_matrix_float_low = false;
+    fake_matrix_chip_reset(U801);           // every row reads high: every key open
+    passes(5);
+    bool checked = settling_sample_is_checked();
+    scans(15);
+    CHECK(take(e, 4) == 0);                 // held throughout: nothing
+    CHECK(checked);
+    fake_matrix_key[2][5] = false;
+    scans(3);
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 2, 5, false));
+}
+
+// The same chatter on a key in ROW7, with U801 resetting inside the row read:
+// GPIOA comes back, then GPIOB as 0xFF, so ROW7 reads open.
+static void test_reset_inside_the_row_read_never_settles_a_chatter(void) {
+    start();
+    panel_event_t e[4];
+    fake_matrix_key[7][5] = true;
+    scans(3);
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 7, 5, true));
+    fake_matrix_key[7][5] = false;
+    until_sample_of(5);                     // the chatter
+    fake_matrix_key[7][5] = true;
+    until_sample_of(4);                     // past the check
+    fake_matrix_reset_in_read_txn = fake_matrix_txn + 3;    // column 5: select, pointer, read
+    bool checked = settling_sample_is_checked();
+    scans(15);
+    CHECK(take(e, 4) == 0);
+    CHECK(checked);
+    fake_matrix_key[7][5] = false;
+    scans(3);
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 7, 5, false));
+}
+
+// After a resync the held key is suppressed. It chatters open for one good
+// sample, then U801 resets and its rows float high, so the key reads open on
+// two samples: that would end its suppression, and it would press again once
+// it reads held after the re-init. It stays suppressed instead; a real
+// release ends that silently, and the next press is normal.
+static void test_reset_after_the_check_never_ends_a_suppression(void) {
+    start();
+    panel_event_t e[4];
+    fake_matrix_key[2][5] = true;
+    scans(3);
+    CHECK(take(e, 4) == 1);
+    panel_input_resync();
+    scans(3);                               // every other key's suppression is over
+    fake_matrix_key[2][5] = false;
+    until_sample_of(5);                     // the chatter
+    fake_matrix_key[2][5] = true;
+    until_sample_of(MUTE_COL);
+    pass_check();
+    fake_matrix_float_low = false;
+    fake_matrix_chip_reset(U801);
+    passes(5);
+    bool checked = settling_sample_is_checked();
+    scans(15);
+    CHECK(take(e, 4) == 0);                 // held throughout: nothing
+    CHECK(checked);
+    fake_matrix_key[2][5] = false;          // a real release ends the suppression
+    scans(3);
+    CHECK(take(e, 4) == 0);
+    fake_matrix_key[2][5] = true;
+    scans(3);
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 2, 5, true));
+}
+
 enum {
-    FAIL_ONCE, FAIL_FIRST_BYTE_LANDED, SHORT_COUNT, RESET_U801, RESET_U802, RESET_IN_READ,
-    FAULT_KINDS
+    FAIL_ONCE, FAIL_FIRST_BYTE_LANDED, SHORT_COUNT, RESET_U801, RESET_U801_FLOAT_HIGH,
+    RESET_U802, RESET_IN_READ, FAULT_KINDS
 };
 
 static void inject(int kind, int txn) {
@@ -309,6 +449,11 @@ static void inject(int kind, int txn) {
         case FAIL_FIRST_BYTE_LANDED: fake_matrix_fail_txn = txn; fake_matrix_fail_bytes = 1; break;
         case SHORT_COUNT: fake_matrix_short_txn = txn; break;
         case RESET_U801: fake_matrix_reset_txn = txn; fake_matrix_reset_addr = U801; break;
+        case RESET_U801_FLOAT_HIGH:
+            fake_matrix_reset_txn = txn;
+            fake_matrix_reset_addr = U801;
+            fake_matrix_float_low = false;
+            break;
         case RESET_U802: fake_matrix_reset_txn = txn; fake_matrix_reset_addr = U802; break;
         case RESET_IN_READ: fake_matrix_reset_in_read_txn = txn; break;
     }
@@ -316,46 +461,66 @@ static void inject(int kind, int txn) {
 
 #define HELD_ROW 7          // its SCENE key held and accepted throughout; ROW7 is GPIOB,
                             // the byte a read cut by a reset returns as 0xFF (up)
+#define CHATTER_COL MUTE_COL    // HELD_ROW's MUTE key: accepted down, open for the window's
+                                // first scan only
 #define DOWN_ROW 1          // in every column: closed at the window, then seen once
 #define UP_ROW 2            // in every column: accepted down, opened at the window, then seen once
+#define TAP_ROW 3           // in every column: closed for the window's first scan only
 #define LATER_ROW 6
 #define LATER_COL 5
 
-// Up to the window: the held key and the UP_ROW keys accepted down, then a
-// failed transfer, so the window opens with a configuration; the DOWN_ROW and
-// UP_ROW keys change right before it. Each column is seen once in the window's
-// first scan and again in its second, so from the first column step to the end
-// some key of each pending kind has been seen exactly once. None can be at a
-// fault in the configuration: one only follows a loss, which cancels them.
-// Returns the transfer count at the window.
+// Up to the window: the held keys and the UP_ROW keys accepted down, then a
+// failed transfer, so the window opens with a configuration; the DOWN_ROW,
+// UP_ROW, TAP_ROW and chatter keys change right before it. Each column is
+// seen once in the window's first scan and again in its second, so from the
+// first column step to the end some key of each pending kind has been seen
+// exactly once. None can be at a fault in the configuration: one only follows
+// a loss, which cancels them. Returns the transfer count at the window.
 static int open_window(void) {
     start();
     fake_matrix_key[HELD_ROW][SCENE_COL] = true;
+    fake_matrix_key[HELD_ROW][CHATTER_COL] = true;
     for (int col = 0; col < COLS; col++) fake_matrix_key[UP_ROW][col] = true;
     scans(3);
-    CHECK(log_count == 1 + COLS);
+    CHECK(log_count == 2 + COLS);
     log_count = 0;
     fake_matrix_fail_txn = fake_matrix_txn + 1;
     pass();
     fake_matrix_fail_txn = 0;
+    fake_matrix_key[HELD_ROW][CHATTER_COL] = false;
     for (int col = 0; col < COLS; col++) {
         fake_matrix_key[DOWN_ROW][col] = true;
         fake_matrix_key[UP_ROW][col] = false;
+        fake_matrix_key[TAP_ROW][col] = true;
     }
     return fake_matrix_txn;
 }
 
+// The window: the configuration and the first scan; then the taps and the
+// chatter end, so they change between two samples of their columns (they last
+// those 12 passes, in which no column is sampled twice: so neither may ever be
+// reported); then the second scan, whose samples settle the DOWN_ROW and
+// UP_ROW keys.
+static void run_window(void) {
+    passes(1 + SCAN_PASSES);
+    fake_matrix_key[HELD_ROW][CHATTER_COL] = true;
+    for (int col = 0; col < COLS; col++) fake_matrix_key[TAP_ROW][col] = false;
+    passes(SCAN_PASSES);
+}
+
 static void test_fault_at_every_transfer(void) {
-    // The window, fault-free: a configuration, then two scans.
+    // The window, fault-free: a configuration, then two scans, each sample of
+    // the second followed by the check.
     int window_from = open_window();
-    passes(1 + 2 * SCAN_PASSES);
+    run_window();
     int window = fake_matrix_txn - window_from;
-    CHECK(window >= 6 + 2 * 30);
+    CHECK(window >= 6 + 2 * 30 + COLS * 4);
 
     for (int kind = 0; kind < FAULT_KINDS; kind++) {
         for (int k = 1; k <= window; k++) {
             int from = open_window();
             inject(kind, from + k);
+            run_window();
             scans(15);                      // a retry period, then the scanner is back
             // Only the real changes, each once: no phantom, the held key never
             // reported again.
@@ -1001,6 +1166,10 @@ int main(void) {
     RUN(test_one_column_low_per_read_in_scan_order);
     RUN(test_one_bus_step_per_poll);
     RUN(test_single_sample_never_settles);
+    RUN(test_reset_after_the_check_never_settles_a_tap);
+    RUN(test_reset_after_the_check_never_settles_a_chatter);
+    RUN(test_reset_inside_the_row_read_never_settles_a_chatter);
+    RUN(test_reset_after_the_check_never_ends_a_suppression);
     RUN(test_fault_at_every_transfer);
     RUN(test_failed_u802_write_never_ghosts);
     RUN(test_resync_with_col8_selected_never_ghosts);
