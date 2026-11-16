@@ -377,6 +377,33 @@ static void test_full_ring_keeps_changes_pending(void) {
     CHECK(drain(e + 32, 32) == 8);
 }
 
+static void test_overflow_keeps_play_events_in_a_wrapped_ring(void) {
+    reset();
+    panel_event_t e[40];
+    uint32_t t = 0;
+    for (int batch = 0; batch < 3; batch++) {
+        for (int i = 0; i < 10; i++) key_press(batch, i);
+        panel_input_poll(t++);
+    }
+    for (int i = 0; i < 30; i++) panel_input_poll(t++);
+    CHECK(drain(e, 40) == 30);  // the ring head now sits at slot 30
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    for (int i = 0; i < 20; i++) panel_input_poll(t++);   // PLAY down: slot 30
+    key_press(5, 0);
+    for (int i = 0; i < 10; i++) panel_input_poll(t++);   // key: slot 31
+    fake_gpio_level[PLAY_BUTTON_PIN] = true;
+    key_press(5, 1);
+    for (int i = 0; i < 30; i++) panel_input_poll(t++);   // key: slot 0, PLAY up: slot 1
+    key_press(5, 2);
+    for (int i = 0; i < 12; i++) panel_input_poll(t++);   // key: slot 2
+    for (int i = 0; i < 12; i++) key_press(i % 8, 3 + i % 7);
+    for (int i = 0; i < 30; i++) panel_input_poll(t++);   // overflow
+    int n = drain(e, 40);
+    CHECK(n == 2);
+    CHECK(e[0].kind == PANEL_PLAY && e[0].down);
+    CHECK(e[1].kind == PANEL_PLAY && !e[1].down);
+}
+
 int main(void) {
     RUN(test_init_configures_keypad);
     RUN(test_key_codes_map_to_controls);
@@ -395,5 +422,6 @@ int main(void) {
     RUN(test_queued_play_survives_overflow);
     RUN(test_init_failure_at_boot_recovers);
     RUN(test_full_ring_keeps_changes_pending);
+    RUN(test_overflow_keeps_play_events_in_a_wrapped_ring);
     return 0;
 }

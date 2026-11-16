@@ -59,11 +59,13 @@ static bool play_pin_down(void) {
 // Releases every key silently and drops queued key events; PLAY events stay.
 static void clear_keys(void) {
     memset(keys, 0, sizeof(keys));
+    panel_event_t kept_events[EVENT_RING_SIZE];
     uint8_t kept = 0;
     for (uint8_t i = 0; i < ring_count; i++) {
         panel_event_t event = ring[(ring_head + i) % EVENT_RING_SIZE];
-        if (event.kind == PANEL_PLAY) ring[kept++] = event;
+        if (event.kind == PANEL_PLAY) kept_events[kept++] = event;
     }
+    memcpy(ring, kept_events, kept * sizeof(ring[0]));
     ring_head = 0;
     ring_count = kept;
 }
