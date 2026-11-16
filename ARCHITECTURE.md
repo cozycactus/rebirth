@@ -91,14 +91,16 @@ lane order.
   voice before the MIDI Stop byte. The Stop, a real-time byte, may overtake
   them on the wire, and so may the Start and Clock of a restart, also real-time
   bytes; every voice is still released before the next run's notes.
-- **Flam reserve.** A flam's second hits are the only kit message that may be
-  dropped. Flam second hits must leave 288 TX queue bytes free
-  (`KIT_FLAM_RESERVE`); the headroom covers the releases and new first hits of
-  an immediate restart as well as scheduled playback (two kits' note-offs and
-  the worst step burst, 168 bytes as queued in one pulse). Otherwise the voices
-  sound until their note-off and `flam_drops` goes up, one per kit per flam
-  pulse. It shows on the pattern-select screen as `FLAM DROP <n>` when
-  non-zero.
+- **Flam cap.** A flam's second hits are the only kit message that may be
+  dropped. They are queued only if the TX queue then holds at most 319 bytes
+  (`KIT_FLAM_MAX_QUEUED`, through `midi_try_send_bytes_capped()`). Otherwise
+  the voices sound until their note-off and `flam_drops` goes up, one per kit
+  per flam pulse. It shows on the pattern-select screen as `FLAM DROP <n>`
+  when non-zero. The cap limits flams only: mandatory messages may fill the
+  whole queue (1,023 bytes), so about 700 bytes stay for scheduled playback
+  (two kits' note-offs and the worst step burst, 168 bytes as queued in one
+  pulse) and for the releases and first hits of an immediate restart. Two kits
+  flamming every voice keep every second hit up to 200 BPM.
 
 ## Playback Rules
 
@@ -155,14 +157,15 @@ At a step boundary, the engine stages MIDI and CV/gate changes, commits gate
 GPIO masks, then submits the MIDI batch. Gate edges are grouped; DAC writes and
 DIN messages are sequential. This does not make all outputs simultaneous.
 
-The 512-byte UART queue accepts complete messages or complete step batches
-(`MIDI_BUF_SIZE` is 160 bytes; the worst step burst is 102 bytes as stored, 82
-on the wire). It keeps whole messages with their status bytes, and the drain
-applies running status as it writes: a status equal to the last one written is
-skipped, except on the first message after the queue ran empty (its last byte
-written), which always carries its status. Real-time bytes do not change the
-running status. The UART hardware FIFO is off and the drain writes one byte per
-writable check, so the TX interrupt runs once per byte on Core 0.
+The 1,024-byte UART queue (1,023 bytes usable) accepts complete messages or
+complete step batches (`MIDI_BUF_SIZE` is 160 bytes; the worst step burst is 102
+bytes as stored, 82 on the wire). It keeps whole messages with their status
+bytes, and the drain applies running status as it writes: a status equal to the
+last one written is skipped, except on the first message after the queue ran
+empty (its last byte written), which always carries its status. Real-time bytes
+do not change the running status. The UART hardware FIFO is off and the drain
+writes one byte per writable check, so the TX interrupt runs once per byte on
+Core 0.
 
 Clock and transport bytes go ahead of note bytes. `midi_send_clock()` sets one
 pending-Clock flag (never a counter, so Clocks are not released in a bunch).

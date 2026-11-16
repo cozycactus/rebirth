@@ -264,16 +264,21 @@ the kit's Note Ons; SYNTH and DRUM tracks keep sending 0x80 as today.
 on what is queued: after a dense step burst the second hit leaves only when the burst has gone.
 With one kit of six voices the burst is 13 bytes (4 ms) and a 12 ms flam stays a flam.
 
-**Overload rule (A).** A flam's second hit is the only kit message that may be dropped. Flam
-second hits must leave 288 TX queue bytes free; the headroom covers the releases and new first
-hits of an immediate restart as well as scheduled playback. Otherwise that step's second hits are
-skipped, the voices stay sounding until their note-off, and a counter shown with the jitter stats
-goes up. Scheduled playback adds at most 168 bytes in mandatory messages in one pulse (two kits'
-note-offs and the worst step burst, as stored in the queue with every status byte); the first
-design reserve of 192 bytes left no room for a restart (Start while playing, or Stop then an
-immediate Start) under two dense kits, whose releases join the backlog before the new run's first
-step, and the queue overflowed (multi-model review). Everything else fits the DIN rate at every
-tempo up to 300 BPM (see "MIDI load"), so kit traffic never trips the TX-overflow panic.
+**Overload rule (A).** A flam's second hit is the only kit message that may be dropped. A flam
+message is queued only if the TX queue then holds at most 319 bytes (`KIT_FLAM_MAX_QUEUED`, 511 -
+192: the first design's 192-byte free-space reserve in a 512-byte queue); otherwise that step's
+second hits are skipped, the voices stay sounding until their note-off, and a counter shown with
+the jitter stats goes up. The cap limits flams only. Mandatory messages may fill the whole TX
+queue of 1,024 bytes (1,023 usable), so about 700 bytes above the cap are theirs: scheduled
+playback adds at most 168 bytes in one pulse (two kits' note-offs and the worst step burst, as
+stored in the queue with every status byte), and a restart (Start while playing, or Stop then an
+immediate Start) under two dense kits adds the old run's releases to the backlog before the new
+run's first step. The first design's 512-byte queue overflowed there (multi-model review); a
+288-byte reserve in it avoided that but dropped one kit's second hits on every step with two
+all-flam kits at gate 100 % even at 140 BPM. With the cap and the larger queue a seeded sweep of
+2,000 random restarts (140-300 BPM, gates 10-100 %, FLAM 1-12) peaks at 517 queued bytes on the
+host. Everything else fits the DIN rate at every tempo up to 300 BPM (see "MIDI load"), so kit
+traffic never trips the TX-overflow panic.
 
 ### Mutes, stop, panic, launches
 
@@ -304,10 +309,11 @@ always carries its status byte so that a receiver that missed a byte resynchroni
 bytes (Clock, Start, Continue, Stop) do not change the running status. Message boundaries are
 therefore known in the queue without re-parsing a compressed stream.
 
-`MIDI_BUF_SIZE` grows from 64 to 160 bytes and the TX queue from 256 to 512 bytes (A): the worst
-step burst is 102 bytes as stored (82 on the wire, below), a pulse with two kits' note-offs as well
-holds 168, and the overload rule keeps a 288-byte reserve. Host tests check the worst designed
-burst fits, and a restart under two dense kits.
+`MIDI_BUF_SIZE` grows from 64 to 160 bytes and the TX queue from 256 to 1,024 bytes (A; 512 in
+the first design): the worst step burst is 102 bytes as stored (82 on the wire, below), a pulse
+with two kits' note-offs as well holds 168, flams stop at 319 queued bytes, and the rest of the
+queue is headroom for mandatory messages and a restart. Host tests check the worst designed burst
+fits, and restarts under two dense kits.
 
 The step burst is built in track order, so the kick and kit on the leftmost columns get the
 earliest bytes; the README says so. Within one step the last Note On leaves after the earlier ones:
@@ -363,8 +369,10 @@ Sustained load with every lane on every step, both kits, all other tracks busy a
 flams: about 134 bytes per step (note-ons 46, kit note-offs 46, other tracks 36, six Clock bytes),
 which is 43 % of the DIN rate at 150 BPM and 86 % at 300 BPM. Flamming every voice of both kits on
 every step adds 90 bytes per step and would exceed the rate above about 210 BPM; the overload rule
-drops second hits instead. The realistic case (goa, 130-150 BPM, a kit of 4-8 voices) stays well
-under half the rate.
+drops second hits instead. On the host (8 bars, gates 10/50/100 %, FLAM 1/3/12) no second hit is
+dropped up to 200 BPM; the first drops come at 210 BPM (up to 4 of 256 flam sends), about 30 at
+220 BPM and about 188 at 300 BPM. The realistic case (goa, 130-150 BPM, a kit of 4-8 voices)
+stays well under half the rate.
 
 ### ISR time
 

@@ -95,10 +95,12 @@ Use a logic analyzer or oscilloscope:
   whose status is already in the holding register (the PL011 keeps a one-byte
   holding register with the FIFO off): up to four byte times, 1.28 ms, before
   interrupt latency, against up to about 10 ms behind a kit burst on the earlier
-  path. At 300 BPM with every
-  voice of both kits flammed the queue is overloaded by design: second hits are
-  dropped and counted as `FLAM DROP <n>` on the pattern-select screen; nothing
-  else may be dropped and playback must not stop.
+  path. Up to 200 BPM `FLAM DROP` must stay 0 (on the host no second hit is
+  dropped there). At 300 BPM with every voice of both kits flammed the queue is
+  overloaded by design: second hits are dropped once the 1,024-byte TX queue
+  would hold more than 319 bytes with them, and counted as `FLAM DROP <n>` on
+  the pattern-select screen; nothing else may be dropped and playback must not
+  stop, also when PLAY restarts the run.
 - Exercise mutes, live edits, different loop lengths, Song transitions,
   tempo changes, Stop and Panic. Check that gates stay low after Stop/Panic.
 - Save/load are rejected while running. After stopping, test save/load and restart
