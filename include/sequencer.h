@@ -273,6 +273,9 @@ void seq_set_track_config(uint8_t track, const track_config_t *config);
 // are cleared and its prepared rows refreshed. An audible track gets the live
 // mute. Takes seq_lock: call with none held.
 void seq_toggle_track_mute(uint8_t track);
+// The muted tracks, by the rule MUTE uses: bit c set when the live mute is set
+// or the location track c plays has its stored mute. Takes seq_lock: call with
+// none held.
 uint8_t seq_get_track_mutes(void);
 
 // midi_out.c
@@ -308,8 +311,9 @@ void display_init(void);
 void display_clear(void);
 void display_update(void);
 // common_row: session_common_row(&snap), 0xFF = MIXED. bar_step: global step in the
-// bar (0-15); 16 or more lights none (stopped).
-void display_draw_session_view(uint8_t bank, uint8_t common_row,
+// bar (0-15); 16 or more lights none (stopped). mode: shown as P or S at the end
+// of line 0.
+void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mode,
                                uint8_t focus_track, uint8_t focus_location, uint8_t focus_length,
                                float bpm, launch_quant_t quant, uint8_t bar_step);
 const char *display_launch_quant_name(launch_quant_t quant);

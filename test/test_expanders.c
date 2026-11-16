@@ -244,6 +244,43 @@ static void test_dead_bus_is_retried_at_most_every_100_ms(void) {
     CHECK(mcp23017_get_buttons()->held == (1u << 2));
 }
 
+// A chip that reset but still answers has IPOL and the pull-ups at their
+// defaults, so its idle lines read as pressed. That sample is checked against
+// the configuration and becomes the new baseline, with no press.
+static void test_reset_expander_idle_lines_are_not_presses(void) {
+    reset();
+    mcp23017_init();
+    step_buttons_t *b = mcp23017_get_buttons();
+    poll_buttons_for(50);
+    CHECK(b->held == 0 && b->pressed == 0);
+    regs[0][0x02] = regs[0][0x03] = 0;        // reset: IPOL and pull-ups at defaults
+    regs[0][0x0C] = regs[0][0x0D] = 0;
+    press(0xFFFF);                            // idle lines, no longer inverted
+    sleep_ms(30);
+    mcp23017_poll();
+    CHECK(b->pressed == 0 && b->held == 0 && b->long_pressed == 0);
+    press(0);                                 // reconfigured: idle reads 0 again
+    poll_buttons_for(50);
+    CHECK(regs[0][0x02] == 0xFF && regs[0][0x03] == 0xFF);
+    CHECK(regs[0][0x0C] == 0xFF && regs[0][0x0D] == 0xFF);
+    CHECK(b->pressed == 0 && b->held == 0 && b->released == 0);
+    press(1u << 4);                           // and a real press still works
+    poll_buttons_for(30);
+    CHECK(b->pressed == (1u << 4) && b->held == (1u << 4));
+}
+
+// A real chord on a configured chip passes the readback.
+static void test_three_key_chord_is_pressed(void) {
+    reset();
+    mcp23017_init();
+    step_buttons_t *b = mcp23017_get_buttons();
+    poll_buttons_for(50);
+    press(0x0007);
+    sleep_ms(30);
+    mcp23017_poll();
+    CHECK(b->pressed == 0x0007 && b->held == 0x0007);
+}
+
 static button_event_t poll_encoder(uint8_t enc) {
     sleep_ms(25);
     encoder_poll();
@@ -298,6 +335,8 @@ int main(void) {
     RUN(test_reset_expander_is_reconfigured);
     RUN(test_failed_led_write_rewrites_the_direction);
     RUN(test_dead_bus_is_retried_at_most_every_100_ms);
+    RUN(test_reset_expander_idle_lines_are_not_presses);
+    RUN(test_three_key_chord_is_pressed);
     RUN(test_encoder_button_released_during_stall_is_silent);
     RUN(test_encoder_button_held_through_stall_never_fires);
     return 0;

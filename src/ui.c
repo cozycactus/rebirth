@@ -595,7 +595,8 @@ static uint16_t build_pattern_select_mask(void) {
     uint16_t mask = 0;
     uint8_t mutes = seq_get_track_mutes();
 
-    // Buttons 1-8 represent track mute state (lit = unmuted).
+    // Buttons 1-8 represent track mute state (lit = audible: neither the live
+    // mute nor the stored mute of the playing location is set).
     for (uint8_t t = 0; t < NUM_TRACKS; t++) {
         if (!(mutes & (1u << t))) {
             mask |= (uint16_t)(1u << t);
@@ -927,7 +928,7 @@ static void render_session_view(const transport_snapshot_t *snap) {
     uint8_t bar_step = snap->state == TRANSPORT_PLAYING
         ? (uint8_t)((snap->pulse_count / PULSES_PER_STEP) % STEPS_PER_PATTERN)
         : STEPS_PER_PATTERN;    // none
-    display_draw_session_view(session_bank(), session_common_row(snap),
+    display_draw_session_view(session_bank(), session_common_row(snap), snap->mode,
                               focus.track, focus.location, length,
                               g_seq.transport.bpm, transport_get_launch_quant(),
                               bar_step);

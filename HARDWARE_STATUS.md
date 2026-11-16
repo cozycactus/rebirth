@@ -39,9 +39,11 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
   failed step LED writes (direction and mask rewritten), chip resets found by
   config readback, retries limited to one per 100 ms on a dead bus, step
   button and encoder resync after a flash stall, and internal pulls off on
-  GPIO 8/9. Panel input tests cover the same for the TCA8418, plus overflow
-  and incomplete reads, and keys or PLAY held through a resync. Storage tests
-  cover the input resync after save and load.
+  GPIO 8/9, and a reset button expander whose idle lines read as pressed.
+  Panel input tests cover the same for the TCA8418, plus overflow and
+  incomplete reads, keys or PLAY held through a resync, and keys released
+  during a stall or an overflow. Storage tests cover the input resync after
+  save and load.
 - DAC command tests cover the 2.048 V reference, both gains and octave scaling.
 
 ## Needs Bench Verification
