@@ -958,14 +958,19 @@ void ui_render(void) {
                 seq_get_track_mutes());
             break;
 
-        case UI_PATTERN_VIEW:
+        case UI_PATTERN_VIEW: {
+            int8_t held_step = -1;          // lowest held step, -1 = none
+            for (int8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+                if (ui.grid_hold & (1u << s)) { held_step = s; break; }
+            }
             display_draw_pattern_view(
                 seq_active_pattern(ui.selected_track),
                 ui.selected_track,
                 g_seq.transport.current_track_step[ui.selected_track],
-                ui.grid_hold ? (int8_t)__builtin_ctz(ui.grid_hold) : -1);
+                held_step);
             display_draw_bpm(g_seq.transport.bpm);
             break;
+        }
 
         case UI_STEP_EDIT:
             display_draw_step_edit(
