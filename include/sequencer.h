@@ -300,6 +300,9 @@ uint8_t seq_get_track_mutes(void);
 
 // midi_out.c
 void midi_init(void);
+// Whole channel messages, each with its status byte (the drain applies running
+// status). Sets the overflow flag when they do not fit in the TX queue.
+void midi_send_bytes(const uint8_t *data, uint16_t length);
 void midi_send_note_on(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_note_off(uint8_t channel, uint8_t note);
 void midi_send_cc(uint8_t channel, uint8_t cc, uint8_t value);

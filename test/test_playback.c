@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #include "fakes/fake_hardware.h"
 #include "../src/sequencer.c"
 
@@ -574,11 +575,42 @@ static void test_moving_song_entry_keeps_playing_entry_anchor(void) {
 }
 
 static void test_staging_overflow_never_sends_partial_message(void) {
-    for (unsigned note = 0; note < 22; note++) midi_buf_note_on(0, note, 100);
+    for (unsigned note = 0; note < 54; note++) midi_buf_note_on(0, note, 100);
     midi_buf_flush();
-    CHECK(fake_midi_count(MIDI_NOTE_ON) == 21);
+    CHECK(fake_midi_count(MIDI_NOTE_ON) == 53);
     CHECK(message_boundary(fake_midi_length));
     CHECK(midi_output_overflowed());
+}
+
+static bool midi_bytes_are(const uint8_t *expected, unsigned length) {
+    return fake_midi_length == length && memcmp(fake_midi, expected, length) == 0;
+}
+
+static void test_running_status_within_burst(void) {
+    fake_uart_writable = false;
+    midi_send_note_on(0, 36, 100);
+    midi_send_note_on(0, 38, 100);
+    midi_send_note_on(1, 40, 100);
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    const uint8_t expected[] = {0x90, 36, 100, 38, 100, 0x91, 40, 100};
+    CHECK(midi_bytes_are(expected, sizeof(expected)));
+    CHECK(!fake_uart_tx_irq);
+}
+
+static void test_status_repeated_after_queue_ran_empty(void) {
+    midi_send_note_on(0, 36, 100);
+    midi_send_note_on(0, 38, 100);
+    fake_uart_budget = 3;          // runs out on the last byte of the next message
+    midi_send_note_on(0, 40, 100);
+    midi_send_note_on(0, 41, 100); // queued after the queue ran empty
+    CHECK(fake_uart_tx_irq);
+    fake_uart_budget = UINT_MAX;
+    fake_irq_handlers[UART0_IRQ]();
+    const uint8_t expected[] = {
+        0x90, 36, 100, 0x90, 38, 100, 0x90, 40, 100, 0x90, 41, 100
+    };
+    CHECK(midi_bytes_are(expected, sizeof(expected)));
 }
 
 static void test_output_overflow_stops_transport(void) {
@@ -996,6 +1028,8 @@ int main(void) {
     RUN(test_removing_playing_first_song_entry_moves_to_following_entry);
     RUN(test_moving_song_entry_keeps_playing_entry_anchor);
     RUN(test_staging_overflow_never_sends_partial_message);
+    RUN(test_running_status_within_burst);
+    RUN(test_status_repeated_after_queue_ran_empty);
     RUN(test_output_overflow_stops_transport);
     RUN(test_bar_launch_waits_for_bar_line);
     RUN(test_bar_launch_on_short_loop_waits_for_bar);
