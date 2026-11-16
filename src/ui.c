@@ -301,17 +301,17 @@ static void open_editor_on_long_press(uint16_t long_presses, ui_mode_t from) {
     }
 }
 
-static void handle_session_view(int8_t e1d, int8_t e2d,
+static void handle_session_view(encoder_turn_t e1, encoder_turn_t e2,
                                 button_event_t e1b, button_event_t e2b,
                                 step_buttons_t *steps) {
-    // TRACK rotate (detents): walk the stops, a kit's lanes included.
-    if (e1d != 0) {
-        session_move_focus(e1d);
+    // TRACK rotate: walk the stops, a kit's lanes included.
+    if (e1.detents != 0) {
+        session_move_focus(e1.detents);
     }
 
     // VALUE rotate: tempo.
-    if (e2d != 0) {
-        float new_bpm = g_seq.transport.bpm + (float)e2d * 0.1f;
+    if (e2.amount != 0) {
+        float new_bpm = g_seq.transport.bpm + (float)e2.amount * 0.1f;
         transport_set_bpm(new_bpm);
     }
 
@@ -362,23 +362,23 @@ static void handle_session_view(int8_t e1d, int8_t e2d,
 
 // ─── Pattern View Handler ──────────────────────────────────────
 
-static void handle_pattern_view(int8_t e1d, int8_t e2d,
+static void handle_pattern_view(encoder_turn_t e1, encoder_turn_t e2,
                                  button_event_t e1b, button_event_t e2b,
                                  step_buttons_t *steps) {
-    // Enc1 rotate (detents): walk the stops of the tracks' active patterns, a
-    // kit's lanes included; the lane reached is the kit track's remembered one.
-    if (e1d != 0) {
+    // Enc1 rotate: walk the stops of the tracks' active patterns, a kit's
+    // lanes included; the lane reached is the kit track's remembered one.
+    if (e1.detents != 0) {
         uint8_t kit_mask = kit_cell_mask(g_seq.patterns, g_seq.active_pattern);
         uint8_t track = ui.selected_track;
         uint8_t lane = session_kit_lane(track);
-        session_walk_stops(&track, &lane, e1d, kit_mask);
+        session_walk_stops(&track, &lane, e1.detents, kit_mask);
         ui.selected_track = track;
         if (kit_mask & (1u << track)) session_set_kit_lane(track, lane);
     }
 
     // Enc2 rotate: adjust BPM
-    if (e2d != 0) {
-        float new_bpm = g_seq.transport.bpm + (float)e2d * 0.1f;
+    if (e2.amount != 0) {
+        float new_bpm = g_seq.transport.bpm + (float)e2.amount * 0.1f;
         transport_set_bpm(new_bpm);
     }
 
@@ -426,30 +426,30 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
 
 // One kit step of the selected track's active cell. Nothing here touches its
 // step_t data.
-static void handle_kit_step_edit(int8_t e1d, int8_t e2d,
+static void handle_kit_step_edit(encoder_turn_t e1, encoder_turn_t e2,
                                  button_event_t e1b, button_event_t e2b,
                                  step_buttons_t *steps) {
     (void)e1b;
     uint8_t track = ui.selected_track;
     uint8_t location = g_seq.active_pattern[track];
 
-    // TRACK rotate (detents): move the lane cursor, AC..RC.
-    if (e1d != 0) {
-        ui.kit_cursor = (uint8_t)clamp_i8((int16_t)ui.kit_cursor + e1d, KIT_LANE_AC,
+    // TRACK rotate: move the lane cursor, AC..RC.
+    if (e1.detents != 0) {
+        ui.kit_cursor = (uint8_t)clamp_i8((int16_t)ui.kit_cursor + e1.detents, KIT_LANE_AC,
                                           KIT_LANES - 1);
     }
 
-    // VALUE rotate (detents): one value step per event in its direction,
-    // whatever its size (off/note/accent/flam; AC off/on), with the CH/OH rule.
-    if (e2d != 0) {
+    // VALUE rotate: one value step per event in its direction, whatever its
+    // size (off/note/accent/flam; AC off/on), with the CH/OH rule.
+    if (e2.detents != 0) {
         bool changed = false;
         uint8_t lane = ui.kit_cursor;
         uint8_t top = lane == KIT_LANE_AC ? 1 : KIT_FLAM;
         uint32_t lock_state = seq_lock();
         uint32_t *word = &g_seq.patterns[location].kit_steps[track][ui.edit_step];
         uint8_t value = kit_get(*word, lane);
-        uint8_t next = e2d > 0 ? (value < top ? value + 1 : value)
-                               : (value > KIT_OFF ? value - 1 : value);
+        uint8_t next = e2.detents > 0 ? (value < top ? value + 1 : value)
+                                      : (value > KIT_OFF ? value - 1 : value);
         if (next != value) {
             *word = kit_edit(*word, lane, next);
             changed = true;
@@ -475,7 +475,7 @@ static void handle_kit_step_edit(int8_t e1d, int8_t e2d,
 
 // ─── Step Edit Handler ─────────────────────────────────────────
 
-static void handle_step_edit(int8_t e1d, int8_t e2d,
+static void handle_step_edit(encoder_turn_t e1, encoder_turn_t e2,
                               button_event_t e1b, button_event_t e2b,
                               step_buttons_t *steps) {
     uint32_t lock_state = seq_lock();
@@ -486,8 +486,8 @@ static void handle_step_edit(int8_t e1d, int8_t e2d,
     step_t *st = &pat->steps[track][ui.edit_step];
 
     // Enc1 rotate: change note
-    if (e1d != 0) {
-        int16_t note = (int16_t)st->note + e1d;
+    if (e1.amount != 0) {
+        int16_t note = (int16_t)st->note + e1.amount;
         uint8_t next_note = clamp_i8(note, 0, 127);
         if (st->note != next_note) {
             st->note = next_note;
@@ -496,8 +496,8 @@ static void handle_step_edit(int8_t e1d, int8_t e2d,
     }
 
     // Enc2 rotate: change velocity
-    if (e2d != 0) {
-        int16_t vel = (int16_t)st->velocity + e2d;
+    if (e2.amount != 0) {
+        int16_t vel = (int16_t)st->velocity + e2.amount;
         uint8_t next_velocity = clamp_i8(vel, 0, 127);
         if (st->velocity != next_velocity) {
             st->velocity = next_velocity;
@@ -552,21 +552,21 @@ static void handle_step_edit(int8_t e1d, int8_t e2d,
 
 // ─── Pattern Select Handler ────────────────────────────────────
 
-static void handle_pattern_select(int8_t e1d, int8_t e2d,
+static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
                                    button_event_t e1b, button_event_t e2b,
                                    step_buttons_t *steps) {
     // Enc1 rotate: select pattern slot 1-8 within the current bank.
-    if (e1d != 0) {
-        int16_t slot = (int16_t)pattern_slot(ui.select_pattern) + e1d;
+    if (e1.detents != 0) {
+        int16_t slot = (int16_t)pattern_slot(ui.select_pattern) + e1.detents;
         if (slot < 0) slot = 0;
         if (slot >= PATTERNS_PER_BANK) slot = PATTERNS_PER_BANK - 1;
         ui.select_pattern = pattern_make_index(pattern_bank(ui.select_pattern),
                                                (uint8_t)slot);
     }
 
-    // Enc2 rotate: select bank A-D.
-    if (e2d != 0) {
-        int16_t bank = (int16_t)pattern_bank(ui.select_pattern) + (e2d > 0 ? 1 : -1);
+    // Enc2 rotate: select bank A-D, one per detent, wrapping.
+    if (e2.detents != 0) {
+        int16_t bank = (int16_t)pattern_bank(ui.select_pattern) + (e2.detents > 0 ? 1 : -1);
         if (bank < 0) bank = PATTERN_BANKS - 1;
         if (bank >= PATTERN_BANKS) bank = 0;
         ui.select_pattern = pattern_make_index((uint8_t)bank,
@@ -859,8 +859,18 @@ static void step_track_type(uint8_t track, track_config_t config, int8_t directi
     seq_set_track_config(track, &config);
 }
 
-// CHANNEL, OUTPUT, GATE and a drum's NOTE: the track's routing, written to all
-// 32 locations when it changes.
+// OUTPUT moves one mode per event, cycling through the three; written to all
+// 32 locations.
+static void step_output_mode(uint8_t track, track_config_t config, int8_t direction) {
+    int16_t m = (int16_t)config.output_mode + (direction > 0 ? 1 : -1);
+    if (m < 0) m = 2;
+    if (m > 2) m = 0;
+    config.output_mode = (output_mode_t)m;
+    seq_set_track_config(track, &config);
+}
+
+// CHANNEL, GATE and a drum's NOTE: the track's routing, written to all 32
+// locations when it changes.
 static void edit_track_param(uint8_t track, track_config_t config, uint8_t param,
                              int8_t delta) {
     uint8_t *field;
@@ -869,15 +879,6 @@ static void edit_track_param(uint8_t track, track_config_t config, uint8_t param
         case TRACK_PARAM_CHANNEL: field = &config.midi_channel; hi = 15; break;
         case TRACK_PARAM_GATE: field = &config.gate_length_pct; lo = 10; hi = 100; break;
         case TRACK_PARAM_NOTE: field = &config.drum_note; break;
-        case TRACK_PARAM_OUTPUT: {
-            // Output mode: cycle through 3 options
-            int16_t m = (int16_t)config.output_mode + (delta > 0 ? 1 : -1);
-            if (m < 0) m = 2;
-            if (m > 2) m = 0;
-            config.output_mode = (output_mode_t)m;
-            seq_set_track_config(track, &config);
-            return;
-        }
         default: return;
     }
     uint8_t next = step_value(*field, delta, lo, hi);
@@ -923,7 +924,7 @@ static void edit_kit_param(uint8_t track, track_config_t config, uint8_t param,
     }
 }
 
-static void handle_track_config(int8_t e1d, int8_t e2d,
+static void handle_track_config(encoder_turn_t e1, encoder_turn_t e2,
                                  button_event_t e1b, button_event_t e2b,
                                  step_buttons_t *steps) {
     (void)steps;
@@ -940,20 +941,21 @@ static void handle_track_config(int8_t e1d, int8_t e2d,
                        : (config.type == TRACK_TYPE_DRUM ? TRACK_PARAM_NOTE : TRACK_PARAM_GATE);
     if (ui.config_param > last) ui.config_param = last;
 
-    // Enc1 rotate (detents): select parameter
-    if (e1d != 0) {
-        ui.config_param = (uint8_t)clamp_i8((int16_t)ui.config_param + e1d, 0, last);
+    // Enc1 rotate: select parameter
+    if (e1.detents != 0) {
+        ui.config_param = (uint8_t)clamp_i8((int16_t)ui.config_param + e1.detents, 0, last);
     }
 
-    // Enc2 rotate: adjust value (TYPE, the first row of both lists, by detents)
-    if (e2d != 0) {
-        if (ui.config_param == TRACK_PARAM_TYPE) {
-            step_track_type(edited_track, config, e2d);
-        } else if (kit) {
-            edit_kit_param(edited_track, config, ui.config_param, e2d);
-        } else {
-            edit_track_param(edited_track, config, ui.config_param, e2d);
-        }
+    // Enc2 rotate: TYPE (the first row of both lists) and OUTPUT are choices,
+    // the other rows numbers.
+    if (ui.config_param == TRACK_PARAM_TYPE) {
+        if (e2.detents != 0) step_track_type(edited_track, config, e2.detents);
+    } else if (kit) {
+        if (e2.amount != 0) edit_kit_param(edited_track, config, ui.config_param, e2.amount);
+    } else if (ui.config_param == TRACK_PARAM_OUTPUT) {
+        if (e2.detents != 0) step_output_mode(edited_track, config, e2.detents);
+    } else if (e2.amount != 0) {
+        edit_track_param(edited_track, config, ui.config_param, e2.amount);
     }
 
     // Enc1 press: next track
@@ -970,19 +972,19 @@ static void handle_track_config(int8_t e1d, int8_t e2d,
 
 // ─── Song Edit Handler ─────────────────────────────────────────
 
-static void handle_song_edit(int8_t e1d, int8_t e2d,
+static void handle_song_edit(encoder_turn_t e1, encoder_turn_t e2,
                               button_event_t e1b, button_event_t e2b,
                               step_buttons_t *steps) {
     (void)steps;
     song_t *s = &g_seq.song;
 
     // Enc1 rotate: navigate entries
-    if (e1d != 0) {
+    if (e1.detents != 0) {
         uint32_t lock_state = seq_lock();
         uint16_t song_len = s->length;
         seq_unlock(lock_state);
 
-        int16_t pos = (int16_t)ui.song_cursor + e1d;
+        int16_t pos = (int16_t)ui.song_cursor + e1.detents;
         if (pos < 0) pos = 0;
         if (pos >= (int16_t)song_len && song_len > 0) {
             pos = song_len - 1;
@@ -990,15 +992,16 @@ static void handle_song_edit(int8_t e1d, int8_t e2d,
         ui.song_cursor = (uint16_t)pos;
     }
 
-    // Enc2 rotate: modify current entry based on field
-    if (e2d != 0) {
+    // Enc2 rotate: modify current entry based on field: its pattern is a
+    // choice, its repeats a number.
+    if (e2.detents != 0 || e2.amount != 0) {
         uint32_t lock_state = seq_lock();
         if (ui.song_cursor < s->length) {
             song_entry_t *entry = &s->entries[ui.song_cursor];
             switch (ui.song_field) {
                 case 0: {
                     // Pattern index for the currently selected track.
-                    int16_t p = (int16_t)entry->pattern_index[ui.selected_track] + e2d;
+                    int16_t p = (int16_t)entry->pattern_index[ui.selected_track] + e2.detents;
                     if (p < 0) p = 0;
                     if (p >= MAX_PATTERNS) p = MAX_PATTERNS - 1;
                     entry->pattern_index[ui.selected_track] = (uint8_t)p;
@@ -1006,7 +1009,7 @@ static void handle_song_edit(int8_t e1d, int8_t e2d,
                 }
                 case 1: {
                     // Repeats 1–255
-                    int16_t r = (int16_t)entry->repeats + e2d;
+                    int16_t r = (int16_t)entry->repeats + e2.amount;
                     if (r < 1) r = 1;
                     if (r > 255) r = 255;
                     entry->repeats = (uint8_t)r;
@@ -1253,33 +1256,17 @@ void ui_init(void) {
 
 // ─── Main Update Loop ──────────────────────────────────────────
 
-// Encoders read whole detents (one click, one step, no acceleration) where
-// they pick among choices; numbers (tempo, velocities, notes, channel, gate,
-// flam) keep the accelerated delta. On the panel each quadrature edge arrives
-// in its own pass of this loop, so a choice read by edges would move several
-// times per click.
-static bool track_reads_detents(void) {
-    // Focus stops, the kit editor's lanes and the track config rows.
-    return ui.mode == UI_SESSION || ui.mode == UI_PATTERN_VIEW ||
-           ui.mode == UI_KIT_STEP_EDIT || ui.mode == UI_TRACK_CONFIG;
-}
-
-static bool value_reads_detents(void) {
-    // A kit lane's value, and TYPE (the first row of every config list).
-    return ui.mode == UI_KIT_STEP_EDIT ||
-           (ui.mode == UI_TRACK_CONFIG && ui.config_param == TRACK_PARAM_TYPE);
-}
-
 void ui_update(void) {
     // 1. Poll inputs: the panel on every pass, then encoders and step buttons
     panel_input_poll(to_ms_since_boot(get_absolute_time()));
     encoder_poll();
     mcp23017_poll();
 
-    // 2. Read encoder events, once per pass: whole detents for choices, the
-    // accelerated delta for numbers.
-    int8_t e1d = track_reads_detents() ? encoder_get_detents(0) : encoder_get_delta(0);
-    int8_t e2d = value_reads_detents() ? encoder_get_detents(1) : encoder_get_delta(1);
+    // 2. Read encoder events, once per pass. Every screen reads whole clicks:
+    // a choice moves one per click (`detents`), a number by `amount`, the same
+    // clicks accelerated on a fast turn (encoder_accel_detent).
+    encoder_turn_t e1 = encoder_get_turn(0);
+    encoder_turn_t e2 = encoder_get_turn(1);
     button_event_t e1b = encoder_get_button(0);
     button_event_t e2b = encoder_get_button(1);
     step_buttons_t *steps = mcp23017_get_buttons();
@@ -1308,25 +1295,25 @@ void ui_update(void) {
 
     switch (ui.mode) {
         case UI_SESSION:
-            handle_session_view(e1d, e2d, e1b, e2b, steps);
+            handle_session_view(e1, e2, e1b, e2b, steps);
             break;
         case UI_PATTERN_VIEW:
-            handle_pattern_view(e1d, e2d, e1b, e2b, steps);
+            handle_pattern_view(e1, e2, e1b, e2b, steps);
             break;
         case UI_STEP_EDIT:
-            handle_step_edit(e1d, e2d, e1b, e2b, steps);
+            handle_step_edit(e1, e2, e1b, e2b, steps);
             break;
         case UI_PATTERN_SELECT:
-            handle_pattern_select(e1d, e2d, e1b, e2b, steps);
+            handle_pattern_select(e1, e2, e1b, e2b, steps);
             break;
         case UI_TRACK_CONFIG:
-            handle_track_config(e1d, e2d, e1b, e2b, steps);
+            handle_track_config(e1, e2, e1b, e2b, steps);
             break;
         case UI_SONG_EDIT:
-            handle_song_edit(e1d, e2d, e1b, e2b, steps);
+            handle_song_edit(e1, e2, e1b, e2b, steps);
             break;
         case UI_KIT_STEP_EDIT:
-            handle_kit_step_edit(e1d, e2d, e1b, e2b, steps);
+            handle_kit_step_edit(e1, e2, e1b, e2b, steps);
             break;
     }
 

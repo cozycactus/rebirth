@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include "fakes/fake_hardware.h"
@@ -8,13 +9,15 @@
 
 sequencer_state_t g_seq;
 static button_event_t buttons[2];
+// Scripted detents for the next read: `deltas` detents, worth `delta_scale`
+// each to a number (a scripted fast turn when above 1).
 static int8_t deltas[2];
-static int8_t delta_scale = 1;   // encoder_get_delta returns deltas * delta_scale
+static int8_t delta_scale = 1;
 // Edges the way the panel delivers them (turn_edges): one per encoder_poll,
-// i.e. one per UI pass. As in encoder.c, get_delta returns the edges since the
-// last read and clears the detent count; get_detents returns whole detents of
-// ENC_EDGES_PER_DETENT edges, keeps the rest and clears the delta.
-static int16_t edges_to_come[2], edge_delta[2], edge_count[2];
+// i.e. one per UI pass. As in encoder.c, ENC_EDGES_PER_DETENT edges the same
+// way make a detent, timed by encoder_accel_detent on the fake clock.
+static int16_t edges_to_come[2], edge_count[2], turn_detents[2], turn_amount[2];
+static encoder_accel_t accel[2];
 static bool held[2];
 static step_buttons_t step_buttons;
 static uint16_t led_mask;
@@ -25,27 +28,27 @@ static unsigned rgb_inits;
 
 void encoder_init(void) {}
 void encoder_poll(void) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
     for (unsigned e = 0; e < 2; e++) {
         if (edges_to_come[e] == 0) continue;
-        int16_t edge = edges_to_come[e] > 0 ? 1 : -1;
+        int8_t edge = edges_to_come[e] > 0 ? 1 : -1;
         edges_to_come[e] -= edge;
-        edge_delta[e] += edge;
         edge_count[e] += edge;
+        if (edge_count[e] == edge * ENC_EDGES_PER_DETENT) {
+            edge_count[e] = 0;
+            turn_detents[e] += edge;
+            turn_amount[e] += edge * encoder_accel_detent(&accel[e], edge, now);
+        }
     }
 }
-int8_t encoder_get_delta(uint8_t encoder) {
-    int8_t value = (int8_t)(deltas[encoder] * delta_scale + edge_delta[encoder]);
+encoder_turn_t encoder_get_turn(uint8_t encoder) {
+    encoder_turn_t turn = {
+        (int8_t)(deltas[encoder] + turn_detents[encoder]),
+        (int8_t)(deltas[encoder] * delta_scale + turn_amount[encoder]),
+    };
     deltas[encoder] = 0;
-    edge_delta[encoder] = edge_count[encoder] = 0;
-    return value;
-}
-int8_t encoder_get_detents(uint8_t encoder) {
-    int16_t whole = edge_count[encoder] / ENC_EDGES_PER_DETENT;
-    edge_count[encoder] -= whole * ENC_EDGES_PER_DETENT;
-    edge_delta[encoder] = 0;
-    int8_t value = (int8_t)(deltas[encoder] + whole);
-    deltas[encoder] = 0;
-    return value;
+    turn_detents[encoder] = turn_amount[encoder] = 0;
+    return turn;
 }
 button_event_t encoder_get_button(uint8_t encoder) {
     button_event_t value = buttons[encoder]; buttons[encoder] = BTN_NONE; return value;
@@ -135,8 +138,10 @@ static void reset(void) {
     memset(deltas, 0, sizeof(deltas));
     delta_scale = 1;
     memset(edges_to_come, 0, sizeof(edges_to_come));
-    memset(edge_delta, 0, sizeof(edge_delta));
     memset(edge_count, 0, sizeof(edge_count));
+    memset(turn_detents, 0, sizeof(turn_detents));
+    memset(turn_amount, 0, sizeof(turn_amount));
+    memset(accel, 0, sizeof(accel));
     memset(held, 0, sizeof(held));
     panel_head = panel_tail = panel_resyncs = 0;
     debounce_polls = 0;
@@ -950,7 +955,7 @@ static void test_held_step_stays_on_its_lane(void) {
 
 static void test_eight_detents_move_eight_stops(void) {
     make_kit(1);
-    delta_scale = 4;                // TRACK reads detents, not accelerated edges
+    delta_scale = 4;                // TRACK reads detents, not the accelerated amount
     deltas[0] = 8;
     ui_update();
     session_focus_t f = session_get_focus();
@@ -1456,9 +1461,28 @@ static void turn_edges(uint8_t e, int16_t count) {
     while (edges_to_come[e] != 0) ui_update();
 }
 
-// `detents` clicks of encoder `e`: ENC_EDGES_PER_DETENT edges each.
+// `detents` clicks of encoder `e`, ENC_EDGES_PER_DETENT edges each, the first
+// after `first_gap_ms`, the others `gap_ms` after the one before.
+static void clicks_apart(uint8_t e, int8_t detents, uint32_t first_gap_ms, uint32_t gap_ms) {
+    int8_t dir = detents > 0 ? 1 : -1;
+    for (uint32_t gap = first_gap_ms; detents != 0; gap = gap_ms) {
+        sleep_ms(gap);
+        turn_edges(e, (int16_t)(dir * ENC_EDGES_PER_DETENT));
+        detents = (int8_t)(detents - dir);
+    }
+}
+
+// `detents` slow clicks of encoder `e`: each one ENC_ACCEL_FAST_MS after the
+// one before, too late to count as fast.
 static void click(uint8_t e, int8_t detents) {
-    turn_edges(e, (int16_t)(detents * ENC_EDGES_PER_DETENT));
+    clicks_apart(e, detents, ENC_ACCEL_FAST_MS, ENC_ACCEL_FAST_MS);
+}
+
+// A fast turn of `detents` clicks from rest: the first slow, the others
+// FAST_CLICK_MS apart. Numbers move 1, 1, 1, 1, 4, 4, 4, then 8 per click.
+#define FAST_CLICK_MS 20
+static void fast_clicks(uint8_t e, int8_t detents) {
+    clicks_apart(e, detents, ENC_ACCEL_FAST_MS, FAST_CLICK_MS);
 }
 
 static void test_kit_editor_value_click_is_one_step(void) {
@@ -1524,13 +1548,192 @@ static void test_track_config_rows_move_by_clicks(void) {
     deltas[0] = -1;
     ui_update();
     CHECK(ui.config_param == KIT_PARAM_VEL_NORMAL);
-    // Numbers keep the accelerated delta.
+    // Numbers take the accelerated amount.
     uint8_t vel = g_seq.kit_config[1].vel_normal;
     turn_value(1);
     CHECK(g_seq.kit_config[1].vel_normal == vel + 4);
+    // A number moves on whole clicks too: nothing until the click is complete,
+    // then one step for a slow click.
     delta_scale = 1;
-    turn_edges(1, 3);                                   // three edges, three steps
-    CHECK(g_seq.kit_config[1].vel_normal == vel + 7);
+    turn_edges(1, ENC_EDGES_PER_DETENT - 1);
+    CHECK(g_seq.kit_config[1].vel_normal == vel + 4);
+    turn_edges(1, 1);
+    CHECK(g_seq.kit_config[1].vel_normal == vel + 5);
+}
+
+static bool bpm_is(float bpm) {
+    return fabsf(g_seq.transport.bpm - bpm) < 0.001f;
+}
+
+static void test_slow_click_moves_tempo_and_patterns_by_one(void) {
+    // Tempo, in the Session view and in the Pattern view: 0.1 BPM per click.
+    float bpm = g_seq.transport.bpm;
+    click(1, 1);
+    CHECK(bpm_is(bpm + 0.1f));
+    press_encoder(0, BTN_PRESS);
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    click(1, -1);
+    CHECK(bpm_is(bpm));
+    // Pattern select: one slot, one bank.
+    press_encoder(1, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT && ui.select_pattern == 0);
+    click(0, 1);
+    CHECK(pattern_bank(ui.select_pattern) == 0 && pattern_slot(ui.select_pattern) == 1);
+    click(1, 1);
+    CHECK(pattern_bank(ui.select_pattern) == 1 && pattern_slot(ui.select_pattern) == 1);
+    click(1, -1);
+    click(1, -1);                                       // A wraps round to D
+    CHECK(pattern_bank(ui.select_pattern) == PATTERN_BANKS - 1);
+    click(0, -1);
+    CHECK(pattern_slot(ui.select_pattern) == 0);
+}
+
+static void test_slow_click_moves_kit_config_by_one(void) {
+    make_kit(2);
+    open_track_config(2);
+    track_config_t before = g_seq.patterns[0].tracks[2];
+    kit_config_t kit = g_seq.kit_config[2];
+    click(0, KIT_PARAM_CHANNEL);
+    click(1, 1);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        CHECK(g_seq.patterns[p].tracks[2].midi_channel == before.midi_channel + 1);
+    }
+    click(0, KIT_PARAM_GATE - KIT_PARAM_CHANNEL);
+    click(1, -1);
+    CHECK(g_seq.patterns[5].tracks[2].gate_length_pct == before.gate_length_pct - 1);
+    click(0, KIT_PARAM_FLAM - KIT_PARAM_GATE);
+    click(1, -1);
+    CHECK(g_seq.kit_config[2].flam_pulses == kit.flam_pulses - 1);
+    click(0, KIT_PARAM_VEL_NORMAL - KIT_PARAM_FLAM);
+    click(1, 1);
+    CHECK(g_seq.kit_config[2].vel_normal == kit.vel_normal + 1);
+    click(0, KIT_PARAM_NOTE + LANE_MT - 1 - KIT_PARAM_VEL_NORMAL);
+    click(1, -1);
+    CHECK(g_seq.kit_config[2].note[LANE_MT - 1] == kit.note[LANE_MT - 1] - 1);
+    click(1, -1);
+    CHECK(g_seq.kit_config[2].note[LANE_MT - 1] == kit.note[LANE_MT - 1] - 2);
+}
+
+static void test_slow_click_moves_synth_and_drum_config_by_one(void) {
+    open_track_config(0);                               // a SYNTH track
+    track_config_t before = g_seq.patterns[0].tracks[0];
+    click(0, TRACK_PARAM_CHANNEL);
+    click(1, 1);
+    CHECK(g_seq.patterns[9].tracks[0].midi_channel == before.midi_channel + 1);
+    click(0, TRACK_PARAM_OUTPUT - TRACK_PARAM_CHANNEL);
+    click(1, 1);
+    CHECK(g_seq.patterns[9].tracks[0].output_mode == (before.output_mode + 1) % 3);
+    click(1, -1);
+    CHECK(g_seq.patterns[9].tracks[0].output_mode == before.output_mode);
+    click(0, TRACK_PARAM_GATE - TRACK_PARAM_OUTPUT);
+    click(1, 1);
+    CHECK(g_seq.patterns[9].tracks[0].gate_length_pct == before.gate_length_pct + 1);
+    for (unsigned i = 0; i < 4; i++) press_encoder(0, BTN_PRESS);
+    CHECK(ui.config_track == 4 && ui.config_param == 0);
+    CHECK(type_everywhere(4, TRACK_TYPE_DRUM));
+    uint8_t note = g_seq.patterns[0].tracks[4].drum_note;
+    click(0, TRACK_PARAM_NOTE);
+    click(1, -1);
+    CHECK(g_seq.patterns[9].tracks[4].drum_note == note - 1);
+}
+
+static void test_slow_click_moves_note_editor_and_song_by_one(void) {
+    open_editor_from_session();
+    CHECK(ui.mode == UI_STEP_EDIT);
+    const step_t *st = &g_seq.patterns[3].steps[2][4];
+    uint8_t note = st->note, velocity = st->velocity;
+    click(0, 1);
+    click(1, 1);
+    CHECK(st->note == note + 1 && st->velocity == velocity + 1);
+    press_encoder(1, BTN_PRESS);
+    CHECK(ui.mode == UI_SESSION);
+
+    CHECK(song_append(0, 1) && song_append(0, 1) && song_append(0, 1));
+    press_encoder(1, BTN_LONG_PRESS);
+    press_encoder(0, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_SONG_EDIT && ui.song_cursor == 0);
+    click(0, 1);
+    CHECK(ui.song_cursor == 1);
+    click(1, 1);                                        // the entry's pattern
+    CHECK(g_seq.song.entries[1].pattern_index[ui.selected_track] == 1);
+    press_encoder(0, BTN_PRESS);                        // its repeats
+    click(1, 1);
+    CHECK(g_seq.song.entries[1].repeats == 2);
+}
+
+// Numbers accelerate on a fast turn; choices move one per click however fast.
+static void test_fast_clicks_accelerate_numbers_only(void) {
+    float bpm = g_seq.transport.bpm;
+    fast_clicks(1, 8);                                  // 1+1+1+1+4+4+4+8 tenths
+    CHECK(bpm_is(bpm + 2.4f));
+    click(1, -1);                                       // slow again: one tenth
+    CHECK(bpm_is(bpm + 2.3f));
+    fast_clicks(0, 6);                                  // TRACK: six stops
+    CHECK(session_get_focus().track == 6);
+
+    make_kit(1);
+    open_track_config(1);
+    fast_clicks(0, KIT_PARAM_VEL_NORMAL);               // rows: one per click
+    CHECK(ui.config_param == KIT_PARAM_VEL_NORMAL);
+    uint8_t vel = g_seq.kit_config[1].vel_normal;
+    fast_clicks(1, 8);
+    CHECK(g_seq.kit_config[1].vel_normal == vel + 24);
+    fast_clicks(1, -5);                                 // 1+1+1+1+4
+    CHECK(g_seq.kit_config[1].vel_normal == vel + 16);
+    fast_clicks(0, -KIT_PARAM_VEL_NORMAL);              // TYPE: one type per click
+    CHECK(ui.config_param == KIT_PARAM_TYPE);
+    fast_clicks(1, 3);
+    CHECK(type_everywhere(1, TRACK_TYPE_KIT));
+    fast_clicks(1, 1);
+    CHECK(type_everywhere(1, TRACK_TYPE_SYNTH));
+    fast_clicks(0, TRACK_PARAM_OUTPUT);                 // OUTPUT: one mode per click
+    uint8_t mode = g_seq.patterns[0].tracks[1].output_mode;
+    fast_clicks(1, 5);
+    CHECK(g_seq.patterns[0].tracks[1].output_mode == (mode + 5) % 3);
+
+    press_encoder(1, BTN_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    ui.select_pattern = 0;
+    fast_clicks(0, 6);
+    CHECK(pattern_slot(ui.select_pattern) == 6);
+    fast_clicks(1, 5);                                  // A..D, then B
+    CHECK(pattern_bank(ui.select_pattern) == 1);
+}
+
+static void test_fast_clicks_in_editors(void) {
+    open_editor_from_session();
+    const step_t *st = &g_seq.patterns[3].steps[2][4];
+    fast_clicks(0, 9);                                  // 1+1+1+1+4+4+4+8+8
+    fast_clicks(1, 7);                                  // 1+1+1+1+4+4+4
+    CHECK(st->note == 32 && st->velocity == 16);
+    press_encoder(1, BTN_PRESS);
+
+    // The kit step editor: one value step per click.
+    make_kit(1);
+    focus_lane(1, 0, LANE_SD);
+    press_step(5);
+    long_step(5);
+    release_step(5);
+    CHECK(ui.mode == UI_KIT_STEP_EDIT);
+    fast_clicks(1, 2);
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_ACCENT);
+    fast_clicks(0, 5);                                  // the lane cursor too
+    CHECK(ui.kit_cursor == LANE_SD + 5);
+    press_encoder(1, BTN_PRESS);
+
+    // The Song editor: the cursor and an entry's pattern are choices, its
+    // repeats a number.
+    for (unsigned i = 0; i < 8; i++) CHECK(song_append(0, 1));
+    press_encoder(1, BTN_LONG_PRESS);
+    press_encoder(0, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_SONG_EDIT);
+    fast_clicks(0, 6);
+    CHECK(ui.song_cursor == 6);
+    fast_clicks(1, 6);
+    CHECK(g_seq.song.entries[6].pattern_index[ui.selected_track] == 6);
+    press_encoder(0, BTN_PRESS);
+    fast_clicks(1, 8);
+    CHECK(g_seq.song.entries[6].repeats == 1 + 24);
 }
 
 #define RUN(test) do { reset(); test(); printf("PASS %s\n", #test); } while (0)
@@ -1593,6 +1796,12 @@ int main(int argc, char **argv) {
     RUN(test_kit_editor_value_click_is_one_step);
     RUN(test_track_config_type_click_is_one_type);
     RUN(test_track_config_rows_move_by_clicks);
+    RUN(test_slow_click_moves_tempo_and_patterns_by_one);
+    RUN(test_slow_click_moves_kit_config_by_one);
+    RUN(test_slow_click_moves_synth_and_drum_config_by_one);
+    RUN(test_slow_click_moves_note_editor_and_song_by_one);
+    RUN(test_fast_clicks_accelerate_numbers_only);
+    RUN(test_fast_clicks_in_editors);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS all six OLED views render");
