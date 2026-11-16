@@ -771,6 +771,80 @@ static void test_launch_quant_setter_ignores_invalid(void) {
     CHECK(transport_get_launch_quant() == LAUNCH_QUANT_BEAT);
 }
 
+static unsigned count_note_ons(void) {
+    unsigned count = 0;
+    for (unsigned i = 0; i < fake_midi_length; i++) count += (fake_midi[i] & 0xF0) == 0x90;
+    return count;
+}
+
+static void test_clip_mask_tracks_edits(void) {
+    CHECK(sequencer_clip_mask(1) == 0);
+    set_note(9, 2, 3, 60, 0);
+    CHECK(sequencer_clip_mask(1) == (1ull << (2 * 8 + 1)));
+    set_length(9, 2, 3);
+    CHECK(sequencer_clip_mask(1) == 0);
+}
+
+static void test_clip_mask_ignores_stored_mute(void) {
+    g_seq.patterns[9].tracks[2].muted = true;
+    set_note(9, 2, 0, 60, 0);
+    CHECK(sequencer_clip_mask(1) == (1ull << (2 * 8 + 1)));
+}
+
+static void test_scene_queue_skips_tracks_already_there(void) {
+    transport_start();
+    CHECK(transport_queue_track_pattern(1, 9));
+    run_through_step(16);
+    CHECK(g_seq.transport.current_pattern[1] == 9);
+    CHECK(transport_queue_track_pattern(1, 4));
+    CHECK(transport_queue_track_pattern(3, 2));
+    CHECK(transport_queue_scene(9));
+    CHECK(g_seq.transport.queued_pattern[1] == NO_QUEUED_PATTERN);
+    CHECK(g_seq.transport.queued_pattern[3] == 9);
+    CHECK(g_seq.transport.queued_pattern[0] == 9);
+}
+
+static void test_empty_scene_silences_all_tracks(void) {
+    for (uint8_t track = 0; track < 4; track++)
+        for (uint8_t step = 0; step < 16; step++) set_note(0, track, step, 60, 0);
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_start();
+    run_through_step(3);
+    CHECK(transport_queue_scene(5));
+    run_through_step(16);
+    for (uint8_t track = 0; track < NUM_TRACKS; track++)
+        CHECK(g_seq.transport.current_pattern[track] == 5);
+    unsigned before = count_note_ons();
+    run_through_step(24);
+    CHECK(count_note_ons() == before);
+}
+
+static void test_scene_selects_at_once_when_stopped(void) {
+    CHECK(transport_queue_scene(4));
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        CHECK(g_seq.transport.current_pattern[track] == 4);
+        CHECK(g_seq.transport.queued_pattern[track] == NO_QUEUED_PATTERN);
+    }
+}
+
+static void test_scene_rejected_in_song_mode(void) {
+    transport_set_mode(PLAY_MODE_SONG);
+    CHECK(!transport_queue_scene(4));
+}
+
+static void test_snapshot_reports_queues_and_mutes(void) {
+    transport_start();
+    CHECK(transport_queue_track_pattern(2, 7));
+    seq_set_track_mute(1, true);
+    g_seq.patterns[0].tracks[3].muted = true;
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    CHECK(snap.queued[2] == 7);
+    CHECK(snap.live_mutes == 0x02);
+    CHECK(snap.stored_mutes & 0x08);
+    CHECK(snap.state == TRANSPORT_PLAYING);
+}
+
 int main(void) {
     unsigned tests = 0;
     seq_lock_init();
@@ -818,6 +892,13 @@ int main(void) {
     RUN(test_shortening_under_bar_does_not_launch_early);
     RUN(test_queue_right_after_bar_waits_a_whole_bar);
     RUN(test_launch_quant_setter_ignores_invalid);
+    RUN(test_clip_mask_tracks_edits);
+    RUN(test_clip_mask_ignores_stored_mute);
+    RUN(test_scene_queue_skips_tracks_already_there);
+    RUN(test_empty_scene_silences_all_tracks);
+    RUN(test_scene_selects_at_once_when_stopped);
+    RUN(test_scene_rejected_in_song_mode);
+    RUN(test_snapshot_reports_queues_and_mutes);
 #ifdef REBIRTH_THREADED_TEST
     RUN(test_stop_during_pending_gate_commit);
     RUN(test_panic_during_pending_gate_commit);

@@ -235,7 +235,28 @@ void song_set_end_mode(song_end_mode_t mode);
 bool transport_queue_pattern(uint8_t pattern_index);
 bool transport_queue_track_pattern(uint8_t track, uint8_t pattern_index);
 void transport_clear_queue(void);
+// Pattern mode only. Playing: tracks not on the location are queued to it and
+// tracks already on it lose any queue. Stopped: every track selects it at once.
+bool transport_queue_scene(uint8_t pattern_index);
 void transport_clear_track_queue(uint8_t track);
+
+typedef struct {
+    transport_state_t state;
+    play_mode_t       mode;
+    uint32_t          pulse_count;
+    uint8_t           current[NUM_TRACKS];
+    uint8_t           queued[NUM_TRACKS];
+    uint8_t           track_step[NUM_TRACKS];
+    uint8_t           live_mutes;    // g_seq.track_mutes
+    uint8_t           stored_mutes;  // bit c: patterns[current[c]].tracks[c].muted
+} transport_snapshot_t;
+
+// Consistent copy of the transport; takes the locks itself.
+void sequencer_snapshot(transport_snapshot_t *out);
+
+// Bit (track * 8 + slot): location bank * 8 + slot has an active step within
+// the track's length (stored mutes ignored). Takes seq_lock: call with none held.
+uint64_t sequencer_clip_mask(uint8_t bank);
 
 // Track mutes (bitmask, instant)
 void seq_set_track_mute(uint8_t track, bool muted);
