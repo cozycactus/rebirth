@@ -30,6 +30,7 @@ add_executable(rp2040_sequencer
     src/main.c
     src/sequencer.c
     src/pattern.c
+    src/kit.c
     src/midi_out.c
     src/cv_gate.c
     src/song.c

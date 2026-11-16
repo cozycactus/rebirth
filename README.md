@@ -5,7 +5,9 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 
 ## Features
 
-- **8 tracks × 16 steps** — synth (melodic) or drum (percussive) per track
+- **8 tracks × 16 steps** — synth (melodic), drum (percussive) or kit per track
+- **Kit track** — one track plays a whole TR-909 style drum machine over DIN MIDI:
+  12 lanes per step (accent plus 11 voices), three velocity levels and flams
 - **32 pattern locations** arranged like ReBirth: banks A-D, slots 1-8
 - **Independent pattern selection per track** — each track can play or queue a different bank/slot
 - **Per-track pattern length** — each track can loop at 1-16 sixteenth-note steps
@@ -23,7 +25,7 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **CV/Gate output** — 4 channels via MCP4822 DACs (1V/oct, 12-bit; default 0-2.048 V)
 - **96 PPQN** internal timing, **24 PPQN** MIDI Clock, 20–300 BPM
 - **Swing value** per pattern (playback timing pending)
-- **Step flags** — accent, slide, tie
+- **Step flags** — accent, slide, tie (synth and drum tracks)
 
 ## Architecture
 
@@ -38,7 +40,7 @@ Shared writes and playback snapshots are protected by spinlocks. The sequencer I
 1. **Collect** — buffer MIDI messages, stage CV/gate changes
 2. **Commit** — simultaneous GPIO writes for gates, then queue MIDI buffer
 
-DIN MIDI bytes are queued into a UART TX ring buffer and drained by UART0's TX interrupt, so the sequencer timer ISR does not wait for MIDI serial transmission.
+DIN MIDI bytes are queued into a UART TX ring buffer and drained by UART0's TX interrupt, one byte per interrupt, so the sequencer timer ISR does not wait for MIDI serial transmission. MIDI Clock and Start/Continue/Stop go out at the next message boundary, ahead of queued note bytes.
 
 ## Hardware
 
@@ -87,13 +89,15 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-Eleven CTest targets (ten test sources; `test_sync` is built twice, once per DAC
-gain) cover pattern/song data (`test_pattern`, `test_song`), MIDI/gate output at
+Thirteen CTest targets (twelve test sources; `test_sync` is built twice, once per DAC
+gain) cover pattern/song data (`test_pattern`, `test_song`), the kit lane
+helpers and settings (`test_kit`), MIDI/gate output at
 both DAC gains (`test_sync`, `test_sync_gain2`), the real timer/transport code
 (`test_playback`), flash storage (`test_storage`), the Session view
 (`test_session`), the LED frame builder (`test_led_frame`), the TCA8418 panel
 input (`test_panel_input`), the MCP23017 button/LED expanders and encoder
-buttons (`test_expanders`) and UI/OLED rendering (`test_ui`). Launch
+buttons (`test_expanders`), encoder clicks and their acceleration
+(`test_encoder`) and UI/OLED rendering (`test_ui`). Launch
 quantization runs in `sequencer.c` and is tested in `test_playback`.
 Unix builds also exercise concurrent Stop/Panic during a pending gate commit.
 
@@ -127,18 +131,31 @@ buttons edit it.
 - **Encoder 2 (VALUE):** turn for tempo; press cycles the launch quantization
   (1 BAR, 1 BEAT, NEXT STEP, TRACK LOOP; 1 BAR after power-up); long press opens
   the pattern selector on the focus.
+- **Turning either encoder:** every screen counts whole clicks. A choice moves
+  one per click however fast the turn: the focus, a list row, a kit lane, TYPE,
+  OUTPUT, a kit step's value, the pattern slot and bank, the song cursor and a
+  song entry's pattern. A number moves one per slow click and faster on a fast
+  turn: clicks under 60 ms apart count 1 for the first four, then 4 each for
+  three more, then 8 each. A pause of 60 ms or a turn back starts again at 1.
+  Numbers are the tempo (0.1 BPM a step), a step's note and velocity, CHANNEL,
+  GATE, a drum's NOTE, FLAM, the kit velocities and NOTE rows, and a song
+  entry's repeats.
 - Pads, SCENE, MUTE and PLAY work on every screen. Outside the Session view a
   pad launches without moving the focus.
 - The step editor returns to the screen it was opened from. In the pattern
   view, encoder 1 long returns to the Session view; in the selector, encoder 2
   long does.
-- Pattern view step buttons: a tap shorter than half a second toggles the step
-  when the button is released. Hold one or more steps and turn encoder 1 for
-  note or encoder 2 for velocity; encoder 1 short/long toggles accent/slide and
-  encoder 2 long toggles tie on the held steps. The first edit of a held empty
-  step creates it. A step held longer, or held while an encoder is turned or
-  pressed, is not toggled on release. While a step is held the encoders do not
-  change track, tempo or screen; pads, SCENE, MUTE and PLAY work as usual.
+- Pattern view step buttons on a SYNTH or DRUM track: a tap shorter than half
+  a second toggles the step when the button is released. Hold one or more steps
+  and turn encoder 1 for note or encoder 2 for velocity; encoder 1 short/long
+  toggles accent/slide and encoder 2 long toggles tie on the held steps. The
+  first edit of a held empty step creates it. A step held longer, or held while
+  an encoder is turned or pressed, is not toggled on release. While a step is
+  held the encoders do not change track, tempo or screen; pads, SCENE, MUTE and
+  PLAY work as usual. On a kit track the step buttons edit the focused lane
+  instead (see Editing a kit): a short press cycles it on release, a long press
+  opens the kit step editor, and a held kit step takes no encoder, so TRACK
+  still walks and VALUE still sets the tempo.
 - Hold both encoder buttons for Panic: it stops playback and returns to the
   Session view. Release both before issuing another command; keys held through
   the panic or pressed while it is held do nothing afterwards.
@@ -156,8 +173,87 @@ buttons edit it.
 - Step editor: encoder 1 short toggles accent, long toggles slide; encoder 2
   long toggles tie. Accent can combine with either connection type.
 
-New saves use version 5 with CRC32; version 4 saves still load after validation.
-Storage uses one flash region, so losing power during a save can lose that save.
+New saves use version 6 with CRC32; version 4 and 5 saves still load after
+validation (they load with empty kits and default kit settings). Storage uses
+one flash region, so losing power during a save can lose that save.
+
+### Kit track
+
+A kit track plays a TR-909 style drum machine over DIN MIDI from one track.
+Each step has 12 lanes, in ReBirth's 909 column order:
+
+| Lane | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| Name | AC | BD | SD | LT | MT | HT | RS | CP | CH | OH | CC | RC |
+
+AC is the total accent: it plays nothing itself and makes every hit on its
+step one level louder. A voice lane holds off, note, accent or flam. A kit is
+MIDI only: it never touches CV or the gates, and the track's OUTPUT, CV and
+drum-note settings are ignored. At most two tracks can be kits; a third is
+refused with `MAX 2 KITS` in the track config.
+
+**Setting up a 909.** Set the track's TYPE to KIT in its track config
+(hold its button 1-8 in the pattern selector), then set CHANNEL to the
+machine's MIDI channel and the NOTE rows to the machine's note map. The
+defaults follow the RD-9: BD 36, SD 38, LT 45, MT 47, HT 50, RS 37, CP 39,
+CH 42, OH 46, CC 49, RC 51; other models are set on the bench. The kit
+sends Note Off as Note On with velocity 0, so a machine that needs a real
+Note Off is not supported. Three velocities give the three levels the 909
+has, and the machine's accent threshold should lie between them:
+
+| Step | Without AC | With AC |
+|---|---|---|
+| note | VEL NORM (80) | VEL ACC (110) |
+| accent | VEL ACC (110) | VEL MAX (127) |
+| flam | first hit as a note, second hit one level up | same |
+
+A flam plays its second hit FLAM pulses later (96 pulses per quarter note,
+default 3, 1-12). The config screen shows the time at the current tempo.
+
+**The kick on its own track.** Keep the kick on an ordinary DRUM track on the
+909's channel (note 36) and the BD lane of the kit empty. The kick then has its
+own MUTE and its own clips, as a separate mixer channel did in a live rig.
+Three things follow:
+- The kit's AC lane does not reach the kick track. Accent the kick with its own
+  step accent flag (velocity 127).
+- The kick's plain steps use the step velocity (100 when a step is switched on),
+  not the kit's VEL NORM. On a machine whose accent threshold lies below 100,
+  lower that velocity in the step editor.
+- The kick track and the kit's BD lane send the same note on the same channel,
+  so use one or the other (see below).
+
+**One note, one track.** Any track (DRUM, SYNTH or another kit) on the kit's
+channel that plays one of the kit's notes has its note cut by the kit's
+releases (a kit Note Off is Note On velocity 0 on that note), and both trigger
+the same sound. Keep each kit note unique on its channel: leave the kit's BD
+lane empty when the kick has its own track, move a voice's NOTE away from a
+note another track plays there, and give two kits on one channel note maps that
+do not share a note (or a channel each). The power-up demo follows this: track
+1 is the kick, a DRUM track on CHANNEL 10 (note 36), and track 2 a kit on the
+same channel with its default settings, its BD lane empty, SD on steps 5 and 13
+and CH on every step.
+
+**Drums on the leftmost columns.** Inside one step the notes go out in track
+order, so the kick and the kit on the leftmost tracks get the earliest bytes.
+On DIN MIDI the last note of a dense step still leaves several milliseconds
+after the first (about 4 ms for a kit of six voices, 7 ms for all 11). Within a
+kit the order is BD, SD, CP, CH, OH, RS, LT, MT, HT, CC, RC.
+
+**Editing a kit.** TRACK walks the lanes: a kit is 12 stops, AC to RC, in the
+Session view and the Pattern view, and turning right into a kit lands on AC,
+left on RC. Each kit remembers its last lane (BD after power-up), and a pad on
+the kit's column moves the focus onto it. The step buttons edit the focused
+lane: a voice cycles off, note, accent, off (a flam step goes to off), AC
+toggles. Setting CH on a step clears OH there and the other way round. The
+step LEDs show the lane's non-zero steps; accent and flam are shown on the OLED
+strip (`.` off, `o` note, `O` accent, `f` flam). A long press on a step, or a
+TRACK press in the Pattern view, opens the kit step editor: TRACK moves the
+lane cursor, VALUE sets the lane's value, step buttons choose another step and
+a VALUE press returns. One click moves one lane, one row or one value step;
+the kit settings are numbers and speed up on a fast turn (see Live Controls).
+
+A kit track keeps its `step_t` data when its type changes, and its kit steps
+are kept too, so changing the type back restores either.
 
 ## Project Structure
 
@@ -169,7 +265,8 @@ src/
   sequencer.c       — Core 1 engine, timer ISR, transport, launch quantization
   pattern.c         — Pattern data manipulation
   song.c            — Song editing, track mutes
-  midi_out.c        — MIDI UART + buffered output
+  midi_out.c        — MIDI UART, buffered output, running status
+  kit.c             — Kit lane helpers, settings, glyphs
   cv_gate.c         — MCP4822 DAC + GPIO gate control
   display.c         — OLED drawing layer
   ssd1309.c         — OLED controller driver
@@ -187,6 +284,8 @@ HARDWARE_STATUS.md  — Build/bench verification status
 JITTER_MEASUREMENT.md — Timing measurement procedure
 test/
   test_pattern.c    — Pattern logic tests
+  test_kit.c        — Kit lane, settings and glyph helpers
+  test_encoder.c    — Encoder clicks and detent-rate acceleration
   test_sync.c       — Synchronization layer tests
   test_song.c       — Song mode tests
   test_playback.c   — Timer, transport, launch quantization, note and MIDI
@@ -217,7 +316,13 @@ test/
 - [x] Flash storage — save/load all patterns + song (step 9/10 in pattern select)
 - [x] Jitter measurement — GPIO probe + on-device ISR timing stats
 - [x] USB MIDI removed by design
+- [x] Kit track: 909 over DIN MIDI, 12 lanes, velocity levels, flams (bench items
+      in [HARDWARE_STATUS.md](HARDWARE_STATUS.md)), save format v6
 - [ ] MIDI clock sync (external)
+
+## Known Issues
+
+- The kit feature is not bench verified; see [HARDWARE_STATUS.md](HARDWARE_STATUS.md).
 
 ## License
 

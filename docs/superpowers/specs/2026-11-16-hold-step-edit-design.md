@@ -16,6 +16,12 @@ can be shaped without leaving the grid, including while the sequencer plays.
 Applies to `UI_PATTERN_VIEW` only. The Session view keeps its own step
 gestures: a short press toggles on release, a long press opens Step Edit.
 
+Since the merge with the drum-kit track (see
+`docs/superpowers/specs/2026-11-16-drum-kit-track-design.md`): the gesture
+applies to SYNTH and DRUM cells only; a kit cell keeps the kit's own step
+rules. A turn counts in whole encoder clicks, and the note and velocity edits
+use the detent-rate accelerated amount, as every numeric value does.
+
 1. **Tap.** A step button released less than `MCP_LONG_PRESS_MS` (500 ms) after
    the UI saw it pressed, with no encoder input during the hold, toggles the
    step **on release**. Today it toggles on press. The UI measures the hold

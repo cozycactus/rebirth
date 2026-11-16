@@ -69,6 +69,13 @@ void encoder_init(void) {
 
 // ─── Polling ───────────────────────────────────────────────────
 
+static void add_saturating(int16_t *total, int16_t value) {
+    int32_t sum = (int32_t)*total + value;
+    if (sum > INT16_MAX) sum = INT16_MAX;
+    if (sum < INT16_MIN) sum = INT16_MIN;
+    *total = (int16_t)sum;
+}
+
 void encoder_poll(void) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
@@ -83,16 +90,16 @@ void encoder_poll(void) {
         int8_t d = quad_table[transition];
         e->_prev_ab = new_ab;
 
+        // A detent is ENC_EDGES_PER_DETENT edges the same way; a turn back
+        // within it undoes its edges. Each one is timed for acceleration here,
+        // when it completes.
         if (d != 0) {
-            e->delta += d;
-
-            // Track acceleration
-            if (now - e->_last_tick_ms < ENC_ACCEL_FAST_MS) {
-                if (e->_accel_count < 127) e->_accel_count++;
-            } else {
-                e->_accel_count = 0;
+            e->_edges += d;
+            if (e->_edges == d * ENC_EDGES_PER_DETENT) {
+                e->_edges = 0;
+                add_saturating(&e->_detents, d);
+                add_saturating(&e->_amount, (int16_t)(d * encoder_accel_detent(&e->_accel, d, now)));
             }
-            e->_last_tick_ms = now;
         }
 
         // ── Button debounce ──
@@ -155,30 +162,22 @@ void encoder_resync(void) {
 
 // ─── Accessors ─────────────────────────────────────────────────
 
-int8_t encoder_get_delta(uint8_t enc) {
-    if (enc >= NUM_ENCODERS) return 0;
+static int8_t clamp_to_i8(int16_t value) {
+    if (value > INT8_MAX) return INT8_MAX;
+    if (value < INT8_MIN) return INT8_MIN;
+    return (int8_t)value;
+}
+
+encoder_turn_t encoder_get_turn(uint8_t enc) {
+    encoder_turn_t turn = {0, 0};
+    if (enc >= NUM_ENCODERS) return turn;
     encoder_state_t *e = &encoders[enc];
 
-    int8_t raw = e->delta;
-    e->delta = 0;
-
-    if (raw == 0) return 0;
-
-    // Apply acceleration
-    int8_t mult = 1;
-    if (e->_accel_count > 6) {
-        mult = ENC_ACCEL_MULT_HI;
-    } else if (e->_accel_count > 3) {
-        mult = ENC_ACCEL_MULT_LO;
-    }
-
-    int16_t result = (int16_t)raw * mult;
-
-    // Clamp to int8 range
-    if (result > 127) result = 127;
-    if (result < -128) result = -128;
-
-    return (int8_t)result;
+    turn.detents = clamp_to_i8(e->_detents);
+    turn.amount = clamp_to_i8(e->_amount);
+    e->_detents = 0;
+    e->_amount = 0;
+    return turn;
 }
 
 button_event_t encoder_get_button(uint8_t enc) {

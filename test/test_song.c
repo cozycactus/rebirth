@@ -340,6 +340,60 @@ TEST(test_track_config_applies_to_every_location) {
     ASSERT_EQ(g_seq.patterns[5].tracks[1].midi_channel, other);
 }
 
+static track_config_t kit_config_of(uint8_t track) {
+    track_config_t cfg = g_seq.patterns[0].tracks[track];
+    cfg.type = TRACK_TYPE_KIT;
+    return cfg;
+}
+
+/* Track 6 as a kit is refused, every location of it left as it was. */
+static void assert_track_6_kit_refused(void) {
+    static track_config_t before[MAX_PATTERNS];
+    for (int p = 0; p < MAX_PATTERNS; p++) {
+        memcpy(&before[p], &g_seq.patterns[p].tracks[6], sizeof(before[p]));
+    }
+    track_config_t kit = kit_config_of(6);
+    ASSERT_FALSE(seq_set_track_config(6, &kit));
+    for (int p = 0; p < MAX_PATTERNS; p++) {
+        ASSERT_EQ(memcmp(&before[p], &g_seq.patterns[p].tracks[6], sizeof(before[p])), 0);
+    }
+}
+
+TEST(test_third_kit_refused) {
+    for (int i = 0; i < MAX_PATTERNS; i++) pattern_init(&g_seq.patterns[i], i);
+    ASSERT_EQ(seq_kit_tracks(), 0);
+    track_config_t kit = kit_config_of(1);
+    ASSERT_TRUE(seq_set_track_config(1, &kit));
+    kit = kit_config_of(4);
+    ASSERT_TRUE(seq_set_track_config(4, &kit));
+    ASSERT_EQ(seq_kit_tracks(), (1 << 1) | (1 << 4));
+    for (int p = 0; p < MAX_PATTERNS; p++) {
+        ASSERT_EQ(g_seq.patterns[p].tracks[1].type, TRACK_TYPE_KIT);
+        ASSERT_EQ(g_seq.patterns[p].tracks[4].type, TRACK_TYPE_KIT);
+    }
+    assert_track_6_kit_refused();
+
+    /* A kit already counted takes a new config; a third track still takes SYNTH or DRUM. */
+    kit = kit_config_of(1);
+    kit.midi_channel = 9;
+    ASSERT_TRUE(seq_set_track_config(1, &kit));
+    track_config_t drum = g_seq.patterns[0].tracks[6];
+    drum.midi_channel = 11;
+    ASSERT_TRUE(seq_set_track_config(6, &drum));
+    ASSERT_EQ(g_seq.patterns[17].tracks[6].midi_channel, 11);
+
+    /* Track 4 a kit in location 31 only: still one of the two. */
+    track_config_t synth = g_seq.patterns[0].tracks[4];
+    synth.type = TRACK_TYPE_SYNTH;
+    ASSERT_TRUE(seq_set_track_config(4, &synth));
+    ASSERT_EQ(seq_kit_tracks(), 1 << 1);
+    g_seq.patterns[31].tracks[4].type = TRACK_TYPE_KIT;
+    ASSERT_EQ(seq_kit_tracks(), (1 << 1) | (1 << 4));
+    assert_track_6_kit_refused();
+
+    for (int i = 0; i < MAX_PATTERNS; i++) pattern_init(&g_seq.patterns[i], i);
+}
+
 /* ── Pattern access helpers ────────────────────────────── */
 
 TEST(test_seq_active_pattern) {
@@ -443,6 +497,7 @@ int main(void) {
     RUN(test_track_mute_bounds);
 
     RUN(test_track_config_applies_to_every_location);
+    RUN(test_third_kit_refused);
 
     /* Pattern access */
     RUN(test_seq_active_pattern);
