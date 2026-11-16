@@ -478,16 +478,18 @@ static void __not_in_flash_func(play_kit_step)(uint8_t track, const prepared_tra
     }
 }
 
-// Free TX queue bytes a flam's second hits must leave. The headroom covers the releases
-// and new first hits of an immediate restart (Start while playing, or Stop then Start) as
-// well as scheduled playback (two kits' note-offs and the worst step burst, 168 bytes as
-// queued in one pulse): with 192 a restart under two dense kits overflowed the queue.
-#define KIT_FLAM_RESERVE 288u
+// The most bytes the TX queue may hold once a flam's second hits are in it: 319, the
+// fill the first design allowed in a 512-byte queue (192 bytes left free). The cap
+// limits flams only; mandatory messages may fill the whole queue, whose headroom above
+// the cap covers scheduled playback (168 bytes in one pulse) and the releases and first
+// hits of an immediate restart (Start while playing, or Stop then Start).
+#define KIT_FLAM_MAX_QUEUED 319u
+_Static_assert(KIT_FLAM_MAX_QUEUED < MIDI_TX_QUEUE_SIZE - 1u, "the flam cap leaves headroom");
 
 // Pulse order step 4: the second hits of a kit's flam, per voice Note On velocity 0
 // then Note On at the flam velocity, in one send of their own, never through midi_buf.
-// The only kit message that may be dropped: skipped when it would leave the TX queue
-// under KIT_FLAM_RESERVE bytes free; the voices then sound on until their note-off.
+// The only kit message that may be dropped: skipped when the TX queue would then hold
+// more than KIT_FLAM_MAX_QUEUED bytes; the voices then sound on until their note-off.
 // In RAM.
 static void __not_in_flash_func(kit_play_flam)(uint8_t track) {
     kit_runtime_t *k = &kit_runtime[track];
@@ -505,7 +507,7 @@ static void __not_in_flash_func(kit_play_flam)(uint8_t track) {
         message[length++] = k->flam_velocity;
     }
     k->flam = 0;
-    if (length && !midi_try_send_bytes_reserve(message, length, KIT_FLAM_RESERVE)) {
+    if (length && !midi_try_send_bytes_capped(message, length, KIT_FLAM_MAX_QUEUED)) {
         jitter_stats.flam_drops++;
     }
 }

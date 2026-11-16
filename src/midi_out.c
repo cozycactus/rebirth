@@ -21,7 +21,7 @@ void uart_putc_raw(void *uart, uint8_t c);
 // Buffer MIDI messages during step processing, flush all at once.
 
 #define MIDI_BUF_SIZE   160
-#define MIDI_TX_QUEUE_SIZE 512
+#define MIDI_TX_QUEUED_MAX (MIDI_TX_QUEUE_SIZE - 1u)   // bytes the TX queue can hold
 #define MIDI_RT_QUEUE_SIZE 4
 
 static uint8_t midi_buf[MIDI_BUF_SIZE];
@@ -117,12 +117,13 @@ static void __not_in_flash_func(midi_tx_drain_locked)(void) {
     uart_set_irq_enables(MIDI_UART, false, midi_tx_pending_locked());
 }
 
-// Queues whole messages if they fit with `reserve` bytes still free afterwards.
-static bool midi_tx_enqueue_locked(const uint8_t *data, uint16_t length, uint16_t reserve) {
+// Queues whole messages if the queue then holds at most `max_queued` bytes
+// (MIDI_TX_QUEUED_MAX or less).
+static bool midi_tx_enqueue_locked(const uint8_t *data, uint16_t length, uint16_t max_queued) {
     // Move bytes into a UART that has room before its TX IRQ runs.
     midi_tx_drain_locked();
-    uint16_t free_bytes = (midi_tx_tail - midi_tx_head - 1u) & (MIDI_TX_QUEUE_SIZE - 1u);
-    if ((uint32_t)length + reserve > free_bytes) return false;
+    uint16_t queued = (midi_tx_head - midi_tx_tail) & (MIDI_TX_QUEUE_SIZE - 1u);
+    if ((uint32_t)queued + length > max_queued) return false;
     // Publish complete messages/batches, never a partial MIDI packet.
     for (uint16_t i = 0; i < length; i++) {
         midi_tx_queue[midi_tx_head] = data[i];
@@ -183,7 +184,7 @@ void midi_init(void) {
 void __not_in_flash_func(midi_send_bytes)(const uint8_t *data, uint16_t length) {
 #ifndef MOCK_HARDWARE
     uint32_t lock_state = midi_tx_lock();
-    if (!midi_tx_enqueue_locked(data, length, 0)) {
+    if (!midi_tx_enqueue_locked(data, length, MIDI_TX_QUEUED_MAX)) {
         midi_tx_dropped_bytes += length;
         midi_overflow = true;
     }
@@ -194,15 +195,16 @@ void __not_in_flash_func(midi_send_bytes)(const uint8_t *data, uint16_t length) 
 }
 
 // In RAM: the timer ISR calls it for every flam's second hits.
-bool __not_in_flash_func(midi_try_send_bytes_reserve)(const uint8_t *data, uint16_t length,
-                                                      uint16_t reserve) {
+bool __not_in_flash_func(midi_try_send_bytes_capped)(const uint8_t *data, uint16_t length,
+                                                     uint16_t max_queued) {
 #ifndef MOCK_HARDWARE
+    if (max_queued > MIDI_TX_QUEUED_MAX) max_queued = MIDI_TX_QUEUED_MAX;
     uint32_t lock_state = midi_tx_lock();
-    bool queued = midi_tx_enqueue_locked(data, length, reserve);
+    bool queued = midi_tx_enqueue_locked(data, length, max_queued);
     midi_tx_unlock(lock_state);
     return queued;
 #else
-    (void)reserve;
+    (void)max_queued;
     for (uint16_t i = 0; i < length; i++) uart_putc_raw(MIDI_UART, data[i]);
     return true;
 #endif

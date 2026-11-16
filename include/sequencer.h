@@ -41,6 +41,8 @@
 #define MIDI_START          0xFA
 #define MIDI_STOP           0xFC
 #define MIDI_CONTINUE       0xFB
+// The UART TX queue (a power of two; one byte stays unused, so it holds one less).
+#define MIDI_TX_QUEUE_SIZE  1024
 
 // Jitter measurement
 #define JITTER_PROBE_PIN    7       // High while sequencer timer ISR runs
@@ -191,7 +193,8 @@ typedef struct {
     uint32_t max_isr_duration_us;
     uint32_t overruns;                  // ISR entered later than one pulse interval
     uint32_t flam_drops;                // dropped flam sends: one per kit per flam pulse whose
-                                        // second hits were skipped to keep the TX reserve
+                                        // second hits were skipped: the TX queue would
+                                        // have held more than the flam cap
 } sequencer_jitter_stats_t;
 
 // ─── Shared State (accessed by both cores) ──────────────────────
@@ -327,9 +330,9 @@ void midi_init(void);
 // Whole channel messages, each with its status byte (the drain applies running
 // status). Sets the overflow flag when they do not fit in the TX queue.
 void midi_send_bytes(const uint8_t *data, uint16_t length);
-// Queues them only if `reserve` bytes stay free afterwards; otherwise returns false
-// and leaves the overflow flag alone.
-bool midi_try_send_bytes_reserve(const uint8_t *data, uint16_t length, uint16_t reserve);
+// Queues them only if the TX queue then holds at most `max_queued` bytes; otherwise
+// returns false and leaves the overflow flag alone. One call under the TX lock.
+bool midi_try_send_bytes_capped(const uint8_t *data, uint16_t length, uint16_t max_queued);
 void midi_send_note_on(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_send_note_off(uint8_t channel, uint8_t note);
 void midi_send_cc(uint8_t channel, uint8_t cc, uint8_t value);

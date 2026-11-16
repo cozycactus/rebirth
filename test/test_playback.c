@@ -485,18 +485,23 @@ static void test_timer_wrap_is_normal(void) {
     CHECK(jitter_stats.overruns == 0);
 }
 
+// The TX queue holds MIDI_TX_QUEUE_SIZE - 1 bytes: FULL_NOTES Note Ons fill it to
+// under one message (3 bytes) from full.
+#define QUEUE_BYTES (MIDI_TX_QUEUE_SIZE - 1u)
+#define FULL_NOTES  (QUEUE_BYTES / 3u)
+
 static void test_uart_overflow_never_sends_partial_message(void) {
     fake_uart_writable = false;
-    for (unsigned note = 0; note < 170; note++) midi_send_note_on(0, note & 0x7F, 100);
-    midi_send_clock(); // 510 bytes; the Clock takes none: one queue byte remains.
+    for (unsigned note = 0; note < FULL_NOTES; note++) midi_send_note_on(0, note & 0x7F, 100);
+    midi_send_clock(); // the Clock takes no queue byte: under 3 bytes remain
     midi_send_note_on(1, 100, 100);
     CHECK(midi_output_overflowed());
     CHECK(fake_midi_length == 0);
     fake_uart_writable = true;
     fake_irq_handlers[UART0_IRQ]();
-    CHECK(decode_midi() == 171);
+    CHECK(decode_midi() == FULL_NOTES + 1);
     CHECK(midi_msgs[0].status == MIDI_CLOCK);
-    for (unsigned note = 0; note < 170; note++) {
+    for (unsigned note = 0; note < FULL_NOTES; note++) {
         CHECK(msg_is(midi_msgs[1 + note], MIDI_NOTE_ON, note & 0x7F, 100));
     }
     CHECK(message_boundary(fake_midi_length));
@@ -505,16 +510,16 @@ static void test_uart_overflow_never_sends_partial_message(void) {
 
 static void test_full_queue_drains_free_uart_before_dropping(void) {
     fake_uart_writable = false;
-    for (unsigned note = 0; note < 170; note++) midi_send_note_on(0, note & 0x7F, 100);
+    for (unsigned note = 0; note < FULL_NOTES; note++) midi_send_note_on(0, note & 0x7F, 100);
     midi_send_clock();
-    CHECK(!midi_output_overflowed()); // 510 of 511 bytes: no room for another message.
+    CHECK(!midi_output_overflowed()); // no room for another message
     fake_uart_writable = true;        // The UART can take bytes before its IRQ runs.
     midi_send_note_on(1, 42, 100);
     CHECK(!midi_output_overflowed());
     fake_irq_handlers[UART0_IRQ]();
-    CHECK(decode_midi() == 172);
+    CHECK(decode_midi() == FULL_NOTES + 2);
     CHECK(midi_msgs[0].status == MIDI_CLOCK);
-    CHECK(msg_is(midi_msgs[171], MIDI_NOTE_ON | 1, 42, 100));
+    CHECK(msg_is(midi_msgs[FULL_NOTES + 1], MIDI_NOTE_ON | 1, 42, 100));
     CHECK(message_boundary(fake_midi_length));
 }
 
@@ -782,7 +787,7 @@ static void queue_bytes(unsigned bytes) {
     for (; bytes; bytes -= 3) midi_send_note_on(0, 60, 100);
 }
 
-static void test_try_send_keeps_reserve(void) {
+static void test_try_send_keeps_cap(void) {
     uint8_t burst[30];
     for (unsigned i = 0; i < 10; i++) {
         burst[3 * i] = MIDI_NOTE_ON | 9;
@@ -790,18 +795,23 @@ static void test_try_send_keeps_reserve(void) {
         burst[3 * i + 2] = 100;
     }
     fake_uart_writable = false;
-    queue_bytes(300);             // 211 bytes free
-    CHECK(!midi_try_send_bytes_reserve(burst, sizeof(burst), 192));
+    queue_bytes(290);             // 320 bytes queued with the burst: one over
+    CHECK(!midi_try_send_bytes_capped(burst, sizeof(burst), 319));
     CHECK(!midi_output_overflowed());
     fake_uart_writable = true;
     fake_irq_handlers[UART0_IRQ]();
     CHECK(fake_midi_count(MIDI_NOTE_ON | 9) == 0);
     fake_uart_writable = false;
-    queue_bytes(289);             // 222 bytes free: just enough
-    CHECK(midi_try_send_bytes_reserve(burst, sizeof(burst), 192));
+    queue_bytes(289);             // 319 bytes queued with the burst: just in
+    CHECK(midi_try_send_bytes_capped(burst, sizeof(burst), 319));
+    // A cap above the queue's size is the queue's size: a full queue takes nothing.
+    midi_clear_output_queue();
+    queue_bytes(QUEUE_BYTES - 20);
+    CHECK(!midi_try_send_bytes_capped(burst, sizeof(burst), UINT16_MAX));
+    CHECK(!midi_output_overflowed());
     midi_clear_output_queue();
     queue_bytes(100);
-    CHECK(midi_try_send_bytes_reserve(burst, sizeof(burst), 192));
+    CHECK(midi_try_send_bytes_capped(burst, sizeof(burst), 319));
     fake_uart_writable = true;
     fake_irq_handlers[UART0_IRQ]();
     CHECK(fake_midi_count(MIDI_NOTE_ON | 9) == 10);
@@ -816,7 +826,7 @@ static void test_fifo_disabled(void) {
 static void test_output_overflow_stops_transport(void) {
     sound_note();
     fake_uart_writable = false;
-    for (unsigned note = 0; note < 200; note++) midi_send_note_on(0, note & 0x7F, 100);
+    for (unsigned note = 0; note <= FULL_NOTES; note++) midi_send_note_on(0, note & 0x7F, 100);
     tick();
     CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
     CHECK(fake_gates == 0);
@@ -1793,8 +1803,9 @@ static void test_flam_overload_drops_second_hits(void) {
     tick();                                 // pulse 0: the first hits go out at once
     CHECK(count_kit_hits() == KIT_VOICES);
     fake_uart_writable = false;
-    // 255 bytes queued, 256 free: under KIT_FLAM_RESERVE (288) + 66, the 11-voice flam
-    // message as queued.
+    // 255 bytes queued: with the 11-voice flam message (66 bytes as queued) over
+    // KIT_FLAM_MAX_QUEUED; 252 would let it through.
+    CHECK(85 * 3 + 66 > KIT_FLAM_MAX_QUEUED && 84 * 3 + 66 <= KIT_FLAM_MAX_QUEUED);
     for (unsigned i = 0; i < 85; i++) midi_send_note_on(0, 60, 100);
     pulses(3);                              // pulse 3: flam 3
     CHECK(flam_drops() == 1);
@@ -1813,21 +1824,29 @@ static void test_flam_overload_drops_second_hits(void) {
     CHECK(flam_drops() == 0);
 }
 
-// Review focus: a restart under dense kit load, in wire time. Kits on tracks 0 and 4
-// (channels 10 and 9), ten voices each (no OH) flammed on every step, six SYNTH tracks
-// with a note on every step, 300 BPM. At pulse 768 the transport restarts: Start while
-// playing, or (`stop_first`) Stop then an immediate Start, as from the PLAY button. The
-// old run's releases join the TX backlog; the new run's first step must still fit.
-static void dense_kit_restart(bool stop_first) {
-    static const uint8_t gates[NUM_TRACKS] = {65, 27, 51, 87, 20, 49, 71, 21};
+// A restart under dense kit load, in wire time. Kits on tracks 0 and 4 (channels 10
+// and 9), ten voices each (no OH) flammed on every step, six SYNTH tracks with a note on
+// every step. After `restart_pulse` pulses the transport restarts: Start while playing,
+// or (`stop_first`) Stop then an immediate Start, as from the PLAY button. The old run's
+// releases join the TX backlog; the new run's steps must still fit.
+typedef struct {
+    float bpm;
+    uint8_t gates[NUM_TRACKS];
+    uint8_t flam_pulses[2];                 // the kits on tracks 0 and 4
+    unsigned restart_pulse;
+    unsigned pulses;                        // run in all
+    bool stop_first;
+} restart_case_t;
+
+static void play_restart(const restart_case_t *c) {
     fake_uart_run_until(0);                 // wire-time mode
-    transport_set_bpm(300);
+    transport_set_bpm(c->bpm);
     for (uint8_t t = 0; t < NUM_TRACKS; t++) {
         bool kit = t == 0 || t == 4;
         if (kit) make_kit(t, t == 0 ? 10 : 9);
         else g_seq.patterns[0].tracks[t].type = TRACK_TYPE_SYNTH;
-        g_seq.patterns[0].tracks[t].gate_length_pct = gates[t];
-        if (kit) g_seq.kit_config[t].flam_pulses = t == 0 ? 7 : 12;
+        g_seq.patterns[0].tracks[t].gate_length_pct = c->gates[t];
+        if (kit) g_seq.kit_config[t].flam_pulses = c->flam_pulses[t != 0];
         for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
             if (kit) {
                 uint32_t word = 0;
@@ -1841,11 +1860,11 @@ static void dense_kit_restart(bool stop_first) {
         sequencer_refresh_track_playback(t, 0);
     }
     transport_start();
-    for (unsigned p = 0; p < 1000; p++) {
+    for (unsigned p = 0; p < c->pulses; p++) {
         fake_uart_run_until(timer_hw->alarm[0]);
         tick();
-        if (p == 768) {
-            if (stop_first) transport_stop();
+        if (p == c->restart_pulse) {
+            if (c->stop_first) transport_stop();
             transport_start();
         }
         CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
@@ -1853,8 +1872,46 @@ static void dense_kit_restart(bool stop_first) {
     }
 }
 
+// Review focus: the case the multi-model review found, 300 BPM.
+static void dense_kit_restart(bool stop_first) {
+    restart_case_t c = {300, {65, 27, 51, 87, 20, 49, 71, 21}, {7, 12}, 768, 1000, stop_first};
+    play_restart(&c);
+}
+
 static void test_dense_kit_restart_does_not_overflow(void) { dense_kit_restart(false); }
 static void test_dense_kit_stop_start_does_not_overflow(void) { dense_kit_restart(true); }
+
+// xorshift32 from a fixed seed: the same cases on every run.
+static uint32_t sweep_state;
+static unsigned sweep_between(unsigned lo, unsigned hi) {
+    uint32_t x = sweep_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    sweep_state = x;
+    return lo + x % (hi - lo + 1u);
+}
+
+#define RESTART_SWEEP_SEED  0x5EED2026u
+#define RESTART_SWEEP_CASES 2000u
+
+// Seeded random restarts: gates 10-100 % per track, FLAM 1-12 per kit, 140-300 BPM,
+// Start or Stop-then-Start at pulse 24-480, then four more steps. None may overflow.
+static void test_restart_sweep_never_overflows(void) {
+    sweep_state = RESTART_SWEEP_SEED;
+    for (unsigned n = 0; n < RESTART_SWEEP_CASES; n++) {
+        restart_case_t c;
+        c.bpm = (float)sweep_between(140, 300);
+        for (uint8_t t = 0; t < NUM_TRACKS; t++) c.gates[t] = (uint8_t)sweep_between(10, 100);
+        c.flam_pulses[0] = (uint8_t)sweep_between(KIT_FLAM_MIN, KIT_FLAM_MAX);
+        c.flam_pulses[1] = (uint8_t)sweep_between(KIT_FLAM_MIN, KIT_FLAM_MAX);
+        c.restart_pulse = sweep_between(24, 480);
+        c.pulses = c.restart_pulse + 4u * PULSES_PER_STEP;
+        c.stop_first = sweep_between(0, 1) != 0;
+        reset();
+        play_restart(&c);
+    }
+}
 
 typedef struct {
     float bpm;
@@ -1967,6 +2024,16 @@ static void test_kits_at_wire_rate(void) {
     }
     load_case_t one_kit = {150.0f, 100, 3, 1, 16};
     CHECK(play_load(&one_kit) == 0);
+}
+
+// Two kits with every voice flammed on every step, gate 100 %, FLAM 3: below the DIN
+// rate every second hit is played.
+static void test_all_flam_kits_keep_flams_to_200_bpm(void) {
+    static const float tempos[] = {140.0f, 170.0f, 200.0f};
+    for (unsigned i = 0; i < sizeof(tempos) / sizeof(tempos[0]); i++) {
+        load_case_t c = {tempos[i], 100, 3, 2, 8};
+        CHECK(play_load(&c) == 0);
+    }
 }
 
 // ─── Kit launches, Song mode and type changes ───────────────────
@@ -2333,7 +2400,7 @@ int main(void) {
     RUN(test_wait_idle_sends_pending_clock);
     RUN(test_clock_spacing_on_empty_pattern);
     RUN(test_clock_waits_one_message_in_long_burst);
-    RUN(test_try_send_keeps_reserve);
+    RUN(test_try_send_keeps_cap);
     RUN(test_fifo_disabled);
     RUN(test_output_overflow_stops_transport);
     RUN(test_bar_launch_waits_for_bar_line);
@@ -2383,6 +2450,8 @@ int main(void) {
     RUN(test_flam_overload_drops_second_hits);
     RUN(test_dense_kit_restart_does_not_overflow);
     RUN(test_dense_kit_stop_start_does_not_overflow);
+    RUN(test_restart_sweep_never_overflows);
+    RUN(test_all_flam_kits_keep_flams_to_200_bpm);
     RUN(test_kits_at_wire_rate);
     RUN(test_kit_launch_every_quant);
     RUN(test_kit_song_mode);
