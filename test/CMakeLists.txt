@@ -129,3 +129,12 @@ add_executable(test_expanders
 )
 target_include_directories(test_expanders PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME expanders_tests COMMAND test_expanders)
+
+add_executable(test_key_scan
+    test_key_scan.c
+    fakes/fake_key_matrix.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/key_scan.c
+)
+target_include_directories(test_key_scan PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME key_scan_tests COMMAND test_key_scan)
