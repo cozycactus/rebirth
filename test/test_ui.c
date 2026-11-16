@@ -180,6 +180,70 @@ static void panel(panel_kind_t kind, uint8_t track, uint8_t row) {
     ui_update();
 }
 
+#define STEP(track, step) g_seq.patterns[0].steps[track][step]
+
+static void step_down(uint16_t mask) {
+    step_buttons.pressed |= mask;
+    step_buttons.held |= mask;
+    ui_update();
+}
+
+static void step_up(uint16_t mask) {
+    step_buttons.held &= (uint16_t)~mask;
+    step_buttons.released |= mask;
+    ui_update();
+}
+
+static void turn(uint8_t encoder, int8_t delta) {
+    deltas[encoder] = delta;
+    ui_update();
+}
+
+// The real driver reports a short press when the button is released and a
+// long press while it is still down.
+static void encoder_down(uint8_t encoder) {
+    held[encoder] = true;
+    ui_update();
+}
+
+static void encoder_up(uint8_t encoder, button_event_t event) {
+    held[encoder] = false;
+    press_encoder(encoder, event);
+}
+
+static void encoder_short(uint8_t encoder) {
+    encoder_down(encoder);
+    encoder_up(encoder, BTN_PRESS);
+}
+
+static void encoder_long(uint8_t encoder) {
+    encoder_down(encoder);
+    press_encoder(encoder, BTN_LONG_PRESS);
+    encoder_up(encoder, BTN_RELEASE);
+}
+
+static void enter_pattern_view(void) {
+    press_encoder(0, BTN_PRESS);
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+}
+
+// Note Ons on MIDI channel `channel` (0-15) with this note and velocity, from
+// the decoded output: channel messages may go out with running status.
+static unsigned count_channel_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
+    static fake_midi_msg_t messages[FAKE_MIDI_CAPACITY];
+    unsigned decoded = fake_midi_decode(messages, FAKE_MIDI_CAPACITY);
+    unsigned found = 0;
+    for (unsigned i = 0; i < decoded; i++) {
+        if (messages[i].status == (MIDI_NOTE_ON | channel) && messages[i].data1 == note &&
+            messages[i].data2 == velocity) found++;
+    }
+    return found;
+}
+
+static unsigned count_note_on(uint8_t note, uint8_t velocity) {
+    return count_channel_note_on(0, note, velocity);
+}
+
 static void test_session_is_home_and_steps_edit_focus(void) {
     CHECK(ui.mode == UI_SESSION);
     panel(PANEL_PAD, 2, 3);
@@ -428,6 +492,20 @@ static void test_selector_short_press_mutes_on_release(void) {
     CHECK(g_seq.track_mutes == 4);
 }
 
+// Step LEDs 1-8 of the selector are lit for audible tracks: a stored mute at
+// the playing location counts as muted, as on MUTE and the RGB lights.
+static void test_selector_leds_show_stored_mutes(void) {
+    press_encoder(1, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    ui_update();
+    CHECK((led_mask & 0xFF) == 0xFF);
+    g_seq.patterns[g_seq.transport.current_pattern[2]].tracks[2].muted = true;
+    g_seq.patterns[9].tracks[3].muted = true;   // not where track 4 plays
+    seq_set_track_mute(5, true);
+    ui_update();
+    CHECK((led_mask & 0xFF) == (0xFF & ~((1u << 2) | (1u << 5))));
+}
+
 static void test_flash_controls_are_blocked_during_playback(void) {
     transport_start();
     press_encoder(1, BTN_LONG_PRESS);
@@ -471,11 +549,11 @@ static void test_nonplaying_editor_hides_playhead(void) {
     g_seq.active_pattern[0] = 3;
     g_seq.transport.current_track_step[0] = 0;
     display_clear();
-    display_draw_pattern_view(&g_seq.patterns[3], 0, 0);
+    display_draw_pattern_view(&g_seq.patterns[3], 0, 0, -1);
     uint8_t without_playhead[OLED_BUF_SIZE];
     memcpy(without_playhead, ssd1309_get_framebuffer(), sizeof(without_playhead));
     display_clear();
-    display_draw_pattern_view(&g_seq.patterns[3], 0, NO_QUEUED_PATTERN);
+    display_draw_pattern_view(&g_seq.patterns[3], 0, NO_QUEUED_PATTERN, -1);
     CHECK(memcmp(without_playhead, ssd1309_get_framebuffer(), sizeof(without_playhead)) == 0);
 }
 
@@ -760,8 +838,8 @@ static void test_session_oled_renders(void) {
     // Stopped, every track on A1, focus T1 A1 of length 16: no bar step.
     memcpy(rendered, ssd1309_get_framebuffer(), sizeof(rendered));
     display_clear();
-    display_draw_session_view(0, 0, 0, 0, 16, DEFAULT_BPM, LAUNCH_QUANT_TRACK_LOOP, 0xFF,
-                              NULL, NULL, STEPS_PER_PATTERN);
+    display_draw_session_view(0, 0, PLAY_MODE_PATTERN, 0, 0, 16, DEFAULT_BPM,
+                              LAUNCH_QUANT_TRACK_LOOP, 0xFF, NULL, NULL, STEPS_PER_PATTERN);
     CHECK(memcmp(rendered, ssd1309_get_framebuffer(), sizeof(rendered)) == 0);
     // Track 1 moved to A2 (stopped: at once), then playing at global step 5.
     panel(PANEL_PAD, 1, 1);
@@ -773,9 +851,596 @@ static void test_session_oled_renders(void) {
     ui_render();
     memcpy(rendered, ssd1309_get_framebuffer(), sizeof(rendered));
     display_clear();
-    display_draw_session_view(0, 0xFF, 1, 1, 7, DEFAULT_BPM, LAUNCH_QUANT_TRACK_LOOP, 5,
-                              NULL, NULL, STEPS_PER_PATTERN);
+    display_draw_session_view(0, 0xFF, PLAY_MODE_PATTERN, 1, 1, 7, DEFAULT_BPM,
+                              LAUNCH_QUANT_TRACK_LOOP, 5, NULL, NULL, STEPS_PER_PATTERN);
     CHECK(memcmp(rendered, ssd1309_get_framebuffer(), sizeof(rendered)) == 0);
+}
+
+// True when the last character cell of OLED line 0 shows exactly `mark`.
+static bool mode_mark_is(char mark) {
+    const uint8_t x0 = (FONT_COLS - 1) * FONT_CHAR_W;
+    bool rendered[FONT_CHAR_H][FONT_CHAR_W];
+    for (uint8_t y = 0; y < FONT_CHAR_H; y++) {
+        for (uint8_t x = 0; x < FONT_CHAR_W; x++) rendered[y][x] = ssd1309_get_pixel(x0 + x, y);
+    }
+    display_clear();
+    const char text[2] = { mark, '\0' };
+    ssd1309_draw_string(x0, 0, text, false);
+    for (uint8_t y = 0; y < FONT_CHAR_H; y++) {
+        for (uint8_t x = 0; x < FONT_CHAR_W; x++) {
+            if (rendered[y][x] != ssd1309_get_pixel(x0 + x, y)) return false;
+        }
+    }
+    return true;
+}
+
+// Line 0 of the Session OLED ends with the play mode: P (Pattern) or S (Song).
+static void test_session_oled_shows_the_play_mode(void) {
+    CHECK(ui.mode == UI_SESSION);
+    display_clear();
+    ui_render();
+    CHECK(mode_mark_is('P'));
+    CHECK(song_append(0, 1));
+    transport_set_mode(PLAY_MODE_SONG);
+    display_clear();
+    ui_render();
+    CHECK(mode_mark_is('S'));
+}
+
+static void test_grid_tap_toggles_on_release(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    CHECK(STEP(0, 4).flags == 0);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+    step_down(1u << 4);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == 0);
+}
+
+static void test_grid_hold_turn_edits_note_without_toggling(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    step_up(1u << 4);                       // active, note 60, velocity 100
+    step_down(1u << 4);
+    for (int i = 0; i < 50; i++) ui_update();   // idle updates keep the hold
+    turn(0, 3);
+    CHECK(STEP(0, 4).note == 63);
+    CHECK(ui.selected_track == 0);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+    turn(0, 1);                             // navigation is back
+    CHECK(ui.selected_track == 1);
+    CHECK(STEP(0, 4).note == 63);
+}
+
+static void test_grid_hold_turn_edits_velocity_not_tempo(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    step_up(1u << 4);
+    float bpm = g_seq.transport.bpm;
+    step_down(1u << 4);
+    turn(1, -10);
+    CHECK(STEP(0, 4).velocity == 90);
+    CHECK(g_seq.transport.bpm == bpm);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+}
+
+static void test_grid_hold_turn_creates_empty_step(void) {
+    enter_pattern_view();
+    step_down(1u << 7);
+    turn(0, 2);
+    CHECK(STEP(0, 7).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 7).note == 62);
+    CHECK(STEP(0, 7).velocity == 100);
+    step_up(1u << 7);
+    CHECK(STEP(0, 7).flags == STEP_FLAG_ACTIVE);
+}
+
+static void test_grid_hold_time_decides_tap_or_peek(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    sleep_ms(MCP_LONG_PRESS_MS - 1);
+    step_up(1u << 4);                       // 499 ms: still a tap
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+    step_down(1u << 4);
+    sleep_ms(MCP_LONG_PRESS_MS);
+    step_up(1u << 4);                       // 500 ms: peek, the step stays on
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+    step_down(1u << 4);
+    sleep_ms(MCP_LONG_PRESS_MS);
+    turn(0, 3);                             // a long hold still edits
+    CHECK(STEP(0, 4).note == 63);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+}
+
+static void test_grid_tap_beside_a_held_step(void) {
+    enter_pattern_view();
+    step_down(1u << 2);
+    sleep_ms(MCP_LONG_PRESS_MS);
+    step_down(1u << 9);
+    step_up(1u << 9);
+    CHECK(STEP(0, 9).flags == STEP_FLAG_ACTIVE);
+    step_up(1u << 2);
+    CHECK(STEP(0, 2).flags == 0);
+}
+
+static void test_grid_two_held_steps_edit_independently(void) {
+    enter_pattern_view();
+    pattern_set_step(&g_seq.patterns[0], 0, 2, 60, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[0], 0, 9, 72, 40,
+                     STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
+    step_down((1u << 2) | (1u << 9));
+    turn(0, 1);
+    CHECK(STEP(0, 2).note == 61);
+    CHECK(STEP(0, 9).note == 73);
+    turn(1, -10);
+    CHECK(STEP(0, 2).velocity == 90);
+    CHECK(STEP(0, 9).velocity == 30);
+    encoder_short(0);
+    CHECK(STEP(0, 2).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT));
+    CHECK(STEP(0, 9).flags == STEP_FLAG_ACTIVE);
+    step_up((1u << 2) | (1u << 9));
+    CHECK(STEP(0, 2).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT));
+    CHECK(STEP(0, 9).flags == STEP_FLAG_ACTIVE);
+}
+
+static void test_grid_hold_leaves_unheld_steps_alone(void) {
+    enter_pattern_view();
+    pattern_set_step(&g_seq.patterns[0], 0, 3, 40, 60, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[0], 1, 4, 50, 70, STEP_FLAG_ACTIVE);
+    step_down(1u << 4);
+    turn(0, 5);
+    encoder_short(0);
+    CHECK(STEP(0, 3).note == 40);
+    CHECK(STEP(0, 3).velocity == 60);
+    CHECK(STEP(0, 3).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(1, 4).note == 50);
+    CHECK(STEP(1, 4).velocity == 70);
+    CHECK(STEP(1, 4).flags == STEP_FLAG_ACTIVE);
+    step_up(1u << 4);
+}
+
+static void test_grid_hold_edits_the_edited_pattern_not_the_playing_one(void) {
+    enter_pattern_view();
+    turn(0, 2);                             // track 3
+    CHECK(ui.selected_track == 2);
+    g_seq.active_pattern[2] = 3;            // editor on A4 while A1 plays
+    pattern_set_step(&g_seq.patterns[3], 2, 4, 60, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[0], 2, 4, 70, 100, STEP_FLAG_ACTIVE);
+    step_down(1u << 4);
+    turn(0, 3);
+    CHECK(g_seq.patterns[3].steps[2][4].note == 63);
+    CHECK(STEP(2, 4).note == 70);
+    CHECK(g_seq.patterns[3].steps[0][4].flags == 0);    // track 0 untouched
+    CHECK(STEP(0, 4).flags == 0);
+    step_up(1u << 4);
+}
+
+static void test_grid_hold_encoder_presses_set_flags(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    encoder_short(0);
+    CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT));
+    CHECK(STEP(0, 4).note == 60);
+    CHECK(STEP(0, 4).velocity == 100);
+    encoder_long(1);
+    CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT | STEP_FLAG_TIE));
+    encoder_long(0);                        // slide clears tie
+    CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT | STEP_FLAG_SLIDE));
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_short(1);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT | STEP_FLAG_SLIDE));
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+}
+
+// Review Focus 1
+static void test_grid_encoder_press_outlives_step_release(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    step_up(1u << 4);                       // active
+    step_down(1u << 4);
+    encoder_down(0);
+    step_up(1u << 4);                       // the step is released first
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+    encoder_up(0, BTN_PRESS);
+    CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT));
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_short(0);                       // an ordinary press navigates again
+    CHECK(ui.mode == UI_STEP_EDIT);
+}
+
+// Review Focus 1
+static void test_grid_encoder_long_press_outlives_step_release(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    step_up(1u << 4);
+    step_down(1u << 4);
+    encoder_down(1);
+    step_up(1u << 4);
+    press_encoder(1, BTN_LONG_PRESS);       // fires while the encoder is still down
+    CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_TIE));
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_up(1, BTN_RELEASE);
+    CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_TIE));
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+}
+
+// Review Focus 1
+static void test_grid_encoder2_short_during_hold_only_cancels_the_tap(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    encoder_down(1);
+    step_up(1u << 4);
+    encoder_up(1, BTN_PRESS);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    CHECK(STEP(0, 4).flags == 0);           // neither created nor toggled
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+}
+
+// Review Focus 1
+static void test_grid_track_is_frozen_while_an_encoder_owns_the_gesture(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    encoder_down(0);
+    step_up(1u << 4);
+    turn(0, 1);                             // encoder 1 is still down
+    CHECK(ui.selected_track == 0);
+    encoder_up(0, BTN_PRESS);
+    CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT));
+    CHECK(STEP(1, 4).flags == 0);
+    turn(0, 1);
+    CHECK(ui.selected_track == 1);
+}
+
+static void test_grid_ignores_button_held_before_entering(void) {
+    step_down(1u << 0);                     // Session view: toggles on release only
+    CHECK(ui.mode == UI_SESSION);
+    enter_pattern_view();                   // button 1 is still down
+    turn(0, 1);
+    CHECK(ui.selected_track == 1);          // not a hold gesture
+    step_up(1u << 0);
+    CHECK(STEP(0, 0).flags == 0);
+    CHECK(STEP(1, 0).flags == 0);
+}
+
+static void test_grid_panic_forgets_held_steps(void) {
+    enter_pattern_view();
+    step_down((1u << 4) | (1u << 5));
+    held[0] = held[1] = true;
+    press_encoder(0, BTN_LONG_PRESS);       // Panic returns to the Session view
+    CHECK(ui.mode == UI_SESSION);
+    held[0] = held[1] = false;
+    ui_update();                            // unlatch
+    CHECK(!ui.panic_latched);
+    step_up(1u << 5);                       // released in the Session view
+    CHECK(STEP(0, 5).flags == 0);
+    enter_pattern_view();                   // step 5 is still physically down
+    turn(0, 1);
+    CHECK(ui.selected_track == 1);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == 0);
+    CHECK(STEP(1, 4).flags == 0);
+}
+
+static void test_grid_hold_edit_reaches_playback(void) {
+    enter_pattern_view();
+    step_down(1u << 0);
+    turn(0, 100);                           // step 1 created at note 127
+    step_up(1u << 0);
+    step_down(1u << 0);
+    step_up(1u << 0);                       // tap: off, the note stays 127
+    step_down(1u << 0);
+    turn(0, 5);                             // on again; the value did not change
+    step_up(1u << 0);
+    CHECK(STEP(0, 0).flags == STEP_FLAG_ACTIVE);
+    transport_start();
+    fake_midi_length = 0;
+    timer_hw->alarm[0] = pulse_interval_us;
+    tick();
+    CHECK(count_note_on(127, 100) == 1);
+}
+
+static void test_grid_hold_edit_while_playing_is_heard(void) {
+    enter_pattern_view();
+    transport_start();
+    timer_hw->alarm[0] = pulse_interval_us;
+    tick();                                 // step 1 plays; nothing is on it
+    step_down(1u << 1);
+    turn(0, 2);                             // create step 2 while playing
+    step_up(1u << 1);
+    fake_midi_length = 0;
+    for (unsigned i = 0; i < PULSES_PER_STEP; i++) tick();
+    CHECK(count_note_on(62, 100) == 1);
+}
+
+// Review Focus 2
+static void test_grid_tap_within_one_update_toggles_once(void) {
+    enter_pattern_view();
+    step_buttons.pressed = step_buttons.released = 1u << 4;
+    ui_update();
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+}
+
+// Review Focus 3
+static void test_grid_turn_and_release_in_one_update_is_an_edit(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    deltas[0] = 2;
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 4).note == 62);
+    CHECK(ui.selected_track == 0);
+}
+
+// Review Focus 3
+static void test_grid_turn_in_the_same_update_as_the_press_cancels_the_tap(void) {
+    enter_pattern_view();
+    deltas[0] = 2;
+    step_down(1u << 4);
+    CHECK(STEP(0, 4).flags == 0);
+    CHECK(ui.selected_track == 0);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == 0);           // neither edited nor toggled
+    CHECK(STEP(0, 4).note == 0);
+}
+
+// Review Focus 4
+static void test_grid_hold_turn_clamps_and_still_cancels_tap(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    turn(0, 100);
+    CHECK(STEP(0, 4).note == 127);
+    step_up(1u << 4);
+    step_down(1u << 4);
+    turn(0, 5);                             // already at the top: value unchanged
+    CHECK(STEP(0, 4).note == 127);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+    step_down(1u << 4);
+    turn(1, -127);
+    CHECK(STEP(0, 4).velocity == 0);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+}
+
+// Review Focus 5
+static void test_grid_hold_creates_drum_hit_with_kit_note(void) {
+    enter_pattern_view();
+    turn(0, 4);                             // track 5: drum, drum_note 40
+    CHECK(ui.selected_track == 4);
+    step_down(1u << 3);
+    turn(1, -10);
+    CHECK(STEP(4, 3).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(4, 3).note == 40);
+    CHECK(STEP(4, 3).velocity == 90);
+    step_up(1u << 3);
+    CHECK(STEP(4, 3).flags == STEP_FLAG_ACTIVE);
+}
+
+static void render(void) {
+    display_clear();
+    ui_render();
+}
+
+// Compares rows 10-17 of the current frame with the given text drawn alone.
+// Clears the display.
+static void check_info_line(const char *expected) {
+    bool actual[FONT_CHAR_H][OLED_WIDTH];
+    for (unsigned y = 0; y < FONT_CHAR_H; y++) {
+        for (unsigned x = 0; x < OLED_WIDTH; x++) actual[y][x] = ssd1309_get_pixel(x, 10 + y);
+    }
+    display_clear();
+    ssd1309_draw_string(0, 10, expected, false);
+    for (unsigned y = 0; y < FONT_CHAR_H; y++) {
+        for (unsigned x = 0; x < OLED_WIDTH; x++) CHECK(actual[y][x] == ssd1309_get_pixel(x, 10 + y));
+    }
+}
+
+static void test_held_step_line_is_rendered(void) {
+    uint8_t idle[OLED_BUF_SIZE];
+    enter_pattern_view();
+    render();
+    memcpy(idle, ssd1309_get_framebuffer(), sizeof(idle));
+    step_down(1u << 4);                     // shown from the first moment of the hold
+    render();
+    CHECK(ssd1309_get_pixel(32, 33));       // bracket under step 5
+    check_info_line("S05 Note:C-1  Vel:  0");
+    sleep_ms(MCP_LONG_PRESS_MS);
+    step_up(1u << 4);                       // peek: nothing changed
+    render();
+    CHECK(memcmp(idle, ssd1309_get_framebuffer(), sizeof(idle)) == 0);
+}
+
+static void test_held_step_line_shows_lowest_held_step(void) {
+    enter_pattern_view();
+    step_down(1u << 9);
+    turn(0, -59);                           // step 10: note 1
+    turn(1, 27);                            // velocity 127
+    render();
+    check_info_line("S10 Note:C#-1 Vel:127");
+    step_down(1u << 2);                     // a lower step joins
+    render();
+    CHECK(ssd1309_get_pixel(16, 33));       // bracket under step 3 only
+    CHECK(!ssd1309_get_pixel(72, 33));
+    check_info_line("S03 Note:C-1  Vel:  0");
+    step_up(1u << 2);
+    render();
+    CHECK(ssd1309_get_pixel(72, 33));
+    check_info_line("S10 Note:C#-1 Vel:127");
+    step_up(1u << 9);
+}
+
+static void test_grid_long_press_applies_to_later_steps(void) {
+    for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
+        reset();
+        enter_pattern_view();
+        uint8_t flag = enc == 0 ? STEP_FLAG_SLIDE : STEP_FLAG_TIE;
+        step_down(1u << 4);
+        encoder_down(enc);
+        press_encoder(enc, BTN_LONG_PRESS);
+        CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | flag));
+        step_up(1u << 4);
+        step_down(1u << 9);                 // the same encoder button is still down
+        CHECK(STEP(0, 9).flags == (STEP_FLAG_ACTIVE | flag));
+        for (unsigned i = 0; i < 3; i++) ui_update();
+        CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | flag));
+        CHECK(STEP(0, 9).flags == (STEP_FLAG_ACTIVE | flag));
+        step_down(1u << 4);                 // an earlier target is not toggled twice
+        step_up((1u << 4) | (1u << 9));
+        encoder_up(enc, BTN_RELEASE);
+        CHECK(STEP(0, 4).flags == (STEP_FLAG_ACTIVE | flag));
+        CHECK(STEP(0, 9).flags == (STEP_FLAG_ACTIVE | flag));
+        CHECK(ui.mode == UI_PATTERN_VIEW);
+        turn(0, 1);
+        CHECK(ui.selected_track == 1);
+    }
+}
+
+static void test_grid_encoder_press_ending_as_a_step_goes_down_is_not_part_of_it(void) {
+    enter_pattern_view();
+    encoder_down(0);                        // no step is held yet
+    held[0] = false;
+    buttons[0] = BTN_PRESS;                 // the short press completes ...
+    step_down(1u << 9);                     // ... in the update that first sees step 10 down
+    CHECK(STEP(0, 9).flags == 0);           // not created, not accented
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    step_up(1u << 9);
+    CHECK(STEP(0, 9).flags == STEP_FLAG_ACTIVE);    // an ordinary tap
+    CHECK(STEP(0, 9).note == 60);
+}
+
+static void test_grid_tap_edits_selected_track_and_pattern(void) {
+    enter_pattern_view();
+    turn(0, 4);                             // track 5
+    CHECK(ui.selected_track == 4);
+    g_seq.active_pattern[4] = 3;            // editor on A4 while A1 plays
+    step_down(1u << 3);
+    step_up(1u << 3);
+    CHECK(g_seq.patterns[3].steps[4][3].flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(4, 3).flags == 0);
+    CHECK(STEP(0, 3).flags == 0);
+    CHECK(g_seq.patterns[3].steps[0][3].flags == 0);    // track 0 untouched
+}
+
+static void test_grid_driver_long_press_event_does_not_toggle(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    sleep_ms(MCP_LONG_PRESS_MS);
+    step_buttons.long_pressed = 1u << 4;    // what mcp23017 emits at 500 ms
+    ui_update();
+    CHECK(STEP(0, 4).flags == 0);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == 0);           // peek, not a tap
+}
+
+static void test_grid_hold_edit_refreshes_the_edited_track_and_pattern(void) {
+    panel(PANEL_PAD, 4, 3);                 // Session focus on track 5, A4: selected at once while stopped
+    CHECK(g_seq.transport.current_pattern[4] == 3);
+    enter_pattern_view();
+    CHECK(ui.selected_track == 4);
+    CHECK(g_seq.active_pattern[4] == 3);
+    step_down(1u << 0);
+    turn(1, -10);                           // drum hit at velocity 90
+    step_up(1u << 0);
+    CHECK(g_seq.patterns[3].steps[4][0].flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(4, 0).flags == 0);           // pattern 0 untouched
+    CHECK(g_seq.patterns[3].steps[0][0].flags == 0);    // track 0 untouched
+    transport_start();
+    fake_midi_length = 0;
+    timer_hw->alarm[0] = pulse_interval_us;
+    tick();
+    CHECK(count_channel_note_on(4, 40, 90) == 1);
+}
+
+static void test_step_edit_note_and_velocity_still_work(void) {
+    press_encoder(0, BTN_PRESS);            // Pattern View
+    press_encoder(0, BTN_PRESS);            // Step Edit, step 1
+    CHECK(ui.mode == UI_STEP_EDIT);
+    turn(0, 3);
+    CHECK(STEP(0, 0).note == 3);
+    turn(1, 10);
+    CHECK(STEP(0, 0).velocity == 10);
+    CHECK(STEP(0, 0).flags == 0);           // Step Edit does not activate a step
+}
+
+static void test_pattern_view_navigation_without_a_hold(void) {
+    enter_pattern_view();
+    turn(0, 1);
+    CHECK(ui.selected_track == 1);
+    float bpm = g_seq.transport.bpm;
+    turn(1, 10);
+    CHECK(g_seq.transport.bpm > bpm);
+    encoder_long(1);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    encoder_short(0);                       // confirm: back to Pattern View
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_short(0);
+    CHECK(ui.mode == UI_STEP_EDIT);
+    encoder_short(1);
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_short(1);                       // no action in Pattern View
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    encoder_long(0);
+    CHECK(ui.mode == UI_SESSION);
+}
+
+static void test_grid_hold_suspends_every_screen_change(void) {
+    enter_pattern_view();
+    step_down(1u << 2);
+    encoder_short(0);                       // would open Step Edit
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_long(0);                        // would return to the Session view
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_long(1);                        // would open Pattern Select
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_short(1);
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    step_up(1u << 2);
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    CHECK(STEP(0, 2).flags & STEP_FLAG_ACTIVE);     // created by the first edit
+    CHECK(STEP(0, 2).flags & STEP_FLAG_ACCENT);
+    CHECK(STEP(0, 2).flags & STEP_FLAG_TIE);
+    CHECK(!(STEP(0, 2).flags & STEP_FLAG_SLIDE));   // cleared by the tie
+}
+
+static void test_grid_panel_keys_during_a_hold_leave_the_tap(void) {
+    enter_pattern_view();
+    step_down(1u << 3);
+    panel(PANEL_PLAY, 0, 0);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    panel(PANEL_MUTE, 1, 0);
+    CHECK(g_seq.track_mutes == 2);
+    step_up(1u << 3);
+    CHECK(STEP(0, 3).flags & STEP_FLAG_ACTIVE);
+}
+
+static void test_grid_step_that_vanishes_without_a_release_ends_the_hold(void) {
+    enter_pattern_view();
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    step_down(1u << 4);
+    step_buttons.held = 0;                  // driver took a new baseline: no release event
+    ui_update();
+    turn(0, 3);
+    CHECK(ui.selected_track == 3);          // navigation is back
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+}
+
+static void test_grid_step_held_without_a_press_event_never_joins(void) {
+    enter_pattern_view();
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    step_buttons.held = 1u << 4;            // appeared at a driver baseline: no press event
+    ui_update();
+    turn(0, 3);
+    CHECK(ui.selected_track == 3);
+    step_up(1u << 4);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
 }
 
 static void render_views(const char *path) {
@@ -820,6 +1485,7 @@ static void render_views(const char *path) {
 #define LANE_LT 3
 #define LANE_MT 4
 #define LANE_CP 7
+#define LANE_RC (KIT_LANES - 1)
 
 static void make_kit(uint8_t track) {
     track_config_t config = g_seq.patterns[0].tracks[track];
@@ -1096,8 +1762,8 @@ static void test_synth_cell_unchanged(void) {
     CHECK(led_mask == (1u << 3));
     press_encoder(0, BTN_PRESS);
     CHECK(ui.mode == UI_PATTERN_VIEW && ui.selected_track == 1);
-    press_step(5);
-    CHECK(g_seq.patterns[0].steps[1][5].flags & STEP_FLAG_ACTIVE);   // on press
+    press_step(5);                          // hold-step editing: a tap toggles
+    CHECK(!(g_seq.patterns[0].steps[1][5].flags & STEP_FLAG_ACTIVE)); // on release
     release_step(5);
     CHECK(g_seq.patterns[0].steps[1][5].flags & STEP_FLAG_ACTIVE);
     CHECK(led_mask == ((1u << 3) | (1u << 5)));
@@ -1768,6 +2434,151 @@ static void test_fast_clicks_in_editors(void) {
     CHECK(g_seq.song.entries[6].repeats == 1 + 24);
 }
 
+// ─── Hold-step editing beside kits ─────────────────────────────
+
+// No step_t of any location differs from patterns_before.
+static bool step_data_untouched(void) {
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        if (memcmp(patterns_before[p].steps, g_seq.patterns[p].steps,
+                   sizeof(g_seq.patterns[p].steps)) != 0) return false;
+    }
+    return true;
+}
+
+// A held SYNTH step moves by the accelerated amount: a slow click is exactly 1,
+// a fast turn more; the clicks never move the track.
+static void test_grid_hold_slow_click_moves_note_by_one(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    step_up(1u << 4);                       // active, note 60, velocity 100
+    step_down(1u << 4);
+    turn_edges(0, ENC_EDGES_PER_DETENT - 1);    // not a whole click yet
+    CHECK(STEP(0, 4).note == 60);
+    turn_edges(0, 1);
+    CHECK(STEP(0, 4).note == 61);
+    click(0, 1);
+    CHECK(STEP(0, 4).note == 62);
+    click(1, -1);
+    CHECK(STEP(0, 4).velocity == 99);
+    fast_clicks(0, 8);                      // 1+1+1+1+4+4+4+8
+    CHECK(STEP(0, 4).note == 62 + 24);
+    delta_scale = 4;                        // one detent worth 4
+    turn(0, 1);
+    CHECK(STEP(0, 4).note == 62 + 28);
+    CHECK(ui.selected_track == 0);
+    step_up(1u << 4);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);    // edited: no toggle
+}
+
+// On a kit cell a held step takes no encoder: VALUE stays the tempo, TRACK
+// keeps walking the lanes and an encoder press navigates; no step_t changes,
+// and the release cycles the lane the press was bound to.
+static void test_kit_hold_in_pattern_view_takes_no_encoder(void) {
+    make_kit(1);
+    focus_lane(1, 0, LANE_SD);
+    press_encoder(0, BTN_PRESS);
+    CHECK(ui.mode == UI_PATTERN_VIEW && ui.selected_track == 1);
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    float bpm = g_seq.transport.bpm;
+    step_down(1u << 4);
+    click(1, 1);
+    CHECK(bpm_is(bpm + 0.1f));
+    turn(1, 3);
+    CHECK(bpm_is(bpm + 0.4f));
+    CHECK(ui.grid_hold == 0);
+    click(0, 1);                            // SD -> LT
+    CHECK(ui.selected_track == 1 && session_kit_lane(1) == LANE_LT);
+    step_up(1u << 4);
+    CHECK(lane_at(0, 1, LANE_SD, 4) == KIT_NOTE);
+    CHECK(lane_at(0, 1, LANE_LT, 4) == KIT_OFF);
+    CHECK(step_data_untouched());
+    // An encoder press during a kit hold is navigation, not a flag edit.
+    step_down(1u << 6);
+    encoder_short(0);                       // the kit step editor on step 1
+    CHECK(ui.mode == UI_KIT_STEP_EDIT && ui.edit_step == 0 && ui.kit_cursor == LANE_LT);
+    step_up(1u << 6);                       // released on another screen: nothing
+    CHECK(lane_at(0, 1, LANE_LT, 6) == KIT_OFF);
+    CHECK(step_data_untouched());
+}
+
+static void test_pattern_view_switch_between_synth_and_kit_with_a_step_held(void) {
+    make_kit(1);
+    focus_lane(1, 0, LANE_SD);
+    press_encoder(0, BTN_PRESS);
+    CHECK(ui.mode == UI_PATTERN_VIEW && ui.selected_track == 1);
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+
+    // A kit step held while TRACK walks onto track 3, a SYNTH: the press stays
+    // bound to SD, and nothing holds the encoders on track 3.
+    step_down(1u << 2);
+    click(0, KIT_LANES - LANE_SD);          // SD..RC, then track 3
+    CHECK(ui.selected_track == 2);
+    CHECK(ui.grid_hold == 0 && ui.step_short_pending == 1u << 2);
+    float bpm = g_seq.transport.bpm;
+    click(1, 1);                            // tempo, not a velocity
+    CHECK(bpm_is(bpm + 0.1f));
+    click(0, 1);                            // TRACK still walks
+    CHECK(ui.selected_track == 3);
+    click(0, -1);
+    CHECK(ui.selected_track == 2);
+    step_up(1u << 2);
+    CHECK(lane_at(0, 1, LANE_SD, 2) == KIT_NOTE);
+    CHECK(step_data_untouched());
+    CHECK(ui.step_short_pending == 0);
+
+    // A SYNTH step held on track 3: TRACK edits its note and cannot leave it.
+    step_down(1u << 5);
+    click(0, -1);
+    CHECK(ui.selected_track == 2);
+    CHECK(STEP(2, 5).flags == STEP_FLAG_ACTIVE && STEP(2, 5).note == 59);
+    step_up(1u << 5);
+    CHECK(STEP(2, 5).flags == STEP_FLAG_ACTIVE);
+    click(0, -1);                           // back onto the kit, on RC
+    CHECK(ui.selected_track == 1 && session_kit_lane(1) == LANE_RC);
+    CHECK(ui.grid_hold == 0 && ui.grid_tap_pending == 0);
+    step_down(1u << 5);
+    step_up(1u << 5);
+    CHECK(lane_at(0, 1, LANE_RC, 5) == KIT_NOTE);
+    CHECK(STEP(1, 5).flags == 0);
+
+    // TRACK leaves the kit in the update a step goes down: the step joins the
+    // hold on track 3 with no tap, as for any turn that shares an update with
+    // a first press (the order is unknown).
+    deltas[0] = 1;
+    step_down(1u << 7);
+    CHECK(ui.selected_track == 2);
+    CHECK(ui.grid_hold == 1u << 7 && ui.step_short_pending == 0);
+    step_up(1u << 7);
+    CHECK(STEP(2, 7).flags == 0);
+    CHECK(lane_at(0, 1, LANE_RC, 7) == KIT_OFF);
+}
+
+// A panic drops both kinds of step gesture at once: a kit press carried onto a
+// SYNTH track and the hold on that track. Neither acts afterwards.
+static void test_drop_step_gestures_forgets_kit_presses_and_holds(void) {
+    make_kit(1);
+    focus_lane(1, 0, LANE_SD);
+    press_encoder(0, BTN_PRESS);
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    step_down(1u << 3);                     // bound to the kit's SD
+    click(0, KIT_LANES - LANE_SD);          // SD..RC, then track 3
+    CHECK(ui.selected_track == 2);
+    step_down(1u << 9);                     // a hold on track 3
+    CHECK(ui.grid_hold == 1u << 9 && ui.step_short_pending == 1u << 3);
+    held[0] = held[1] = true;
+    ui_update();
+    CHECK(ui.grid_enc_target[0] == 1u << 9 && ui.grid_enc_target[1] == 1u << 9);
+    press_encoder(0, BTN_LONG_PRESS);       // Panic
+    CHECK(ui.mode == UI_SESSION);
+    CHECK(ui.grid_hold == 0 && ui.grid_tap_pending == 0 && ui.step_short_pending == 0);
+    CHECK(ui.grid_enc_target[0] == 0 && ui.grid_enc_target[1] == 0);
+    CHECK(ui.grid_enc_long_done[0] == 0 && ui.grid_enc_long_done[1] == 0);
+    held[0] = held[1] = false;
+    ui_update();                            // unlatch
+    step_up((1u << 3) | (1u << 9));
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+}
+
 #define RUN(test) do { reset(); test(); printf("PASS %s\n", #test); } while (0)
 int main(int argc, char **argv) {
     seq_lock_init();
@@ -1788,6 +2599,7 @@ int main(int argc, char **argv) {
     RUN(test_accent_can_combine_with_slide_or_tie);
     RUN(test_long_config_press_never_mutes);
     RUN(test_selector_short_press_mutes_on_release);
+    RUN(test_selector_leds_show_stored_mutes);
     RUN(test_flash_controls_are_blocked_during_playback);
     RUN(test_song_mode_has_a_return_to_pattern_playback);
     RUN(test_song_editor_lights_its_three_buttons);
@@ -1799,6 +2611,7 @@ int main(int argc, char **argv) {
     RUN(test_session_step_leds_blink_playhead);
     RUN(test_session_passes_take_no_playback_lock);
     RUN(test_session_oled_renders);
+    RUN(test_session_oled_shows_the_play_mode);
     RUN(test_pad_launch_decides_and_writes_atomically);
     RUN(test_scene_cancel_decides_and_writes_atomically);
     RUN(test_step_release_toggles_the_cell_focused_at_press);
@@ -1835,6 +2648,46 @@ int main(int argc, char **argv) {
     RUN(test_slow_click_moves_note_editor_and_song_by_one);
     RUN(test_fast_clicks_accelerate_numbers_only);
     RUN(test_fast_clicks_in_editors);
+    RUN(test_grid_tap_toggles_on_release);
+    RUN(test_grid_hold_turn_edits_note_without_toggling);
+    RUN(test_grid_hold_turn_edits_velocity_not_tempo);
+    RUN(test_grid_hold_turn_creates_empty_step);
+    RUN(test_grid_hold_time_decides_tap_or_peek);
+    RUN(test_grid_tap_beside_a_held_step);
+    RUN(test_grid_two_held_steps_edit_independently);
+    RUN(test_grid_hold_leaves_unheld_steps_alone);
+    RUN(test_grid_hold_edits_the_edited_pattern_not_the_playing_one);
+    RUN(test_grid_hold_encoder_presses_set_flags);
+    RUN(test_grid_encoder_press_outlives_step_release);
+    RUN(test_grid_encoder_long_press_outlives_step_release);
+    RUN(test_grid_encoder2_short_during_hold_only_cancels_the_tap);
+    RUN(test_grid_track_is_frozen_while_an_encoder_owns_the_gesture);
+    RUN(test_grid_ignores_button_held_before_entering);
+    RUN(test_grid_panic_forgets_held_steps);
+    RUN(test_grid_hold_edit_reaches_playback);
+    RUN(test_grid_hold_edit_while_playing_is_heard);
+    RUN(test_grid_tap_within_one_update_toggles_once);
+    RUN(test_grid_turn_and_release_in_one_update_is_an_edit);
+    RUN(test_grid_turn_in_the_same_update_as_the_press_cancels_the_tap);
+    RUN(test_grid_hold_turn_clamps_and_still_cancels_tap);
+    RUN(test_grid_hold_creates_drum_hit_with_kit_note);
+    RUN(test_held_step_line_is_rendered);
+    RUN(test_held_step_line_shows_lowest_held_step);
+    RUN(test_grid_long_press_applies_to_later_steps);
+    RUN(test_grid_encoder_press_ending_as_a_step_goes_down_is_not_part_of_it);
+    RUN(test_grid_tap_edits_selected_track_and_pattern);
+    RUN(test_grid_driver_long_press_event_does_not_toggle);
+    RUN(test_grid_hold_edit_refreshes_the_edited_track_and_pattern);
+    RUN(test_step_edit_note_and_velocity_still_work);
+    RUN(test_pattern_view_navigation_without_a_hold);
+    RUN(test_grid_hold_suspends_every_screen_change);
+    RUN(test_grid_panel_keys_during_a_hold_leave_the_tap);
+    RUN(test_grid_step_that_vanishes_without_a_release_ends_the_hold);
+    RUN(test_grid_step_held_without_a_press_event_never_joins);
+    RUN(test_grid_hold_slow_click_moves_note_by_one);
+    RUN(test_kit_hold_in_pattern_view_takes_no_encoder);
+    RUN(test_pattern_view_switch_between_synth_and_kit_with_a_step_held);
+    RUN(test_drop_step_gestures_forgets_kit_presses_and_holds);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS the six base OLED screens render (the four kit screens: test_render_kit_*)");

@@ -271,6 +271,12 @@ void seq_toggle_track_mute(uint8_t track) {
 uint8_t seq_get_track_mutes(void) {
     uint32_t lock_state = seq_lock();
     uint8_t mutes = g_seq.track_mutes;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        uint8_t playing = g_seq.transport.current_pattern[track];
+        if (playing < MAX_PATTERNS && g_seq.patterns[playing].tracks[track].muted) {
+            mutes |= (uint8_t)(1u << track);
+        }
+    }
     seq_unlock(lock_state);
     return mutes;
 }

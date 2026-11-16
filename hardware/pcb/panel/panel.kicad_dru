@@ -1,0 +1,13 @@
+(version 1)
+
+# The reverse-mount SK6812MINI-E footprint puts its pads 0.2-0.25 mm from its own light cutout;
+# JLCPCB routes to 0.2 mm from an outline. Everything else keeps the board-wide 0.25 mm.
+# Copper is routed at 0.2 mm (net classes, Freerouting and gen/maze.py); the check holds the
+# board to 0.15 mm, still above JLCPCB's 0.127 mm minimum, so a router's rounding by a few
+# micrometres is not reported.
+(rule "fab clearance"
+  (constraint clearance (min 0.15mm)))
+
+(rule "SK6812MINI-E pads at their cutout"
+  (constraint edge_clearance (min 0.2mm))
+  (condition "A.memberOfFootprint('D9*')"))

@@ -430,7 +430,9 @@ changes the cell's `step_t` data.
 The Pattern view on a kit track uses the same stops for TRACK rotation, the same step-button rules
 as above, the focused lane on the step LEDs and the OLED, and a TRACK press opens the kit step
 editor on the selected step instead of the note editor. The note/velocity/slide/tie step editor
-never opens on a kit track.
+never opens on a kit track. Since the merge with `master` the Pattern view also has hold-step
+editing (`2026-11-16-hold-step-edit-design.md`), on SYNTH and DRUM cells only: a kit cell keeps the
+rules above, and a held kit step takes no encoder and suspends neither TRACK nor VALUE.
 
 ### Kit step editor (A)
 

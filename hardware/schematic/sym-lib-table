@@ -1,0 +1,4 @@
+(sym_lib_table
+  (version 7)
+  (lib (name "rebirth") (type "KiCad") (uri "${KIPRJMOD}/rebirth.kicad_sym") (options "") (descr "ReBirth project symbols: TPS2553DBV, +5V_LED"))
+)

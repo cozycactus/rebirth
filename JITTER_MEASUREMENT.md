@@ -75,11 +75,12 @@ Use a logic analyzer or oscilloscope:
   handler and the whole kit and MIDI path it runs are in RAM: the kit step,
   flam and release code (inlined into the handler, plus `kit_take_release()`
   and the `kit_voice_order` table), the MIDI sends it makes, the step buffer,
-  the TX drain and the UART TX interrupt handler. Its other callees stay in
-  flash as on the base commit and share the flash cache with Core 0 code:
-  `load_prepared_track()` (every step), `send_note_off_if_active()` and
-  `prepare_note_off()` (event tracks), `seq_lock()`/`seq_unlock()` (launches,
-  Song advances), `gate_commit()` and `cv_set_note()` (CV/gate), the SDK's
+  the TX drain and the UART TX interrupt handler; `seq_lock()`/`seq_unlock()`
+  (launches, Song advances) run from RAM as well, with the per-frame transport
+  snapshot. Its other callees stay in flash as on the base commit and share the
+  flash cache with Core 0 code: `load_prepared_track()` (every step),
+  `send_note_off_if_active()` and `prepare_note_off()` (event tracks),
+  `gate_commit()` and `cv_set_note()` (CV/gate), the SDK's
   divider wrapper (`pulse_count % 24` and `/ 24` on every pulse: the Cortex-M0+
   has no long multiply), and on Stop and overflow `stop_playback_outputs()`,
   `midi_clear_output_queue()` and `midi_send_all_notes_off()`.

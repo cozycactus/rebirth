@@ -21,8 +21,12 @@ What can delay the timer: Core 0 sections that hold the playback lock, i.e.
 transport commands, pad/scene launches, Panic and the per-frame transport
 snapshot (one short copy per frame, never one per UI pass); shared-lock
 sections the timer waits on; and bus or flash contention from Core 0, such as
-the LED DMA and Core 0 code running from flash through the XIP cache. Panel
-I2C polling, the LED frame build, display SPI, pattern conversion and flash
+the LED DMA and Core 0 code running from flash through the XIP cache. The
+snapshot, the only one of these that runs about 30 times a second, runs from
+RAM together with the lock helpers it calls (`seq_lock`, `seq_unlock`, the
+playback lock helpers), so its hold is a fixed short copy that never waits on
+an XIP cache miss; the user-triggered sections run from flash. Panel I2C
+polling, the LED frame build, display SPI, pattern conversion and flash
 writes do not run under the playback lock. A dual-core split alone does not
 establish physical jitter.
 
@@ -125,7 +129,9 @@ lane order.
   locations differ play as before until that track's config is edited.
 - `muted` in `track_config_t` is a stored mute per location (from older saves);
   routing edits leave it as it is in each location. A track is audible when
-  neither the live mute nor the stored mute of the location it plays is set.
+  neither the live mute nor the stored mute of the location it plays is set;
+  MUTE, the RGB lights, the selector's step LEDs 1-8 and the OLED mute lines
+  all show a track as muted by this rule (`seq_get_track_mutes()`).
   MUTE on a muted track clears the live bit and the stored mute of every
   location, so it is undone with one press.
 - Selection while stopped is immediate and survives Start.
@@ -251,22 +257,29 @@ every pass, so a dead bus costs about one timeout per chip per 100 ms. PLAY is a
 plain GPIO and is sampled first on every pass, whatever the bus does. About once
 a second each chip's configuration is read back (TCA8418 CFG, MCP23017 IPOL,
 step-LED IODIR), so a chip that reset (brown-out, ESD) is reconfigured; the
-button expander's ports then become the new baseline without events. A failed
+button expander's ports then become the new baseline without events. A reset
+button expander's idle lines read as pressed, so its IPOL is also read back
+before a sample with three or more keys going down at once is accepted. A failed
 button read keeps the last accepted state; the step LED mask is cached only
 after a successful write. Core 1 never touches I2C or the LEDs.
 
 A TCA8418 FIFO overflow, or an event read that fails after the event count was
 read, drops the whole batch: the key state is forgotten and the FIFO drained,
-with nothing reported. A flash save or load stalls both cores; afterwards the
-inputs are resynced: `panel_input_resync()` drops every queued panel event
-(PLAY included) and drains the FIFO, re-initialising the chip only if that
-fails; `mcp23017_resync()` and `encoder_resync()` take the buttons as they are
-now, with no press, release or long press from the stall; and the UI drops the
+with nothing reported. A flash save stalls both cores (only a save uses the
+multicore lockout) and a load stalls only Core 0; afterwards the inputs are
+resynced: `panel_input_resync()` drops every queued panel event (PLAY
+included) and drains the FIFO, re-initialising the chip only if that fails;
+`mcp23017_resync()` and `encoder_resync()` take the buttons as they are now,
+with no press, release or long press from the stall; and the UI drops the
 step gestures in progress. When a panic is released, the panel and the step
-buttons are resynced the same way. After a resync or an overflow, a key or PLAY
-that was down stays suppressed until a release has held for its debounce time
-(8 ms, 20 ms for PLAY), so a bounce or a press the chip reports again never
-becomes a command.
+buttons are resynced the same way. After a resync or an overflow on a chip
+that kept its configuration (the drain worked), every key reads as up: such a
+chip reports a key held across the drain only by its release, which then
+changes nothing, and a key whose release was drained presses normally again.
+A re-initialised chip (failed drain, incomplete read, chip reset) may report a
+held key again, so a key that was down then stays suppressed until a release
+has held for 8 ms. PLAY that was down stays suppressed until a release has
+held for 20 ms. A bounce or a re-reported press never becomes a command.
 
 ### Power
 

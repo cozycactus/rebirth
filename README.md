@@ -145,6 +145,17 @@ buttons edit it.
 - The step editor returns to the screen it was opened from. In the pattern
   view, encoder 1 long returns to the Session view; in the selector, encoder 2
   long does.
+- Pattern view step buttons on a SYNTH or DRUM track: a tap shorter than half
+  a second toggles the step when the button is released. Hold one or more steps
+  and turn encoder 1 for note or encoder 2 for velocity; encoder 1 short/long
+  toggles accent/slide and encoder 2 long toggles tie on the held steps. The
+  first edit of a held empty step creates it. A step held longer, or held while
+  an encoder is turned or pressed, is not toggled on release. While a step is
+  held the encoders do not change track, tempo or screen; pads, SCENE, MUTE and
+  PLAY work as usual. On a kit track the step buttons edit the focused lane
+  instead (see Editing a kit): a short press cycles it on release, a long press
+  opens the kit step editor, and a held kit step takes no encoder, so TRACK
+  still walks and VALUE still sets the tempo.
 - Hold both encoder buttons for Panic: it stops playback and returns to the
   Session view. Release both before issuing another command; keys held through
   the panic or pressed while it is held do nothing afterwards.

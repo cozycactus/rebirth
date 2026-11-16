@@ -466,42 +466,101 @@ static void test_play_held_through_resync_needs_a_stable_release(void) {
     CHECK(drain(e, 8) == 1 && e[0].kind == PANEL_PLAY && e[0].down);
 }
 
-static void test_key_held_through_resync_ignores_a_re_reported_press(void) {
+// A configured chip reports a key held across a drain only by its release,
+// which then changes nothing: a release bounce included, no event.
+static void test_key_held_through_resync_is_silent_on_release(void) {
     reset();
     panel_event_t e[8];
     key_press(5, 2);
     poll_range(0, 20);
     CHECK(drain(e, 8) == 1);
     panel_input_resync();
-    key_press(5, 2);                        // the chip reports the held key again
     poll_range(21, 60);
     CHECK(drain(e, 8) == 0);
-    key_release(5, 2);                      // a bounce: up, then down again
+    key_release(5, 2);                      // released, with a bounce
     panel_input_poll(61);
     key_press(5, 2);
-    poll_range(62, 100);
-    CHECK(drain(e, 8) == 0);
-    key_release(5, 2);                      // a stable release ends it silently
-    poll_range(101, 120);
+    panel_input_poll(62);
+    key_release(5, 2);
+    poll_range(63, 100);
     CHECK(drain(e, 8) == 0);
     key_press(5, 2);
-    poll_range(121, 140);
+    poll_range(101, 140);
     int n = drain(e, 8);
     CHECK(n == 1 && e[0].kind == PANEL_PAD && e[0].track == 2 && e[0].row == 5 && e[0].down);
 }
 
-static void test_key_held_through_overflow_ignores_a_re_reported_press(void) {
+static void test_key_held_through_overflow_is_silent_on_release(void) {
     reset();
     panel_event_t e[16];
     key_press(7, 7);
     poll_range(0, 20);
     CHECK(drain(e, 16) == 1);
-    for (int i = 0; i < 12; i++) key_press(i % 7, i % 7);   // overflow
+    for (int i = 0; i < 12; i++) key_press(i / 7, i % 7);   // overflow
     poll_range(21, 40);
     CHECK(drain(e, 16) == 0);
-    key_press(7, 7);                        // re-reported after the overflow
+    key_release(7, 7);
     poll_range(41, 80);
     CHECK(drain(e, 16) == 0);
+}
+
+// The release drained by the resync must not swallow the next press.
+static void test_pad_released_during_stall_presses_again(void) {
+    reset();
+    panel_event_t e[8];
+    key_press(5, 2);
+    poll_range(0, 20);
+    CHECK(drain(e, 8) == 1);
+    key_release(5, 2);                      // during the stall
+    panel_input_resync();
+    CHECK(chip_fifo_count == 0);
+    key_press(5, 2);
+    poll_range(21, 60);
+    int n = drain(e, 8);
+    CHECK(n == 1 && e[0].kind == PANEL_PAD && e[0].track == 2 && e[0].row == 5 && e[0].down);
+}
+
+static void test_pad_released_in_an_overflow_presses_again(void) {
+    reset();
+    panel_event_t e[16];
+    key_press(7, 7);
+    poll_range(0, 20);
+    CHECK(drain(e, 16) == 1);
+    key_release(7, 7);
+    for (int i = 0; i < 11; i++) key_press(i / 7, i % 7);   // the release is in the lost batch
+    CHECK(chip_regs[0x02] & 0x08);
+    poll_range(21, 40);
+    CHECK(drain(e, 16) == 0);
+    CHECK(chip_fifo_count == 0);
+    key_press(7, 7);
+    poll_range(41, 80);
+    int n = drain(e, 16);
+    CHECK(n == 1 && e[0].kind == PANEL_PAD && e[0].track == 7 && e[0].row == 7 && e[0].down);
+}
+
+// A re-initialised chip may report a held key again: that key stays
+// suppressed until it is seen released.
+static void test_reinit_after_resync_keeps_held_key_suppressed(void) {
+    reset();
+    panel_event_t e[8];
+    unsigned writes = cfg_writes;
+    key_press(5, 2);
+    poll_range(0, 20);
+    CHECK(drain(e, 8) == 1);
+    chip_fail_count = 1;                    // the flush fails: re-init on the next poll
+    panel_input_resync();
+    panel_input_poll(21);
+    CHECK(cfg_writes == writes + 1);
+    key_press(5, 2);                        // the re-initialised chip reports it again
+    poll_range(22, 60);
+    CHECK(drain(e, 8) == 0);
+    key_release(5, 2);
+    poll_range(61, 80);
+    CHECK(drain(e, 8) == 0);
+    key_press(5, 2);
+    poll_range(81, 100);
+    int n = drain(e, 8);
+    CHECK(n == 1 && e[0].kind == PANEL_PAD && e[0].track == 2 && e[0].row == 5 && e[0].down);
 }
 
 static void test_resync_flushes_without_reinit(void) {
@@ -578,8 +637,11 @@ int main(void) {
     RUN(test_failed_status_read_after_overflow_emits_nothing);
     RUN(test_failed_event_read_emits_nothing);
     RUN(test_play_held_through_resync_needs_a_stable_release);
-    RUN(test_key_held_through_resync_ignores_a_re_reported_press);
-    RUN(test_key_held_through_overflow_ignores_a_re_reported_press);
+    RUN(test_key_held_through_resync_is_silent_on_release);
+    RUN(test_key_held_through_overflow_is_silent_on_release);
+    RUN(test_pad_released_during_stall_presses_again);
+    RUN(test_pad_released_in_an_overflow_presses_again);
+    RUN(test_reinit_after_resync_keeps_held_key_suppressed);
     RUN(test_resync_flushes_without_reinit);
     RUN(test_i2c_error_reconfigures_before_reading);
     RUN(test_reset_chip_is_reconfigured);

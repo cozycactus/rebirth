@@ -33,7 +33,8 @@ static const key_control_t key_map[PANEL_ROWS][PANEL_COLS] = {
 typedef struct {
     bool raw;           // last state seen
     bool accepted;      // last state reported
-    bool suppressed;    // down at a resync: silent until seen up for the debounce time
+    bool suppressed;    // down at a chip re-init, or PLAY at a resync: silent until
+                        // seen up for the debounce time
     uint32_t since_ms;  // when raw last changed
 } debounce_t;
 
@@ -83,15 +84,9 @@ static bool settle(debounce_t *d, uint32_t now_ms, uint32_t window_ms) {
     return true;
 }
 
-// The key state is unknown (events lost, or a resync): nothing is reported
-// down any more, a key that was down stays suppressed, and queued key events
-// are dropped. Queued PLAY events stay.
-static void forget_keys(void) {
-    for (uint8_t i = 0; i < PANEL_KEYS; i++) {
-        debounce_t *key = &keys[i];
-        key->suppressed = key->suppressed || key->raw || key->accepted;
-        key->accepted = false;
-    }
+// Key events from before a drain or a lost batch are dropped; queued PLAY
+// events stay.
+static void drop_key_events(void) {
     panel_event_t kept_events[EVENT_RING_SIZE];
     uint8_t kept = 0;
     for (uint8_t i = 0; i < ring_count; i++) {
@@ -101,6 +96,29 @@ static void forget_keys(void) {
     memcpy(ring, kept_events, kept * sizeof(ring[0]));
     ring_head = 0;
     ring_count = kept;
+}
+
+// The FIFO was drained and the chip kept its configuration: a key held across
+// the drain is not reported again, only its release later, which then changes
+// nothing. So every key reads as up and nothing stays suppressed, and a key
+// whose release was drained presses normally again.
+static void release_keys(void) {
+    for (uint8_t i = 0; i < PANEL_KEYS; i++) {
+        keys[i].raw = false;
+        keys[i].accepted = false;
+        keys[i].suppressed = false;
+    }
+}
+
+// The chip is (re-)initialised and may report a held key again: nothing is
+// reported down any more and a key that was down stays suppressed until it is
+// seen released.
+static void suppress_keys(void) {
+    for (uint8_t i = 0; i < PANEL_KEYS; i++) {
+        debounce_t *key = &keys[i];
+        key->suppressed = key->suppressed || key->raw || key->accepted;
+        key->accepted = false;
+    }
 }
 
 static void forget_play(void) {
@@ -125,10 +143,15 @@ static bool chip_ready(uint32_t now_ms) {
     return !retry_armed;
 }
 
+// Events were lost: drop the batch and drain the FIFO. Keys read as up when a
+// configured chip was only drained; after a re-init they stay suppressed.
 static void lose_sync(uint32_t now_ms) {
+    bool kept_config = chip_configured;
     chip_synced = false;
-    forget_keys();
+    drop_key_events();
     chip_ready(now_ms);
+    if (kept_config && chip_configured && chip_synced) release_keys();
+    else suppress_keys();
 }
 
 // About once a second: a chip that reset (brown-out, ESD) still answers but
@@ -161,13 +184,17 @@ void panel_input_init(void) {
 }
 
 void panel_input_resync(void) {
-    forget_keys();
     forget_play();
     ring_count = 0;             // PLAY events too: nothing from the stall is a command
     // A working chip only needs its FIFO drained; it is re-initialised (next
     // poll) only when that fails.
     chip_synced = chip_configured && tca8418_flush();
-    if (!chip_synced) chip_configured = false;
+    if (chip_synced) {
+        release_keys();
+    } else {
+        chip_configured = false;
+        suppress_keys();
+    }
     retry_armed = false;
 }
 

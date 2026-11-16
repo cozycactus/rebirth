@@ -32,20 +32,23 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
 - Host tests execute the timer/transport code, including MIDI Clock rate,
   independent loops, live edits, note durations and overflow recovery.
 - Unix two-thread tests cover Stop/Panic during a pending gate commit.
-- UI tests cover Panic releases, selection/edit focus, mute/config presses and
-  stopped-only storage. The six screens (Session view, pattern view, step editor,
-  pattern select, track config, Song editor) and the four kit screens (Session
-  lane strip, kit pattern view, kit step editor, kit config) render with the
-  production framebuffer.
+- UI tests cover Panic releases, selection/edit focus, mute/config presses,
+  stopped-only storage, and hold-step editing in the pattern view on SYNTH and
+  DRUM cells beside the kit lane rules on kit cells. The six screens (Session
+  view, pattern view, step editor, pattern select, track config, Song editor)
+  and the four kit screens (Session lane strip, kit pattern view, kit step
+  editor, kit config) render with the production framebuffer.
 - Storage tests cover CRC32, validated version-4, version-5 and version-6 loads,
   and interrupted writes.
 - Expander tests cover failed MCP23017 reads (state kept, chip reconfigured),
   failed step LED writes (direction and mask rewritten), chip resets found by
   config readback, retries limited to one per 100 ms on a dead bus, step
   button and encoder resync after a flash stall, and internal pulls off on
-  GPIO 8/9. Panel input tests cover the same for the TCA8418, plus overflow
-  and incomplete reads, and keys or PLAY held through a resync. Storage tests
-  cover the input resync after save and load.
+  GPIO 8/9, and a reset button expander whose idle lines read as pressed.
+  Panel input tests cover the same for the TCA8418, plus overflow and
+  incomplete reads, keys or PLAY held through a resync, and keys released
+  during a stall or an overflow. Storage tests cover the input resync after
+  save and load.
 - DAC command tests cover the 2.048 V reference, both gains and octave scaling.
 - Kit track (host tests and both firmware builds, DAC gain 1 and 2, with no
   warnings): lane helpers, prepared kit rows, the pulse order, velocity levels,
@@ -61,12 +64,18 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
   with detent-rate acceleration for numbers only, and the kit OLED screens. The
   sanitizer build passes too, also with `-fshort-enums`.
 - RAM from `arm-none-eabi-size -A build/fw1/rp2040_sequencer.elf` after a fresh
-  build: `.data` 10,188 + `.bss` 105,184 = 115,372 bytes (about 112.7 KiB) of
+  build: `.data` 10,780 + `.bss` 105,264 = 116,044 bytes (about 113.3 KiB) of
   the RP2040's 264 KiB; the `.heap` and the two stack sections are separate
   (2,048 bytes each). The branch base has `.data` 4,396 + `.bss` 69,876 = 74,272
-  bytes (about 72.5 KiB). The design expected about 108,000 bytes (about 105.5
-  KiB) with the grown flash copy buffer; the build is about 7.2 KiB above that
-  and still fits. `.bss` grew by 35,308 bytes: as estimated, the kit steps and
+  bytes (about 72.5 KiB). Before `master` was merged in, the kit branch had
+  `.data` 10,188 + `.bss` 105,184 = 115,372 bytes (about 112.7 KiB); the merge
+  added 592 bytes of `.data` (the per-frame `sequencer_snapshot()`, 512 bytes,
+  and `seq_lock()` and `seq_unlock()`, 60 and 52, now in RAM, less the two
+  16-byte veneers through which the timer ISR reached the lock helpers in
+  flash) and 80 bytes of `.bss` (the hold-step state in the UI). The design
+  expected about 108,000 bytes (about 105.5 KiB) with the grown flash copy
+  buffer; the build is about 7.9 KiB above that and still fits. On the kit
+  branch `.bss` grew by 35,308 bytes: as estimated, the kit steps and
   settings in `g_seq` (16,536 bytes), the save's copy buffer `pattern_buf`
   (14,848 to 31,232 bytes), the prepared rows and the kit runtime state, and 512
   more for the TX queue, doubled to 1,024 bytes after review. The estimate left
@@ -80,9 +89,10 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
   `midi_try_send_bytes_capped()` (244), `midi_send_clock()` (108),
   `midi_send_note_off()` (38), `midi_output_overflowed()` (104) and the step
   buffer's `midi_buf_clear()`, `midi_buf_flush()`, `midi_buf_note_on()` and
-  `midi_buf_note_off()` (12, 28, 68, 68). The ISR's other callees stay in flash
-  as on the base commit (see JITTER_MEASUREMENT.md, Session panel load case, and
-  the bench item below).
+  `midi_buf_note_off()` (12, 28, 68, 68). Since the merge `seq_lock()` and
+  `seq_unlock()` are in RAM too. The ISR's other callees stay in flash as on the
+  base commit (see JITTER_MEASUREMENT.md, Session panel load case, and the bench
+  item below).
 
 ## Needs Bench Verification
 

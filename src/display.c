@@ -191,7 +191,7 @@ static void draw_kit_strip(uint8_t y, uint8_t h, const char *strip, uint8_t play
 // ─── Session View ──────────────────────────────────────────────
 //
 // Layout (128×64):
-//   Line 0 (y=0):   BANK A  ROW 3      (or MIXED)
+//   Line 0 (y=0):   BANK A  ROW 3     P (or MIXED; P/S = Pattern/Song mode)
 //   Line 1 (y=14):  T3  B4  LEN 16     (focused track, location, length)
 //   Line 2 (y=28):  120.0 BPM 1 BAR
 //   Bar (y=44–51):  16 step boxes, the global step in the bar filled
@@ -220,7 +220,7 @@ const char *display_launch_quant_name(launch_quant_t quant) {
     return (unsigned)quant < LAUNCH_QUANT_COUNT ? launch_quant_names[quant] : "?";
 }
 
-void display_draw_session_view(uint8_t bank, uint8_t common_row,
+void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mode,
                                uint8_t focus_track, uint8_t focus_location, uint8_t focus_length,
                                float bpm, launch_quant_t quant, uint8_t bar_step,
                                const char *kit_lane, const char *kit_strip, uint8_t kit_playhead) {
@@ -235,6 +235,8 @@ void display_draw_session_view(uint8_t bank, uint8_t common_row,
         snprintf(line, sizeof(line), "BANK %c  MIXED", 'A' + bank);
     }
     ssd1309_draw_string(0, 0, line, false);
+    ssd1309_draw_string((FONT_COLS - 1) * FONT_CHAR_W, 0,
+                        mode == PLAY_MODE_SONG ? "S" : "P", false);
 
     char label[4];
     pattern_label(focus_location, label, sizeof(label));
@@ -320,7 +322,7 @@ static void draw_mutes_and_queue(uint8_t track) {
     }
 }
 
-void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step) {
+void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step, int8_t held_step) {
     // ── Header line ──
     char label[4];
     pattern_label(g_seq.active_pattern[track], label, sizeof(label));
@@ -341,12 +343,21 @@ void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step) 
         case OUTPUT_BOTH:       out_str = "M+C"; break;
         default:                out_str = "MIDI"; break;
     }
-    snprintf(info, sizeof(info), "Ch:%-2d %-4s L:%-2d",
-             tc->midi_channel + 1, out_str, pattern_get_track_length(p, track));
+    bool held = held_step >= 0 && held_step < STEPS_PER_PATTERN;
+    if (held) {
+        // Values of the step held for editing replace the track info
+        const step_t *st = &p->steps[track][held_step];
+        char note_str[5];
+        note_to_str(st->note, note_str);
+        snprintf(info, sizeof(info), "S%02d Note:%-4s Vel:%3d", held_step + 1, note_str, st->velocity);
+    } else {
+        snprintf(info, sizeof(info), "Ch:%-2d %-4s L:%-2d",
+                 tc->midi_channel + 1, out_str, pattern_get_track_length(p, track));
+    }
     ssd1309_draw_string(0, 10, info, false);
 
     // ── Step grid ──
-    draw_step_grid(p, track, step, -1);     // -1 = no selected step
+    draw_step_grid(p, track, step, held ? held_step : -1);  // -1 = no selected step
 
     draw_mutes_and_queue(track);
 }

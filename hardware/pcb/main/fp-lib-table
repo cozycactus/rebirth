@@ -1,0 +1,4 @@
+(fp_lib_table
+  (version 7)
+  (lib (name "rebirth") (type "KiCad") (uri "${KIPRJMOD}/../rebirth.pretty") (options "") (descr "ReBirth project footprints: DIN-5 SDS-50J"))
+)
