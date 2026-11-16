@@ -119,6 +119,14 @@ typedef enum {
     PLAY_MODE_SONG,         // Play song chain
 } play_mode_t;
 
+typedef enum {
+    LAUNCH_QUANT_TRACK_LOOP = 0, // at the end of that track's loop (old rule)
+    LAUNCH_QUANT_BAR,            // global step that is a multiple of 16
+    LAUNCH_QUANT_BEAT,           // global step that is a multiple of 4
+    LAUNCH_QUANT_STEP,           // next step
+    LAUNCH_QUANT_COUNT
+} launch_quant_t;
+
 typedef struct {
     transport_state_t state;
     play_mode_t       mode;
@@ -155,6 +163,7 @@ typedef struct {
     pattern_t            patterns[MAX_PATTERNS];
     song_t               song;
     uint8_t              active_pattern[NUM_TRACKS]; // Edited pattern per track/section
+    volatile uint8_t     launch_quant;       // launch_quant_t; not saved
     volatile uint8_t     track_mutes;        // Bitmask: bit N = track N muted for playback
     // Spinlock index for mutex
     uint32_t             spinlock_num;
@@ -182,6 +191,8 @@ void transport_stop(void);
 void transport_continue(void);
 void transport_set_bpm(float bpm);
 void transport_set_mode(play_mode_t mode);
+void transport_set_launch_quant(launch_quant_t q);  // ignores q >= COUNT
+launch_quant_t transport_get_launch_quant(void);
 void sequencer_panic(void);
 void sequencer_refresh_track_playback(uint8_t track, uint8_t pattern_index);
 void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out);
@@ -219,16 +230,52 @@ bool song_move(uint16_t from, uint16_t to);
 void song_clear(void);
 void song_set_end_mode(song_end_mode_t mode);
 
-// Core 0: queue at track loop end, or select immediately while stopped.
-// Returns false for invalid locations or Song mode.
+// Core 0: queue for the configured launch quantization (default 1 BAR; see
+// launch_quant_t), or select immediately while stopped. Returns false for
+// invalid locations or Song mode.
 bool transport_queue_pattern(uint8_t pattern_index);
 bool transport_queue_track_pattern(uint8_t track, uint8_t pattern_index);
 void transport_clear_queue(void);
 void transport_clear_track_queue(uint8_t track);
+// A pad (one track) or scene (all tracks) press, decided and written in one
+// critical section, Pattern mode only. If any track in track_mask is queued to
+// the location, their queues are cancelled. Otherwise each one already on it
+// loses any queue and keeps playing, and each other one is queued to it
+// (selected at once while stopped). False for an invalid location or Song mode.
+bool transport_launch(uint8_t track_mask, uint8_t pattern_index);
+
+typedef struct {
+    transport_state_t state;
+    play_mode_t       mode;
+    uint32_t          pulse_count;
+    uint8_t           current[NUM_TRACKS];
+    uint8_t           queued[NUM_TRACKS];
+    uint8_t           track_step[NUM_TRACKS];
+    uint8_t           live_mutes;    // g_seq.track_mutes
+    uint8_t           stored_mutes;  // bit c: patterns[current[c]].tracks[c].muted
+} transport_snapshot_t;
+
+// Consistent copy of the transport; takes the locks itself.
+void sequencer_snapshot(transport_snapshot_t *out);
+
+// Bit (track * 8 + slot): location bank * 8 + slot has an active step within
+// the track's length (stored mutes ignored). Takes seq_lock: call with none held.
+uint64_t sequencer_clip_mask(uint8_t bank);
 
 // Track mutes (bitmask, instant)
 void seq_set_track_mute(uint8_t track, bool muted);
+// Copies a track's routing into all 32 locations, each keeping its own stored
+// `muted`, then refreshes that track's prepared rows. Takes seq_lock: call with
+// none held.
+void seq_set_track_config(uint8_t track, const track_config_t *config);
+// The MUTE button. A track that is muted (live, or stored at the location it
+// plays) becomes audible: the live bit and the stored mute of every location
+// are cleared and its prepared rows refreshed. An audible track gets the live
+// mute. Takes seq_lock: call with none held.
 void seq_toggle_track_mute(uint8_t track);
+// The muted tracks, by the rule MUTE uses: bit c set when the live mute is set
+// or the location track c plays has its stored mute. Takes seq_lock: call with
+// none held.
 uint8_t seq_get_track_mutes(void);
 
 // midi_out.c
@@ -263,8 +310,13 @@ void cv_gate_all_off(void);
 void display_init(void);
 void display_clear(void);
 void display_update(void);
-void display_draw_performance_view(uint8_t selected_track, uint8_t bank,
-                                   uint8_t mutes);
+// common_row: session_common_row(&snap), 0xFF = MIXED. bar_step: global step in the
+// bar (0-15); 16 or more lights none (stopped). mode: shown as P or S at the end
+// of line 0.
+void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mode,
+                               uint8_t focus_track, uint8_t focus_location, uint8_t focus_length,
+                               float bpm, launch_quant_t quant, uint8_t bar_step);
+const char *display_launch_quant_name(launch_quant_t quant);
 void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step, int8_t held_step);
 void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step);
 void display_draw_pattern_select(uint8_t pattern,

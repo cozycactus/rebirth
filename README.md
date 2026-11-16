@@ -10,7 +10,10 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **Independent pattern selection per track** — each track can play or queue a different bank/slot
 - **Per-track pattern length** — each track can loop at 1-16 sixteenth-note steps
 - **Live pattern editing** — step, length, and track-setting edits update playback while running
-- **Performance view** — safe live mutes, per-track pattern queueing, transport, BPM, and jitter status
+- **Session view** — 8×8 pad grid (tracks × slots of the shown bank), SCENE column,
+  MUTE row and a PLAY button; the 16 step buttons edit the focused clip
+- **Launch quantization** — pad and scene launches land on the next bar (default),
+  beat, step, or at the end of the track's loop
 - **Song mode** — chain patterns with repeat counts, loop or stop at end
 - **Pattern queue** — schedule the next pattern during playback
 - **Track mutes** — instant bitmask-based mute/unmute
@@ -47,8 +50,11 @@ DIN MIDI bytes are queued into a UART TX ring buffer and drained by UART0's TX i
 | Gate outputs | 14–17 | 3.3V logic (4 channels) |
 | Jitter probe | 7 | High while sequencer timer ISR runs |
 | Encoders | 18–22, 26 | 2× rotary + push |
-| I²C expander | 8, 9 | MCP23017 for step buttons |
-| Tempo LED | 25 | |
+| I²C0 bus | 8, 9 | 400 kHz; external 2.2–4.7 kΩ pull-ups to 3.3 V (internal pulls are off) |
+| I²C devices | on 8, 9 | MCP23017 0x20 step buttons, MCP23017 0x21 step LEDs, TCA8418 0x34 panel keys (pads, SCENE, MUTE) |
+| Tempo LED | 25 | Pico on-board LED |
+| RGB LED data | 27 | 82× SK6812MINI-E via PIO, buffered to 5 V |
+| PLAY button | 28 | Momentary switch to GND, internal pull-up |
 
 ## Build
 
@@ -81,29 +87,68 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-Seven test executables cover pattern/song data, MIDI/gate output at both DAC
-gains, the real timer/transport code, flash storage, and UI/OLED rendering.
+Eleven CTest targets (ten test sources; `test_sync` is built twice, once per DAC
+gain) cover pattern/song data (`test_pattern`, `test_song`), MIDI/gate output at
+both DAC gains (`test_sync`, `test_sync_gain2`), the real timer/transport code
+(`test_playback`), flash storage (`test_storage`), the Session view
+(`test_session`), the LED frame builder (`test_led_frame`), the TCA8418 panel
+input (`test_panel_input`), the MCP23017 button/LED expanders and encoder
+buttons (`test_expanders`) and UI/OLED rendering (`test_ui`). Launch
+quantization runs in `sequencer.c` and is tested in `test_playback`.
 Unix builds also exercise concurrent Stop/Panic during a pending gate commit.
 
 ## Live Controls
 
-- Performance: encoder 1 selects the track; encoder 2 changes tempo.
-- Buttons 1-8 mute on press. Buttons 9-16 select bank slots 1-8: while stopped
-  selection is immediate; while playing it queues at that track's loop end.
-- Encoder 1 short opens the selected playing pattern for editing; long cycles bank.
-- Encoder 2 short starts/stops; long opens the pattern selector.
-- Hold both encoder buttons for Panic. Release both before issuing another command.
-- Pattern view: a tap shorter than half a second toggles a step when the
-  button is released. Hold one or more steps and turn encoder 1 for note or
-  encoder 2 for velocity; encoder 1 short/long toggles accent/slide and
+The Session view is home. The grid shows one bank (A-D) of 8 slots per track:
+column = track, row = slot. The **focus** is one cell (track, slot); the step
+buttons edit it.
+
+- **Pad:** launches that slot on the track at the next launch point and moves
+  the focus there. While stopped the selection is immediate. Pressing a queued
+  pad cancels the queue; pressing the playing pad changes nothing except that
+  it cancels a pending queue to another slot of that track. An empty slot
+  launches too, which silences the track.
+- **SCENE:** launches the row on every track together; tracks already playing
+  it keep playing. Pressed while any track is queued to that row, it cancels
+  all queues.
+- **MUTE:** toggles the track's mute at once. On a track silenced by a mute
+  stored in an older save, it makes the track audible and clears that stored
+  mute in every slot.
+- **PLAY:** starts and stops the transport; it is the only start/stop. Stop
+  cancels pending queues.
+- **Step buttons 1-16:** a short press toggles the step on release; a long
+  press opens the step editor on that step without toggling it. Both act on
+  the clip that was focused when the button went down, even if a pad or
+  encoder 1 moves the focus before release; leaving the Session view drops
+  the press. Steps beyond the clip's length do nothing.
+- **Encoder 1 (TRACK):** turn to focus the previous/next track (on the slot it
+  plays, or its queued one); press opens the pattern view on the focus; long
+  press shows the next bank A → B → C → D → A.
+- **Encoder 2 (VALUE):** turn for tempo; press cycles the launch quantization
+  (1 BAR, 1 BEAT, NEXT STEP, TRACK LOOP; 1 BAR after power-up); long press opens
+  the pattern selector on the focus.
+- Pads, SCENE, MUTE and PLAY work on every screen. Outside the Session view a
+  pad launches without moving the focus.
+- The step editor returns to the screen it was opened from. In the pattern
+  view, encoder 1 long returns to the Session view; in the selector, encoder 2
+  long does.
+- Pattern view step buttons: a tap shorter than half a second toggles the step
+  when the button is released. Hold one or more steps and turn encoder 1 for
+  note or encoder 2 for velocity; encoder 1 short/long toggles accent/slide and
   encoder 2 long toggles tie on the held steps. The first edit of a held empty
   step creates it. A step held longer, or held while an encoder is turned or
-  pressed, is not toggled on release. Encoder 2 short is still start/stop;
-  track, tempo and mode changes are suspended while a step is held.
+  pressed, is not toggled on release. While a step is held the encoders do not
+  change track, tempo or screen; pads, SCENE, MUTE and PLAY work as usual.
+- Hold both encoder buttons for Panic: it stops playback and returns to the
+  Session view. Release both before issuing another command; keys held through
+  the panic or pressed while it is held do nothing afterwards.
 - In the selector, buttons 1-8 mute on **short release**; holding opens track
-  configuration without muting. Save/load (9/10) require stopped playback.
-- Manual queues are unavailable in Song mode. In the song editor, button 2
-  starts Song mode and button 3 returns to Pattern playback.
+  configuration without muting. Save/load (9/10) require stopped playback;
+  buttons, pads and PLAY held through a save or load do nothing afterwards.
+- A long press only counts on the screen where the button went down.
+- Pad and scene launches are unavailable in Song mode (`SONG MODE`); a pad
+  still moves the focus. In the song editor, button 2 selects Song mode and
+  button 3 Pattern playback; PLAY starts it.
 - Song entries can be inserted or removed while Song mode plays: the playing
   entry finishes, then the entry after it in the edited list plays.
 - Slide/tie connect a step to the following step. Gate length controls MIDI
@@ -121,22 +166,37 @@ include/
   sequencer.h       — All data types and API declarations
 src/
   main.c            — Core 0 entry, init, UI loop
-  sequencer.c       — Core 1 engine, timer ISR, transport
+  sequencer.c       — Core 1 engine, timer ISR, transport, launch quantization
   pattern.c         — Pattern data manipulation
   song.c            — Song editing, track mutes
   midi_out.c        — MIDI UART + buffered output
   cv_gate.c         — MCP4822 DAC + GPIO gate control
   display.c         — OLED drawing layer
+  ssd1309.c         — OLED controller driver
   ui.c              — UI state machine
+  session.c         — Session view: bank, focus, pad/scene/mute presses
+  led_frame.c       — Pure LED frame builder (light tables, current budget)
+  rgb_leds.c        — 82-LED SK6812 chain on GPIO 27 (PIO)
+  tca8418.c         — TCA8418 key scanner driver (I2C 0x34)
+  panel_input.c     — Panel key and PLAY debounce, events, recovery, resync
+  mcp23017.c        — Step buttons (MCP23017 0x20)
+  step_leds.c       — Step LEDs (MCP23017 0x21)
+  encoder.c         — Two rotary encoders with push buttons
+  flash_storage.c   — Save/load of patterns and song
 HARDWARE_STATUS.md  — Build/bench verification status
 JITTER_MEASUREMENT.md — Timing measurement procedure
 test/
   test_pattern.c    — Pattern logic tests
   test_sync.c       — Synchronization layer tests
   test_song.c       — Song mode tests
-  test_playback.c   — Timer, transport, note and MIDI queue regression tests
-  test_storage.c    — Save validation and interrupted-write tests
+  test_playback.c   — Timer, transport, launch quantization, note and MIDI
+                      queue regression tests
+  test_storage.c    — Save validation, interrupted writes, input resync
   test_ui.c         — UI events and production OLED rendering
+  test_session.c    — Pad/scene launch and cancel, focus, bank
+  test_led_frame.c  — LED light tables and current budget
+  test_panel_input.c — TCA8418 decoding, debounce, overflow, recovery, resync
+  test_expanders.c  — MCP23017, step LED and encoder error handling, resync
 ```
 
 ## Status
@@ -149,7 +209,7 @@ test/
 - [x] Per-track pattern lengths
 - [x] Pattern queue
 - [x] Track mutes
-- [x] Performance-safe live control view
+- [x] Session view: pad grid, scenes, mutes, PLAY and launch quantization
 - [x] Panic / all-notes-off recovery
 - [x] Host regression tests for playback, UI, storage and output
 - [x] OLED display driver (SSD1309, SPI, full framebuffer)

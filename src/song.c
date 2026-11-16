@@ -188,16 +188,55 @@ void seq_set_track_mute(uint8_t track, bool muted) {
     seq_unlock(lock_state);
 }
 
+// Called with no lock held: each refresh takes seq_lock itself.
+static void refresh_track_rows(uint8_t track) {
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        sequencer_refresh_track_playback(track, p);
+    }
+}
+
+void seq_set_track_config(uint8_t track, const track_config_t *config) {
+    if (track >= NUM_TRACKS || !config) return;
+    uint32_t lock_state = seq_lock();
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        // Routing is the track's; the stored mute stays per location.
+        bool muted = g_seq.patterns[p].tracks[track].muted;
+        g_seq.patterns[p].tracks[track] = *config;
+        g_seq.patterns[p].tracks[track].muted = muted;
+    }
+    seq_unlock(lock_state);
+    refresh_track_rows(track);
+}
+
 void seq_toggle_track_mute(uint8_t track) {
     if (track >= NUM_TRACKS) return;
+    uint8_t bit = (uint8_t)(1u << track);
+    bool stored_cleared = false;
     uint32_t lock_state = seq_lock();
-    g_seq.track_mutes ^= (1u << track);
+    uint8_t playing = g_seq.transport.current_pattern[track];
+    bool stored = playing < MAX_PATTERNS && g_seq.patterns[playing].tracks[track].muted;
+    if ((g_seq.track_mutes & bit) || stored) {
+        g_seq.track_mutes &= (uint8_t)~bit;
+        for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+            stored_cleared |= g_seq.patterns[p].tracks[track].muted;
+            g_seq.patterns[p].tracks[track].muted = false;
+        }
+    } else {
+        g_seq.track_mutes |= bit;
+    }
     seq_unlock(lock_state);
+    if (stored_cleared) refresh_track_rows(track);
 }
 
 uint8_t seq_get_track_mutes(void) {
     uint32_t lock_state = seq_lock();
     uint8_t mutes = g_seq.track_mutes;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        uint8_t playing = g_seq.transport.current_pattern[track];
+        if (playing < MAX_PATTERNS && g_seq.patterns[playing].tracks[track].muted) {
+            mutes |= (uint8_t)(1u << track);
+        }
+    }
     seq_unlock(lock_state);
     return mutes;
 }

@@ -134,6 +134,25 @@ void encoder_poll(void) {
     }
 }
 
+void encoder_resync(void) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    for (int i = 0; i < NUM_ENCODERS; i++) {
+        encoder_state_t *e = &encoders[i];
+        bool down = !gpio_get(enc_pins[i][2]);
+        // The button's state now is its debounced state, with no edge: a
+        // release during the stall reports nothing, and a button held now
+        // counts as long-fired, so it never becomes a press or a long press.
+        e->_btn_raw = down;
+        e->_btn_prev = down;
+        e->button_held = down;
+        e->_long_fired = down;
+        e->_btn_down_ms = now;
+        e->_btn_debounce_ms = now;
+        e->button_event = BTN_NONE;
+    }
+}
+
 // ─── Accessors ─────────────────────────────────────────────────
 
 int8_t encoder_get_delta(uint8_t enc) {

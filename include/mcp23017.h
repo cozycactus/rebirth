@@ -39,8 +39,19 @@ typedef struct {
 // Initialize I2C0, configure MCP23017 ports as inputs with pull-ups
 void mcp23017_init(void);
 
-// Poll button state — call from ui_update()
+// Poll button state — call from ui_update(). Any I2C error marks the chip
+// unconfigured; the configuration is written again (after a failed attempt,
+// at most every 100 ms) before the ports are decoded. IPOL is read back about
+// once a second, and before a sample with three or more keys going down at
+// once is accepted, to notice a chip that reset (its idle lines read as
+// pressed); such a chip is reconfigured and its ports become the new baseline,
+// with no events.
 void mcp23017_poll(void);
+
+// After a flash stall or a panic: the ports read now (or at the next good
+// read) become the held state. Nothing that changed meanwhile produces a
+// press, release or long press, and keys held now never long-press.
+void mcp23017_resync(void);
 
 // Get pointer to button state struct
 // Caller should process pressed/released/long_pressed then clear them

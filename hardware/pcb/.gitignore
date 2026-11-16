@@ -1,0 +1,6 @@
+.check/
+*.kicad_prl
+*-backups/
+fp-info-cache
+gen/__pycache__/
+*.lck
