@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define PICO_ERROR_TIMEOUT (-3)
+#define PICO_ERROR_TIMEOUT (-2)
 
 typedef struct i2c_inst { int unused; } i2c_inst_t;
 extern i2c_inst_t fake_i2c0_inst;

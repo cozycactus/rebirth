@@ -56,10 +56,16 @@ static bool play_pin_down(void) {
     return !gpio_get(PLAY_BUTTON_PIN);
 }
 
+// Releases every key silently and drops queued key events; PLAY events stay.
 static void clear_keys(void) {
     memset(keys, 0, sizeof(keys));
+    uint8_t kept = 0;
+    for (uint8_t i = 0; i < ring_count; i++) {
+        panel_event_t event = ring[(ring_head + i) % EVENT_RING_SIZE];
+        if (event.kind == PANEL_PLAY) ring[kept++] = event;
+    }
     ring_head = 0;
-    ring_count = 0;
+    ring_count = kept;
 }
 
 static void clear_play(void) {
@@ -67,9 +73,14 @@ static void clear_play(void) {
     play_suppressed = play_pin_down();
 }
 
+static bool chip_recover(void) {
+    return tca8418_init() && tca8418_flush();
+}
+
 static void resync_chip(void) {
-    recovering = !tca8418_flush();
+    recovering = !chip_recover();
     clear_keys();
+    ring_count = 0;
     clear_play();
 }
 
@@ -77,7 +88,6 @@ void panel_input_init(void) {
     gpio_init(PLAY_BUTTON_PIN);
     gpio_set_dir(PLAY_BUTTON_PIN, GPIO_IN);
     gpio_pull_up(PLAY_BUTTON_PIN);
-    tca8418_init();
     resync_chip();
 }
 
@@ -124,27 +134,25 @@ static void poll_play(uint32_t now_ms) {
 }
 
 void panel_input_poll(uint32_t now_ms) {
+    // PLAY is a plain GPIO and is sampled even while the chip is recovering.
     if (recovering) {
-        if (tca8418_flush()) {
+        if (chip_recover()) {
             recovering = false;
             clear_keys();
-            clear_play();
         }
-        return;
-    }
-
-    uint8_t events[CHIP_READ_MAX];
-    bool overflow = false;
-    int count = tca8418_read_events(events, CHIP_READ_MAX, &overflow);
-    if (count >= 0 && overflow) {
-        // Events were lost, so key state is unknown: release everything silently.
-        recovering = !tca8418_flush();
-        clear_keys();
-        if (recovering) return;
     } else {
-        for (int i = 0; i < count; i++) apply_chip_event(events[i], now_ms);
+        uint8_t events[CHIP_READ_MAX];
+        bool overflow = false;
+        int count = tca8418_read_events(events, CHIP_READ_MAX, &overflow);
+        if (overflow) {
+            // Events were lost, so key state is unknown: release everything silently.
+            recovering = !tca8418_flush();
+            clear_keys();
+        } else {
+            for (int i = 0; i < count; i++) apply_chip_event(events[i], now_ms);
+        }
+        if (!recovering) emit_stable_keys(now_ms);
     }
-    emit_stable_keys(now_ms);
     poll_play(now_ms);
 }
 

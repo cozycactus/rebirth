@@ -27,18 +27,32 @@ static uint8_t chip_fifo[FIFO_DEPTH];
 static int chip_fifo_count;
 static uint8_t chip_pointer;
 static int chip_fail_count;  // next N transactions fail with a timeout
+static int chip_txn;         // transactions since chip_reset
+static int chip_fail_txn;    // 1-based transaction number that fails once (0 = none)
 
 static void chip_reset(void) {
     memset(chip_regs, 0, sizeof(chip_regs));
     chip_fifo_count = 0;
     chip_pointer = 0;
     chip_fail_count = 0;
+    chip_txn = 0;
+    chip_fail_txn = 0;
 }
+
+static bool chip_should_fail(void) {
+    chip_txn++;
+    if (chip_fail_txn != 0 && chip_txn == chip_fail_txn) return true;
+    if (chip_fail_count > 0) { chip_fail_count--; return true; }
+    return false;
+}
+
+static uint8_t chip_pop(void);
 
 static void chip_push(uint8_t event) {
     if (chip_fifo_count == FIFO_DEPTH) {
-        chip_regs[0x02] |= 0x08;  // OVR_FLOW_INT, the event is lost
-        return;
+        // OVR_FLOW_M = 1: the oldest event is pushed out
+        chip_regs[0x02] |= 0x08;
+        chip_pop();
     }
     chip_fifo[chip_fifo_count++] = event;
     chip_regs[0x02] |= 0x01;  // K_INT
@@ -56,7 +70,7 @@ int i2c_write_timeout_us(i2c_inst_t *i2c, uint8_t addr, const uint8_t *src, size
     (void)i2c; (void)nostop;
     CHECK(addr == TCA8418_ADDR);
     CHECK(timeout_us > 0);
-    if (chip_fail_count > 0) { chip_fail_count--; return PICO_ERROR_TIMEOUT; }
+    if (chip_should_fail()) return PICO_ERROR_TIMEOUT;
     CHECK(len == 1 || len == 2);
     chip_pointer = src[0];
     if (len == 2) {
@@ -71,7 +85,7 @@ int i2c_read_timeout_us(i2c_inst_t *i2c, uint8_t addr, uint8_t *dst, size_t len,
     (void)i2c; (void)nostop;
     CHECK(addr == TCA8418_ADDR);
     CHECK(timeout_us > 0);
-    if (chip_fail_count > 0) { chip_fail_count--; return PICO_ERROR_TIMEOUT; }
+    if (chip_should_fail()) return PICO_ERROR_TIMEOUT;
     CHECK(len == 1);
     if (chip_pointer == 0x04) dst[0] = chip_pop();
     else if (chip_pointer == 0x03) dst[0] = (uint8_t)chip_fifo_count;
@@ -292,6 +306,77 @@ static void test_failed_flush_stays_in_recovery(void) {
     CHECK(n == 1 && e[0].track == 2 && e[0].row == 2 && e[0].down);
 }
 
+static void test_overflow_survives_a_failed_transaction(void) {
+    // Fail each transaction of the overflowing poll in turn; the overflow must
+    // still be acted on, leaving no stuck key and no stale event.
+    for (int k = 1; k <= 30; k++) {
+        reset();
+        panel_event_t e[16];
+        for (int i = 0; i < 12; i++) key_press(i % 8, i % 10);
+        chip_fail_txn = chip_txn + k;
+        for (uint32_t t = 0; t <= 40; t++) panel_input_poll(t);
+        CHECK(drain(e, 16) == 0);
+        CHECK(chip_fifo_count == 0);
+        CHECK(!(chip_regs[0x02] & 0x08));
+        key_press(3, 3);
+        for (uint32_t t = 41; t <= 70; t++) panel_input_poll(t);
+        CHECK(drain(e, 16) == 1);
+        CHECK(e[0].kind == PANEL_PAD && e[0].track == 3 && e[0].row == 3 && e[0].down);
+    }
+}
+
+static void test_play_works_while_chip_recovers(void) {
+    reset();
+    panel_event_t e[8];
+    chip_fail_count = 1000000;
+    panel_input_resync();
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    for (uint32_t t = 0; t < 20; t++) panel_input_poll(t);
+    CHECK(drain(e, 8) == 0);
+    panel_input_poll(20);
+    CHECK(drain(e, 8) == 1 && e[0].kind == PANEL_PLAY && e[0].down);
+}
+
+static void test_queued_play_survives_overflow(void) {
+    reset();
+    panel_event_t e[16];
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    for (uint32_t t = 0; t <= 20; t++) panel_input_poll(t);
+    for (int i = 0; i < 12; i++) key_press(i % 8, i % 10);
+    for (uint32_t t = 21; t <= 40; t++) panel_input_poll(t);
+    int n = drain(e, 16);
+    CHECK(n == 1 && e[0].kind == PANEL_PLAY && e[0].down);
+}
+
+static void test_init_failure_at_boot_recovers(void) {
+    fake_hardware_reset();
+    chip_reset();
+    chip_fail_count = 1;
+    panel_input_init();
+    CHECK(chip_regs[0x01] == 0);
+    panel_event_t e[8];
+    panel_input_poll(0);
+    CHECK(chip_regs[0x01] == 0xA9);
+    key_press(4, 4);
+    for (uint32_t t = 1; t <= 12; t++) panel_input_poll(t);
+    CHECK(drain(e, 8) == 1);
+    CHECK(e[0].kind == PANEL_PAD && e[0].track == 4 && e[0].row == 4 && e[0].down);
+}
+
+static void test_full_ring_keeps_changes_pending(void) {
+    reset();
+    panel_event_t e[64];
+    int pressed = 0;
+    for (uint32_t t = 0; t < 4; t++) {
+        for (int i = 0; i < 10; i++, pressed++) key_press(pressed / 10, pressed % 10);
+        panel_input_poll(t);
+    }
+    for (uint32_t t = 4; t <= 30; t++) panel_input_poll(t);
+    CHECK(drain(e, 64) == 32);
+    for (uint32_t t = 31; t <= 40; t++) panel_input_poll(t);
+    CHECK(drain(e + 32, 32) == 8);
+}
+
 int main(void) {
     RUN(test_init_configures_keypad);
     RUN(test_key_codes_map_to_controls);
@@ -305,5 +390,10 @@ int main(void) {
     RUN(test_held_play_survives_resync_silently);
     RUN(test_held_pad_survives_resync_silently);
     RUN(test_failed_flush_stays_in_recovery);
+    RUN(test_overflow_survives_a_failed_transaction);
+    RUN(test_play_works_while_chip_recovers);
+    RUN(test_queued_play_survives_overflow);
+    RUN(test_init_failure_at_boot_recovers);
+    RUN(test_full_ring_keeps_changes_pending);
     return 0;
 }

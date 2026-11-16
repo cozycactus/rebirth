@@ -17,8 +17,7 @@
 #define CFG_OVR_FLOW_IEN 0x08
 #define CFG_KE_IEN 0x01
 #define INT_OVR_FLOW 0x08
-#define INT_K 0x01
-#define INT_ALL 0x0F
+#define INT_ALL 0xFF
 #define EC_COUNT_MASK 0x0F
 
 #define FLUSH_MAX_PASSES 8
@@ -43,14 +42,11 @@ bool tca8418_init(void) {
 }
 
 int tca8418_read_events(uint8_t *events, int max, bool *overflow) {
-    uint8_t status;
     uint8_t count;
+    uint8_t status;
     if (overflow) *overflow = false;
-    if (!read_reg(REG_INT_STAT, &status)) return -1;
-    if (status != 0 && !write_reg(REG_INT_STAT, status & INT_ALL)) return -1;
     if (!read_reg(REG_KEY_LCK_EC, &count)) return -1;
     count &= EC_COUNT_MASK;
-    if (overflow) *overflow = (status & INT_OVR_FLOW) != 0;
 
     int n = 0;
     while (n < count && n < max) {
@@ -59,6 +55,10 @@ int tca8418_read_events(uint8_t *events, int max, bool *overflow) {
         if (event == 0) break;
         events[n++] = event;
     }
+    // The flags are read last and never cleared here: tca8418_flush clears them
+    // once the caller has acted, so a failed read cannot lose an overflow.
+    if (!read_reg(REG_INT_STAT, &status)) return n > 0 ? n : -1;
+    if (overflow) *overflow = (status & INT_OVR_FLOW) != 0;
     return n;
 }
 
