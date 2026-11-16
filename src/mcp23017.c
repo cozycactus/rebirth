@@ -28,7 +28,7 @@ typedef struct {
     bool retry_armed;           // the last configuration attempt failed
     uint32_t retry_from_ms;
     bool rebaseline;            // the next good read is the state, with no events
-    bool trusted;               // the last sample was good: its keys may long-press
+    bool trusted;               // the last sample was good: the configuration holds
 } mcp_chip_t;
 
 #define MCP_CHIPS 2
@@ -141,12 +141,15 @@ void mcp23017_resync(void) {
 
 // ─── Polling ───────────────────────────────────────────────────
 
+typedef enum { SAMPLE_NONE, SAMPLE_GOOD, SAMPLE_BASELINE } sample_result_t;
+
 // One sample of one chip. A failed transfer, or a canary that no longer
-// holds, keeps the chip's keys as they were and untrusted (no long press)
-// until its next good sample, and its configuration is written again before
-// its next read. Returns true when the sample became the chip's baseline.
-static bool sample_chip(mcp_chip_t *c, uint32_t now) {
-    if (!ensure_configured(c, now)) return false;
+// holds, keeps the chip's keys as they were until its next good sample, and
+// its configuration is written again before its next read. SAMPLE_NONE when
+// there was no good sample; SAMPLE_BASELINE when the good one became the
+// chip's baseline.
+static sample_result_t sample_chip(mcp_chip_t *c, uint32_t now) {
+    if (!ensure_configured(c, now)) return SAMPLE_NONE;
     uint16_t steps;
     read_result_t result = read_chip(c, &steps);
     if (result != READ_OK) {
@@ -161,17 +164,17 @@ static bool sample_chip(mcp_chip_t *c, uint32_t now) {
         c->configured = false;
         c->trusted = false;
         if (result == READ_RESET) c->rebaseline = true;
-        return false;
+        return SAMPLE_NONE;
     }
     c->trusted = true;
     buttons._raw = (uint16_t)((buttons._raw & ~c->steps) | steps);
-    if (!c->rebaseline) return false;
+    if (!c->rebaseline) return SAMPLE_GOOD;
     // The keys as held, with no press, release or long press from the change;
     // keys held now never long-press.
     buttons._prev = (uint16_t)((buttons._prev & ~c->steps) | steps);
     buttons._long_fired = (uint16_t)((buttons._long_fired & ~c->steps) | steps);
     c->rebaseline = false;
-    return true;
+    return SAMPLE_BASELINE;
 }
 
 void mcp23017_poll(void) {
@@ -183,8 +186,13 @@ void mcp23017_poll(void) {
     // a baseline restarts the sample clock.
     bool due = (uint32_t)(now - buttons._debounce_ms) >= MCP_DEBOUNCE_MS;
     bool baseline = false;
+    uint16_t sampled = 0;       // the steps of the chips read good in this pass
     for (int i = 0; i < MCP_CHIPS; i++) {
-        if ((due || chips[i].rebaseline) && sample_chip(&chips[i], now)) baseline = true;
+        mcp_chip_t *c = &chips[i];
+        if (!due && !c->rebaseline) continue;
+        sample_result_t result = sample_chip(c, now);
+        if (result != SAMPLE_NONE) sampled |= c->steps;
+        if (result == SAMPLE_BASELINE) baseline = true;
     }
     if (due || baseline) buttons._debounce_ms = now;
 
@@ -196,12 +204,12 @@ void mcp23017_poll(void) {
     buttons.released |= just_released;
     buttons.held = buttons._raw;
 
-    // The keys of a chip whose last sample failed keep their last accepted
-    // state, which may be stale: they make no long press.
-    uint16_t trusted = 0;
-    for (int i = 0; i < MCP_CHIPS; i++) {
-        if (chips[i].trusted) trusted |= chips[i].steps;
-    }
+    // A long press fires only in a pass that just read the key's chip good.
+    // Between samples the last one may be up to MCP_DEBOUNCE_MS old, and the
+    // sample grid drifts against the press time with the pass length, so a
+    // timer running on it could long-press a key released since. The keys of
+    // a chip whose sample failed keep their last accepted state, maybe stale:
+    // no long press from them either. A long press is up to one sample late.
 
     // Per-button press timing for long press
     for (int i = 0; i < NUM_STEP_BUTTONS; i++) {
@@ -214,7 +222,7 @@ void mcp23017_poll(void) {
         }
 
         // Check for long press
-        if ((buttons._raw & trusted & mask) &&
+        if ((buttons._raw & sampled & mask) &&
             !(buttons._long_fired & mask) &&
             (now - buttons._down_time[i] >= MCP_LONG_PRESS_MS)) {
             buttons.long_pressed |= mask;

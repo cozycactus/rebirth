@@ -74,12 +74,13 @@ static uint8_t read_reg(int c, unsigned reg) {
 }
 
 unsigned i2c_init(i2c_inst_t *i2c, unsigned baudrate) {
-    (void)i2c; return baudrate;
+    CHECK(i2c == i2c0);
+    return baudrate;
 }
 
 int i2c_write_timeout_us(i2c_inst_t *i2c, uint8_t addr, const uint8_t *src, size_t len,
                          bool nostop, unsigned timeout_us) {
-    (void)i2c;
+    CHECK(i2c == i2c0);
     int c = chip_of(addr);
     i2c_calls++;
     calls[c]++;
@@ -106,7 +107,7 @@ int i2c_write_timeout_us(i2c_inst_t *i2c, uint8_t addr, const uint8_t *src, size
 
 int i2c_read_timeout_us(i2c_inst_t *i2c, uint8_t addr, uint8_t *dst, size_t len,
                         bool nostop, unsigned timeout_us) {
-    (void)i2c;
+    CHECK(i2c == i2c0);
     int c = chip_of(addr);
     i2c_calls++;
     calls[c]++;
@@ -350,6 +351,111 @@ static void test_no_long_press_from_a_failing_chip(void) {
     CHECK((b->released & (1u << 2)) && !(b->held & (1u << 2)));
 }
 
+static uint32_t now_ms(void) {
+    return to_ms_since_boot(get_absolute_time());
+}
+
+// One pass dt ms after the last; returns the transfers it made to chip c.
+static unsigned pass_after(unsigned dt, int c) {
+    unsigned before = calls[c];
+    sleep_ms(dt);
+    mcp23017_poll();
+    return calls[c] - before;
+}
+
+// Passes every ms up to and including t; no long press meanwhile.
+static void quiet_passes_to(uint32_t t) {
+    while (now_ms() < t) {
+        sleep_ms(1);
+        mcp23017_poll();
+        CHECK(mcp23017_get_buttons()->long_pressed == 0);
+    }
+}
+
+static const struct { uint16_t key; int chip, other; } step_keys[] = {
+    { 1u << 2, U701, U703 },                  // step 3
+    { 1u << 7, U703, U701 },                  // step 8
+    { 1u << 15, U703, U701 },                 // step 16
+};
+#define STEP_KEYS (sizeof(step_keys) / sizeof(step_keys[0]))
+
+// After init at t = 0: the key pressed and sampled at t = 20, then one 2 ms
+// pass, so the 20 ms sample grid runs 41, 61, ..., 501, 521.
+static step_buttons_t *press_then_shift_the_grid(unsigned k) {
+    mcp23017_init();
+    step_buttons_t *b = mcp23017_get_buttons();
+    quiet_passes_to(19);
+    press(step_keys[k].key);
+    CHECK(pass_after(1, step_keys[k].chip) == 4);  // t = 20: ports, then IPOL
+    CHECK(b->pressed == step_keys[k].key && b->held == step_keys[k].key);
+    b->pressed = 0;
+    quiet_passes_to(39);
+    CHECK(pass_after(2, step_keys[k].chip) == 4);  // t = 41
+    return b;
+}
+
+// A step held 499 ms is a short press, wherever the sample grid falls: at
+// t = 520 no sample is due and the last one (t = 501) still has the key down,
+// so a long press there would fire on a key released at t = 519. It waits for
+// a fresh good sample of the key's chip instead, which at t = 521 sees the
+// release. Cases: a healthy bus; the other step chip missing; the key's own
+// chip failing from the release to t = 600 (the release then comes with its
+// next good sample, as for any failed read).
+enum { BUS_HEALTHY, OTHER_CHIP_MISSING, OWN_CHIP_FAILING, BUS_CASES };
+
+static void test_long_press_waits_for_a_fresh_sample(void) {
+    for (unsigned k = 0; k < STEP_KEYS; k++) {
+        for (int bus = 0; bus < BUS_CASES; bus++) {
+            reset();
+            int chip = step_keys[k].chip;
+            uint16_t key = step_keys[k].key;
+            if (bus == OTHER_CHIP_MISSING) absent[step_keys[k].other] = true;
+            step_buttons_t *b = press_then_shift_the_grid(k);
+            quiet_passes_to(518);
+            press(0);
+            if (bus == OWN_CHIP_FAILING) absent[chip] = true;
+            CHECK(pass_after(1, chip) == 0);        // t = 519: released
+            CHECK(pass_after(1, chip) == 0);        // t = 520: no sample due
+            CHECK(b->long_pressed == 0);
+            CHECK(pass_after(1, chip) > 0);         // t = 521: the next sample
+            CHECK(b->long_pressed == 0);
+            if (bus == OWN_CHIP_FAILING) {
+                CHECK(b->released == 0 && b->held == key);
+                quiet_passes_to(599);
+                absent[chip] = false;
+                quiet_passes_to(700);
+            }
+            CHECK(b->released == key && b->held == 0);
+        }
+    }
+}
+
+// A real long hold still long-presses exactly once, in a pass that read the
+// key's chip, at the first sample at or after 500 ms: here t = 521, at most
+// one sample period after t = 520.
+static void test_long_hold_long_presses_once(void) {
+    for (unsigned k = 0; k < STEP_KEYS; k++) {
+        for (int bus = BUS_HEALTHY; bus <= OTHER_CHIP_MISSING; bus++) {
+            reset();
+            if (bus == OTHER_CHIP_MISSING) absent[step_keys[k].other] = true;
+            step_buttons_t *b = press_then_shift_the_grid(k);
+            unsigned fired = 0;
+            uint32_t fired_at = 0;
+            while (now_ms() < 1500) {
+                unsigned transfers = pass_after(1, step_keys[k].chip);
+                if (b->long_pressed == 0) continue;
+                CHECK(b->long_pressed == step_keys[k].key && transfers == 4);
+                fired++;
+                fired_at = now_ms();
+                b->long_pressed = 0;
+            }
+            CHECK(fired == 1);
+            CHECK(fired_at >= 20 + MCP_LONG_PRESS_MS && fired_at <= 20 + MCP_LONG_PRESS_MS + MCP_DEBOUNCE_MS);
+            CHECK(b->held == step_keys[k].key && b->released == 0);
+        }
+    }
+}
+
 static void test_reads_only_when_a_sample_is_due(void) {
     reset();
     mcp23017_init();
@@ -538,8 +644,8 @@ static void test_dead_bus_is_retried_at_most_every_100_ms(void) {
     }
     // Each step chip: its first sample fails (t = 20, one pointer write) and
     // arms the retry, then one configuration attempt (one failed write) per
-    // 100 ms, t = 120 ... 920: 10. The LEDs: the failed mask write, the
-    // failed direction write, then one per 100 ms: 11.
+    // 100 ms, t = 120 ... 920: nine, so 10 transfers in all. The LEDs: the
+    // failed mask write, the failed direction write, then one per 100 ms: 11.
     CHECK(i2c_calls <= 2 * 10 + 11);
     fail_writes = fail_reads = false;         // the bus comes back
     sleep_ms(100);
@@ -634,6 +740,8 @@ int main(void) {
     RUN(test_reset_inside_the_read_never_presses);
     RUN(test_missing_0x24_keeps_other_steps);
     RUN(test_no_long_press_from_a_failing_chip);
+    RUN(test_long_press_waits_for_a_fresh_sample);
+    RUN(test_long_hold_long_presses_once);
     RUN(test_reads_only_when_a_sample_is_due);
     RUN(test_failed_first_sample_is_retried_every_100_ms);
     RUN(test_failed_port_read_keeps_buttons);
