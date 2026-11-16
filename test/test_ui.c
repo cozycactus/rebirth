@@ -1837,6 +1837,6 @@ int main(int argc, char **argv) {
     RUN(test_fast_clicks_in_editors);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
-    puts("PASS all six OLED views render");
+    puts("PASS the six base OLED screens render (the four kit screens: test_render_kit_*)");
     return 0;
 }

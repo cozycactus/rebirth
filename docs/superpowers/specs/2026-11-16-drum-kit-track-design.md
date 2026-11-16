@@ -283,8 +283,9 @@ tempo up to 300 BPM (see "MIDI load"), so kit traffic never trips the TX-overflo
   their countdown.
 - Stop, Panic, Start while playing and a play-mode change release all sounding kit voices and
   cancel flams through the direct send path, never through `midi_buf`. The releases are queued
-  before the MIDI Stop byte; the Stop, a real-time byte, may overtake them on the wire, and every
-  voice is still released before the next run.
+  before the MIDI Stop byte; the Stop, a real-time byte, may overtake them on the wire, as may the
+  Start and Clock of a restart (real-time bytes too), and every voice is still released before the
+  next run's notes.
   Panic still clears the TX queue and sends All Notes Off afterwards.
 - Launches, launch quantization and Song mode treat a kit like any track. A pending flam always
   resolves inside its step (`flam_pulses` <= 12 < 24 pulses), so it never crosses a launch point.

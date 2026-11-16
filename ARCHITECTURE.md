@@ -89,7 +89,8 @@ lane order.
   the ISR first releases what the old kind left sounding. Stop, Panic, Start
   while playing and a play-mode change queue a release of every sounding kit
   voice before the MIDI Stop byte. The Stop, a real-time byte, may overtake
-  them on the wire; every voice is still released before the next run.
+  them on the wire, and so may the Start and Clock of a restart, also real-time
+  bytes; every voice is still released before the next run's notes.
 - **Flam reserve.** A flam's second hits are the only kit message that may be
   dropped. Flam second hits must leave 288 TX queue bytes free
   (`KIT_FLAM_RESERVE`); the headroom covers the releases and new first hits of an

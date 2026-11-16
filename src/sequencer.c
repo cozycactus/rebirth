@@ -429,7 +429,8 @@ static void __not_in_flash_func(kit_release)(uint8_t track) {
 }
 
 // Stop, Panic, Start while playing and a play-mode change: every kit voice in one send,
-// queued before the Stop byte (which, a real-time byte, may overtake it on the wire).
+// queued before the Stop byte. The Stop, and a restart's Start and Clock, are real-time
+// bytes and may overtake it on the wire; it still goes before the next run's notes.
 // Its buffer is guarded by the playback lock all callers hold.
 static void kit_release_all(void) {
     static uint8_t message[NUM_TRACKS * KIT_VOICES * 3];
