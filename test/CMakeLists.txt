@@ -27,14 +27,65 @@ target_compile_definitions(test_sync PRIVATE ${REBIRTH_HOST_DEFS} MOCK_HARDWARE=
 # Test 3: song mode (song editing, pattern queue, mutes, banks)
 add_executable(test_song
     test_song.c
+    fakes/fake_hardware.c
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/pattern.c
     ${REBIRTH_SRC}/shared_state.c
+    ${REBIRTH_SRC}/sequencer.c
+    ${REBIRTH_SRC}/midi_out.c
 )
-target_include_directories(test_song PRIVATE ${REBIRTH_INC})
+target_include_directories(test_song PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 target_compile_definitions(test_song PRIVATE ${REBIRTH_HOST_DEFS})
 
 enable_testing()
+add_executable(test_playback
+    test_playback.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/song.c
+    ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/shared_state.c
+    ${REBIRTH_SRC}/midi_out.c
+)
+target_include_directories(test_playback PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+target_compile_definitions(test_playback PRIVATE ${REBIRTH_HOST_DEFS})
+if(UNIX)
+    find_package(Threads REQUIRED)
+    target_compile_definitions(test_playback PRIVATE REBIRTH_THREADED_TEST=1)
+    target_link_libraries(test_playback PRIVATE Threads::Threads)
+endif()
+add_test(NAME playback_tests COMMAND test_playback)
+set_tests_properties(playback_tests PROPERTIES TIMEOUT 30)
 add_test(NAME pattern_tests COMMAND test_pattern)
 add_test(NAME sync_tests COMMAND test_sync)
+add_executable(test_sync_gain2 test_sync.c ${REBIRTH_SRC}/midi_out.c ${REBIRTH_SRC}/cv_gate.c)
+target_include_directories(test_sync_gain2 PRIVATE ${REBIRTH_INC})
+target_compile_definitions(test_sync_gain2 PRIVATE MOCK_HARDWARE=1 CV_DAC_GAIN=2)
+add_test(NAME sync_gain2_tests COMMAND test_sync_gain2)
 add_test(NAME song_tests COMMAND test_song)
+
+add_executable(test_storage
+    test_storage.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/sequencer.c
+    ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/song.c
+    ${REBIRTH_SRC}/shared_state.c
+    ${REBIRTH_SRC}/midi_out.c
+)
+target_include_directories(test_storage PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME storage_tests COMMAND test_storage)
+
+add_executable(test_ui
+    test_ui.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/sequencer.c
+    ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/song.c
+    ${REBIRTH_SRC}/shared_state.c
+    ${REBIRTH_SRC}/midi_out.c
+    ${REBIRTH_SRC}/flash_storage.c
+    ${REBIRTH_SRC}/display.c
+    ${REBIRTH_SRC}/ssd1309.c
+)
+target_include_directories(test_ui PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME ui_tests COMMAND test_ui)

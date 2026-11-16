@@ -1,188 +1,145 @@
-# RP2040 Pattern Sequencer — Architecture
+# RP2040 Pattern Sequencer Architecture
 
-## Overview
-ReBirth-style 8-track, 16-step pattern sequencer with song mode.
-Outputs: DIN MIDI and CV/Gate.
-UI: OLED display + rotary encoders + buttons.
+## Execution and Locking
 
-## Dual-Core Architecture
+| Context | Work |
+| --- | --- |
+| Core 1 timer IRQ | 96 PPQN timing, playheads, note durations, MIDI production, CV/gate output |
+| Core 0 main loop | Buttons, encoders, OLED, edits, transport commands, stopped-only storage |
+| Core 0 UART IRQ | Drain pending MIDI bytes into UART0 |
 
-```
-┌─────────────────────────────────────────────────────┐
-│                    RP2040                            │
-│                                                     │
-│  ┌──────────────────┐   ┌────────────────────────┐  │
-│  │     CORE 0       │   │       CORE 1           │  │
-│  │                  │   │                        │  │
-│  │  UI Engine       │   │  Sequencer Engine      │  │
-│  │  ─ OLED display  │   │  ─ Timer IRQ @ 96 PPQN│  │
-│  │  ─ Button scan   │   │  ─ Step advancement    │  │
-│  │  ─ Encoder read  │   │  ─ MIDI TX (UART0)    │  │
-│  │  ─ Menu system   │   │  ─ CV/Gate update     │  │
-│  │  ─ Pattern edit  │   │  ─ Song chain logic   │  │
-│  │                  │   │                        │  │
-│  └────────┬─────────┘   └────────┬───────────────┘  │
-│           │    Shared Memory     │                   │
-│           └──────────┬───────────┘                   │
-│              ┌───────┴────────┐                      │
-│              │  Pattern Data  │                      │
-│              │  Transport     │                      │
-│              │  Song Data     │                      │
-│              │  (mutex/spinlock)                     │
-│              └────────────────┘                      │
-└─────────────────────────────────────────────────────┘
-```
+The playback lock serializes the complete timer handler with Start, Stop,
+Continue, mode changes, selection and Panic. Stop/Panic return after any
+in-progress step has finished and its outputs have been cleared. Bytes already
+in the UART hardware still need time to reach the receiving instrument.
 
-## Why Dual-Core Split?
+Lock order is **playback -> shared state or MIDI**. UI edits take the shared lock,
+release it, then refresh playback data. Transport commands and storage operations
+are Core 0 APIs. The timer uses internal stop helpers under the playback lock.
 
-- **Core 1 (sequencer)**: Runs a hardware timer IRQ at 96 PPQN resolution.
-  Low-jitter step triggering, MIDI byte output, DAC writes for CV.
-  No display or I/O polling to stall timing.
+Control operations can delay the timer. Display SPI, pattern conversion and
+flash writes do not run under the playback lock. A dual-core split alone does
+not establish physical jitter.
 
-- **Core 0 (UI)**: Runs the main loop — scans buttons, reads encoders,
-  redraws OLED, handles menu navigation. Can take variable time
-  without affecting sequencer timing.
+## Prepared Patterns
 
-## Hardware Design
+All 32 locations have a prepared row for each of eight tracks. Core 0 builds
+these at initialization and after edits. A revision and row are published
+together under the shared lock. Playback copies a row only when its location or
+revision changes, at a step boundary. Song mode uses the same cache.
 
-### MIDI Output (UART0)
-- GPIO 0 (TX) → 220Ω → DIN-5 pin 5
-- 3.3V → 220Ω → DIN-5 pin 4
-- Standard MIDI current-loop circuit
-- 31250 baud, 8N1
+The event cache occupies 28,928 bytes, plus revision counters and active rows.
+Pattern and song data remain the editable source of truth. Code editing a
+pattern must call `sequencer_refresh_track_playback()` after releasing the shared
+lock, including for locations not currently playing.
 
-### CV/Gate Outputs (4 channels)
-- 2× MCP4822 (dual 12-bit SPI DAC) → 4 CV outputs
-- SPI1: GPIO 10 (SCK), GPIO 11 (MOSI), GPIO 12/13 (CS0/CS1)
-- Output range: 0–4.096V (1V/oct, ~3.4 octaves)
-  - For wider range: add op-amp gain stage (2× → 0-8V, ~6.8 octaves)
-- 4× Gate outputs: GPIO 14, 15, 16, 17 (direct 3.3V logic)
-  - Buffer with transistor/MOSFET for 5V gate if needed
-- Tracks 1–4: CV/Gate assignable
-- Tracks 5–8: MIDI only (or reassignable)
+## Playback Rules
 
-### OLED Display
-- SSD1309 128×64 (SPI for speed)
-- SPI0: GPIO 2 (SCK), GPIO 3 (MOSI), GPIO 4 (CS), GPIO 5 (DC), GPIO 6 (RST)
-- Full framebuffer in RAM (~1KB for 128×64 mono)
+- Each track has its own pattern, queue and 1-16 step playhead.
+- Queues apply at that track's loop end. Shortening below the next step wraps to
+  zero; extending preserves position.
+- Selection while stopped is immediate and survives Start.
+- Stop cancels pending queues and retains the current playing locations.
+- Manual queues are rejected in Song mode. Song entries apply on 16-step bar
+  boundaries with repeat counts. Only changed tracks restart their loops.
+- Empty/all-skipped songs stay stopped. Trailing skipped rows respect Stop mode.
+- The editor can address a different location from playback. Entering it from
+  Performance selects the currently controlled playback location.
+- Mutes release active notes and gates on the next internal pulse. Unmute takes
+  effect at the next active step.
+- Gate length also determines MIDI note duration. Slide/tie are **outgoing** step
+  flags: slide connects to the next pitch, tie holds the same pitch. They sustain
+  until the next step instead of ending at the configured gate length.
+  Rests, mutes and destination changes release the previous output.
+- Slide provides MIDI legato and a held gate. CV changes by one DAC write;
+  there is no programmed analog glide curve.
+- Swing is stored but not implemented in playback.
 
-### User Input
-- 4× Rotary encoders with push: GPIO 18–25 (2 pins per encoder + 1 switch)
-  - Encoder A/B + switch = 3 pins × 4 = 12 pins
-  - Use remaining GPIOs or I2C expander (MCP23017) for more buttons
-- 16× Step buttons (optional LED matrix):
-  - Via 74HC595 shift registers (directly drive LEDs)
-  - Via 74HC165 shift registers (read buttons)
-  - Or I2C: 2× MCP23017 = 32 GPIO
+## Timing and MIDI
 
-### Pin Budget (28 GPIO on Pico)
+The internal timer runs at 96 PPQN. MIDI Clock runs at **24 PPQN**, one message
+every four internal pulses. At 120 BPM the integer timer period is 5,208 us; the
+nominal MIDI Clock interval is approximately 20.833 ms.
+[MIDI Timing Clock reference](https://docs.circuitpython.org/projects/midi/en/latest/api.html#adafruit_midi.timing_clock.TimingClock).
 
-| Function       | GPIOs          | Count |
-|----------------|----------------|-------|
-| MIDI TX        | 0              | 1     |
-| MIDI RX (sync) | 1              | 1     |
-| OLED SPI0      | 2,3,4,5,6      | 5     |
-| Jitter probe   | 7              | 1     |
-| DAC SPI1       | 10,11,12,13    | 4     |
-| Gate out       | 14,15,16,17    | 4     |
-| Encoder 1      | 18,19,20       | 3     |
-| Encoder 2      | 21,22,26       | 3     |
-| I2C (expander) | 8,9            | 2     |
-| Tempo LED      | 25             | 1     |
-| **Total**      |                | **25**|
-| **Remaining**  | 27,28          | **2** |
+At a step boundary, the engine stages MIDI and CV/gate changes, commits gate
+GPIO masks, then submits the MIDI batch. Gate edges are grouped; DAC writes and
+DIN messages are sequential. This does not make all outputs simultaneous.
 
-> Use MCP23017 on I2C for step buttons + LEDs (keeps GPIO count low).
+The 256-byte UART queue accepts complete messages or complete step batches.
+FIFO checks, dequeues, writes and TX interrupt changes share one lock. Overflow
+stops playback and sends All Sound Off / All Notes Off instead of continuing
+with a truncated message. Panic discards software-queued output; hardware FIFO
+bytes precede the cleanup messages.
 
-## Software Modules
+After an overrun the timer re-arms a future deadline, preventing a past alarm
+from stalling until the 32-bit counter wraps. It emits no catch-up burst.
+Jitter snapshots are coherent; tempo changes do not count the new period as
+timing noise. See [JITTER_MEASUREMENT.md](JITTER_MEASUREMENT.md).
 
-### 1. `sequencer.c` — Core Engine (Core 1)
-- Timer-driven at 96 PPQN (pulses per quarter note)
-- At each pulse: check if current pulse == step boundary (every 24 pulses for 16th notes)
-- Pattern-mode playback uses prepared step events so the ISR does not copy full pattern data at each step.
-- Pattern locations follow ReBirth's bank model: A-D banks with 8 slots each.
-- Current, queued, and edited pattern locations are tracked independently per track.
-- Pattern length is stored per track, so tracks can loop independently at 1-16 sixteenth-note steps.
-- Live step, length, and track-setting edits refresh the prepared playback row for the affected track.
-- The default performance view avoids destructive step edits and exposes mutes, per-track queueing, transport, BPM, and jitter status.
-- Holding both encoder buttons triggers panic: stop playback, clear gates, and send MIDI all-notes-off controllers.
-- On step boundary: switch any queued track pattern whose own loop wrapped, then iterate 8 tracks, fire note-on/off, update CV/gate
-- In Song mode, bar changes reset only tracks whose pattern location actually changed.
-- Stores swing per pattern; timing implementation is still pending
-- Queued patterns are prepared before the pattern boundary and swapped into playback at step 0.
+## Storage
 
-### 2. `pattern.c` — Pattern Data
-- 8 tracks × 16 steps × 32 pattern locations in flash
-- Each step: `{ uint8_t note, velocity, flags; }` (3 bytes)
-- Per track: instrument type (synth/drum), MIDI channel, CV assign
-- Total step data: 8 × 16 × 3 × 32 = 12KB, plus track configuration and per-track lengths
+The last 128 KiB of the Pico's 2 MiB flash holds patterns and song data.
+Save/load require stopped transport. Save drains MIDI before suspending XIP and
+programs the validity header last. Version 5 adds CRC32. Load validates indices,
+lengths and configuration before replacing RAM. Version 4 has the same payload
+layout and is accepted after validation without a checksum.
 
-### 3. `song.c` — Song Mode
-- Array of per-track pattern-index snapshots with repeat counts
-- Max 256 entries
-- Song position pointer, advancing on pattern completion
+This is one save region. Power loss during erase/program may lose the previous
+save; an incomplete new save is rejected. Preserving the old save across power
+loss needs a future two-slot/journal design.
 
-### 4. `midi_out.c` — MIDI Output
-- UART TX at 31250 baud
-- Note On/Off, CC, clock (0xF8), start/stop/continue
-- MIDI bytes are pushed to a 256-byte UART TX ring buffer and drained by UART0 TX interrupt.
-- The sequencer timer ISR queues MIDI bytes but does not block on DIN serial transmission.
-- DIN MIDI only; USB MIDI is intentionally excluded to avoid host scheduling jitter.
+## Hardware Interfaces
 
-### 5. `cv_gate.c` — CV/Gate Output
-- MCP4822 SPI writes (12-bit, ~1µs per update)
-- Note-to-voltage lookup table (1V/octave, C0 = 0V)
-- Gate high/low with configurable gate length (% of step)
+| Function | GPIO / Interface |
+| --- | --- |
+| DIN MIDI TX, reserved RX | 0, 1; UART0, 31,250 baud, 8N1 |
+| SSD1309 OLED | 2 SCK, 3 MOSI, 4 CS, 5 DC, 6 reset; SPI0 |
+| Jitter probe | 7 |
+| MCP23017 buttons / LEDs | 8 SDA, 9 SCL; addresses 0x20 / 0x21 |
+| Two MCP4822 DACs | 10 SCK, 11 MOSI, 12/13 CS; SPI1 |
+| Gates | 14-17; 3.3 V logic |
+| Encoder 1 | 18, 19, switch 20 |
+| Encoder 2 | 21, 22, switch 26 |
+| Tempo LED | 25 |
 
-### 6. `ui.c` — User Interface (Core 0)
-- State machine: PATTERN_SELECT → STEP_EDIT → TRACK_CONFIG → SONG_EDIT → SETTINGS
-- Encoder: navigate/select, push = confirm
-- OLED pages:
-  - Pattern view: 16 step indicators + current step highlight
-  - Track config: MIDI ch, note range, CV assign
-  - Song view: pattern chain list
-  - Settings: BPM and gate length are editable; swing storage exists but playback timing is pending
+There are **two** encoders. Firmware uses MCP23017 expanders, not shift-register
+button drivers. The Pico exposes 26 general-purpose GPIOs; this assignment uses
+24, leaving GPIO 27 and 28.
 
-### 7. `display.c` — OLED Driver
-- SSD1309 SPI driver with framebuffer
-- Draw primitives: rectangles, text, step grid
-- Double-buffer optional (960 bytes × 2)
+### MIDI Circuit
 
-## Timing Detail
+Use a buffered MIDI OUT circuit conforming to the 3.3 V variant of
+[MIDI CA-033](https://www.midi.org/wp-content/uploads/wpforo/default_attachments/1709416667-ca33-MIDI-10-Electrical-Specification-Update.pdf).
+The earlier pair of 220-ohm resistors was a 5 V assumption, not the 3.3 V
+reference circuit. CA-033 specifies different resistors and driver current
+requirements for 3.3 V. The actual board circuit has not been validated here.
 
-At 120 BPM, 96 PPQN:
-- Timer period = 60,000,000 µs / (120 × 96) = **5208 µs** (~5.2ms per pulse)
-- 16th note = 24 pulses = **125ms**
-- At 200 BPM: period = **3125 µs** — still very comfortable for RP2040
+### CV Circuit
 
-The timer IRQ on Core 1 takes ~50–100µs worst case (MIDI byte TX + DAC SPI write),
-leaving >95% CPU headroom.
+The MCP4822's internal reference is **2.048 V**. Default gain remains 1x:
+nominal range 0-2.048 V, with code 4095 just below full scale. MIDI note 24 is
+0 V, note 36 is 1 V, note 48 is 2 V; higher notes saturate. Absolute pitch is
+rounded to the nearest DAC code, avoiding cumulative semitone rounding error.
 
-## Jitter Measurement
+`-DREBIRTH_CV_DAC_GAIN=2` selects nominal 0-4.096 V. It needs sufficient DAC
+supply/headroom and compatible SPI levels, typically 5 V power with proper
+3.3-to-5 V logic buffering. A 3.3 V supply cannot produce 4.096 V, and 3.3 V
+GPIO must not be assumed to meet the input-high specification of a 5 V DAC.
+[MCP4822 datasheet](https://ww1.microchip.com/downloads/en/devicedoc/20002249b.pdf).
 
-- GPIO 7 is driven high at sequencer timer ISR entry and low at ISR exit.
-- Firmware records IRQ latency, pulse-period error, ISR duration, sample count, and overrun count.
-- The current low-jitter path removes blocking UART writes and pattern-data copies from normal pattern-mode step processing.
-- Pattern select shows `J:<latency> P:<period> I:<isr>` in microseconds:
-  - `J`: max IRQ entry latency versus scheduled timer alarm
-  - `P`: max absolute timer-period error
-  - `I`: max ISR duration
-- Step button 13 in pattern select resets the jitter counters.
-- See `JITTER_MEASUREMENT.md` for the bench procedure.
+SPI1 runs at 1 MHz: each 16-bit DAC word takes 16 us on the bus, followed by
+analog settling. Tie LDAC appropriately for the intended update behavior.
+Use one active source track per CV/gate pair. Analog calibration, output buffers
+and gate-level compatibility require bench verification.
 
-## BPM Range
-- 20–300 BPM, adjustable in 0.1 BPM increments
-- Timer period recalculated on BPM change
+## Verification Boundaries
 
-## Memory Budget
-- Pattern storage: ~16KB (32 banked pattern locations)
-- Song data: ~512 bytes
-- OLED framebuffer: ~1KB
-- Code + stack: ~100KB
-- **Total: well within 264KB SRAM**
-- Patterns can overflow to flash (2MB) for more storage
+Host tests execute the production timer, transport, MIDI queue, storage, UI and
+OLED renderer against fake peripherals. Unix tests exercise concurrent Stop/Panic
+during a pending gate commit. DAC command tests cover both gains. These tests do
+not measure RP2040 timing or analog voltages.
 
-## Build System
-Standard Pico SDK CMake project. Dependencies:
-- pico-sdk
-- No external RTOS — bare-metal with timer IRQ
+Inspect the linked ELF/map for memory usage. Measure GPIO 7 and physical outputs
+under load before claiming an ISR budget or timing margin. See
+[HARDWARE_STATUS.md](HARDWARE_STATUS.md) for remaining checks.

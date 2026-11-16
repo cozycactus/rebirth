@@ -6,8 +6,7 @@
 // ─── Track Names ───────────────────────────────────────────────
 
 static const char *track_names[NUM_TRACKS] = {
-    "SY1", "SY2", "SY3", "SY4",
-    "DR1", "DR2", "DR3", "DR4",
+    "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8",
 };
 
 static void pattern_label(uint8_t pattern, char *buf, size_t len) {
@@ -114,6 +113,7 @@ static void draw_step_grid(const pattern_t *p, uint8_t track,
 
         // Current playback step: invert the cell
         if (s == play_step &&
+            p == seq_playing_pattern(track) &&
             g_seq.transport.state == TRANSPORT_PLAYING) {
             for (uint8_t px = x; px < x + CELL_W; px++) {
                 for (uint8_t py = GRID_Y; py < GRID_Y + GRID_H; py++) {
@@ -183,8 +183,7 @@ void display_draw_performance_view(uint8_t selected_track, uint8_t bank,
     }
 
     char line[22];
-    snprintf(line, sizeof(line), "T%d %-3s Cur:%-3s Q:%-3s",
-             selected_track + 1,
+    snprintf(line, sizeof(line), "%s Cur:%-3s Q:%-3s",
              track_names[selected_track],
              cur_label,
              q_label);
@@ -450,10 +449,7 @@ void display_draw_song_view(const song_t *s, uint16_t pos, uint8_t track) {
 
     // Title
     char title[22];
-    snprintf(title, sizeof(title), "SONG %s [%d/%d]",
-             track_names[track],
-             s->length > 0 ? pos + 1 : 0,
-             s->length);
+    snprintf(title, sizeof(title), "SONG T%d", track + 1);
     ssd1309_draw_string(0, 0, title, false);
 
     // End mode
@@ -488,6 +484,8 @@ void display_draw_song_view(const song_t *s, uint16_t pos, uint8_t track) {
         ssd1309_draw_string(18, 28, "(empty song)", false);
     }
 
-    // Hints
-    ssd1309_draw_string(0, 56, "E1:nav E2:edit", false);
+    // Position occupies the footer; all five entry rows remain unobstructed.
+    char position[22];
+    snprintf(position, sizeof(position), "%u/%u", s->length ? pos + 1 : 0, s->length);
+    ssd1309_draw_string(84, 56, position, false);
 }

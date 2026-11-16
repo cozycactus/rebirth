@@ -20,6 +20,7 @@
 #define MOCK_MIDI_MAX 256
 static uint8_t mock_midi_bytes[MOCK_MIDI_MAX];
 static int     mock_midi_len = 0;
+static uint16_t mock_dac_word;
 
 /* Capture GPIO state */
 #define NUM_GPIO 30
@@ -75,7 +76,8 @@ void gpio_clr_mask(uint32_t mask) {
 
 /* SPI mock (for cv_set_note / cv_set_voltage) */
 void spi_write_blocking(void *spi, const uint8_t *buf, int len) {
-    (void)spi; (void)buf; (void)len;
+    (void)spi;
+    if (len == 2) mock_dac_word = ((uint16_t)buf[0] << 8) | buf[1];
 }
 void gpio_init(uint8_t pin) { (void)pin; }
 void gpio_set_dir(uint8_t pin, bool out) { (void)pin; (void)out; }
@@ -124,6 +126,22 @@ TEST(test_midi_buf_no_send_until_flush) {
     midi_buf_note_on(1, 48, 80);
     /* Nothing should have been sent to UART yet */
     ASSERT_EQ(mock_midi_len, 0);
+}
+
+TEST(test_cv_octave_scale_and_gain) {
+    const uint16_t gain_bit = CV_DAC_GAIN == 1 ? (1u << 13) : 0;
+    cv_set_note(0, 24);
+    ASSERT_EQ(mock_dac_word, gain_bit | (1u << 12));
+    cv_set_note(0, 36);
+    ASSERT_EQ(mock_dac_word & 0xFFF, 2000 / CV_DAC_GAIN);
+    cv_set_note(1, 48);
+    ASSERT_EQ(mock_dac_word & 0xFFF, 4000 / CV_DAC_GAIN);
+    ASSERT_TRUE(mock_dac_word & (1u << 15));
+    ASSERT_EQ(mock_dac_word & (1u << 13), gain_bit);
+    cv_set_note(0, 127);
+    ASSERT_EQ(mock_dac_word & 0xFFF, CV_DAC_MAX);
+    cv_set_note(0, 0);
+    ASSERT_EQ(mock_dac_word & 0xFFF, 0);
 }
 
 TEST(test_midi_buf_flush_sends_all) {
@@ -336,6 +354,7 @@ TEST(test_96ppqn_uses_24_pulses_per_16th_step) {
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(void) {
+    RUN(test_cv_octave_scale_and_gain);
     printf("\n=== rebirth sync unit tests ===\n\n");
 
     /* MIDI buffer */

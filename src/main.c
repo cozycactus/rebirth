@@ -77,6 +77,7 @@ int main(void) {
     cv_gate_init();
     display_init();
     ui_init();
+    sequencer_init();
 
     // Launch sequencer engine on Core 1
     multicore_launch_core1(sequencer_core1_entry);

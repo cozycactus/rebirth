@@ -42,16 +42,18 @@ static const uint8_t cs_pins[2] = { CV_CS0_PIN, CV_CS1_PIN };
 // 16-bit SPI word:
 //   Bit 15: Channel select (0=A, 1=B)
 //   Bit 14: unused
-//   Bit 13: Gain (0=2x, 1=1x) — use 1x for 0–4.096V with Vref=4.096V
+//   Bit 13: Gain (0=2x, 1=1x); internal Vref is 2.048 V
 //   Bit 12: Shutdown (1=active, 0=shutdown)
 //   Bits 11–0: Data (12-bit DAC value)
+
+_Static_assert(CV_DAC_GAIN == 1 || CV_DAC_GAIN == 2, "MCP4822 gain must be 1 or 2");
 
 static void mcp4822_write(uint8_t dac_index, uint8_t channel, uint16_t value) {
     uint8_t cs_pin = cs_pins[dac_index];
 
     uint16_t word = 0;
     word |= (channel & 1) << 15;   // Channel A or B
-    word |= 1 << 13;                // Gain 1x
+    if (CV_DAC_GAIN == 1) word |= 1 << 13;
     word |= 1 << 12;                // Active (not shutdown)
     word |= (value & 0x0FFF);       // 12-bit data
 
@@ -62,22 +64,16 @@ static void mcp4822_write(uint8_t dac_index, uint8_t channel, uint16_t value) {
     gpio_put(cs_pin, 1);
 }
 
-// ─── Note-to-CV Lookup ─────────────────────────────────────────
-//
-// 1V/octave: each semitone = 1/12 V = ~83.33 mV
-// With 12-bit DAC and 4.096V range: 1 semitone = 4096/12/4.096 ≈ 83.3 counts
-// More precisely: DAC_value = note * (4096 / 49.152) = note * 83.333...
-// Range: note 0 (C-1) = 0V, note 49 (C#3) ≈ 4.083V
-//
-// Practical: Use MIDI note 24 (C1) as 0V, giving ~3.4 octaves up to note 65
+// 1 V/octave, MIDI note 24 = 0 V. Round each absolute pitch to the nearest
+// DAC code so a rounded semitone constant cannot accumulate octave error.
 
 #define CV_BASE_NOTE    24      // MIDI note for 0V output
-#define CV_COUNTS_PER_SEMITONE  83  // ~83.33, can fine-tune with calibration
 
 static uint16_t note_to_dac(uint8_t midi_note) {
     if (midi_note < CV_BASE_NOTE) return 0;
     int offset = midi_note - CV_BASE_NOTE;
-    uint32_t dac_val = (uint32_t)offset * CV_COUNTS_PER_SEMITONE;
+    const uint32_t denominator = 12u * CV_DAC_FULL_SCALE_MV;
+    uint32_t dac_val = ((uint32_t)offset * 4096u * 1000u + denominator / 2u) / denominator;
     if (dac_val > CV_DAC_MAX) dac_val = CV_DAC_MAX;
     return (uint16_t)dac_val;
 }

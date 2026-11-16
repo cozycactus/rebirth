@@ -5,7 +5,11 @@ The firmware is DIN MIDI only. USB MIDI support was removed so timing is not exp
 The current timing path also removes two major avoidable ISR costs:
 
 - MIDI bytes are queued into a UART TX ring and drained by UART0's TX interrupt.
-- Pattern-mode playback uses prepared step events instead of copying full pattern data in the timer ISR.
+- Pattern and Song playback use prepared events. Core 0 builds the cache on initialization and after edits.
+
+The playback lock serializes timer processing and transport controls. This prevents
+Stop/Panic races, but control operations and shared-lock contention can still add
+latency. No physical before/after jitter reduction has been established.
 
 ## Firmware Metrics
 
@@ -15,7 +19,11 @@ The sequencer timer ISR records these values in microseconds:
 - `P`: max absolute pulse-period error, measured between consecutive ISR entries.
 - `I`: max ISR duration.
 - `samples`: number of timer ISR samples.
-- `overruns`: count of ISR entries later than one full pulse interval.
+- `overruns`: count of interrupts at least one pulse late or handlers that miss their next deadline.
+
+A missed alarm is re-armed in the future without a catch-up burst. This prevents
+a timer stall; it cannot recover timing already missed. Tempo changes are
+accounted for when calculating pulse-period error.
 
 In pattern select, the OLED footer shows:
 
@@ -46,7 +54,17 @@ Use a logic analyzer or oscilloscope:
 - GPIO 7 pulse width is the ISR duration.
 - Gate edge alignment can be checked across GPIO 14-17.
 - MIDI TX bursts on GPIO 0 can be compared against gate edges to quantify output skew.
+- Decode MIDI Clock separately: 24 messages per quarter, approximately 20.833 ms
+  apart at 120 BPM. GPIO 7 measures the 96 PPQN timer, not wire-level MIDI jitter.
+- DIN messages share a serial link at 320 us per byte. Note bursts and the UART
+  FIFO can delay Clock bytes; gate alignment does not prove MIDI alignment.
+- Exercise mutes, live edits, different loop lengths, Song transitions,
+  tempo changes, Stop and Panic. Check that gates stay low after Stop/Panic.
+- Save/load are rejected while running. After stopping, test save/load and restart
+  to check alarm recovery after flash lockout.
 
 ## Current Bench Status
 
-No physical bench capture was made in this session because no RP2040 hardware or logic analyzer is attached to the workspace. The firmware now contains the probe and on-device counters needed to make repeatable measurements on hardware.
+No physical before/after capture is recorded for these changes. Host tests verify
+timing logic and output ordering, not physical jitter. Use the GPIO probe and
+on-device counters above for repeatable measurements on the assembled hardware.

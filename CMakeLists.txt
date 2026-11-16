@@ -47,6 +47,12 @@ target_include_directories(rp2040_sequencer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
+set(REBIRTH_CV_DAC_GAIN "1" CACHE STRING "MCP4822 gain: 1 (2.048 V) or 2 (4.096 V)")
+if(NOT REBIRTH_CV_DAC_GAIN MATCHES "^[12]$")
+    message(FATAL_ERROR "REBIRTH_CV_DAC_GAIN must be 1 or 2")
+endif()
+target_compile_definitions(rp2040_sequencer PRIVATE CV_DAC_GAIN=${REBIRTH_CV_DAC_GAIN})
+
 target_link_libraries(rp2040_sequencer
     pico_stdlib
     pico_unique_id

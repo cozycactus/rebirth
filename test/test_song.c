@@ -380,6 +380,11 @@ int main(void) {
     for (int i = 0; i < MAX_PATTERNS; i++) {
         pattern_init(&g_seq.patterns[i], i);
     }
+    seq_lock_init();
+    midi_init();
+    g_seq.transport.bpm = DEFAULT_BPM;
+    sequencer_init();
+    transport_start();
 
     /* song_append */
     RUN(test_song_append_basic);

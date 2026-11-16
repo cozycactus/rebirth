@@ -24,9 +24,14 @@
 #define CV_DAC_BITS         12
 #define CV_DAC_MAX          4095
 #define VOLTS_PER_OCTAVE    1.0f    // 1V/oct standard
+#ifndef CV_DAC_GAIN
+#define CV_DAC_GAIN         1      // 1x: 2.048 V; 2x requires suitable supply/headroom
+#endif
+#define CV_DAC_FULL_SCALE_MV (2048u * CV_DAC_GAIN)
 
 // MIDI
 #define MIDI_BAUD           31250
+#define MIDI_PPQN           24
 #define MIDI_NOTE_ON        0x90
 #define MIDI_NOTE_OFF       0x80
 #define MIDI_CC             0xB0
@@ -120,7 +125,7 @@ typedef struct {
     float             bpm;
     uint32_t          pulse_count;      // Current pulse within pattern
     uint8_t           current_step;     // 0–15
-    uint32_t          track_step_count[NUM_TRACKS]; // Independent per-track step counters
+    uint32_t          track_step_count[NUM_TRACKS]; // Next step per track; wraps at its length
     uint8_t           current_track_step[NUM_TRACKS]; // Per-track playhead
     uint8_t           current_pattern[NUM_TRACKS]; // Pattern per track/section
     uint8_t           queued_pattern[NUM_TRACKS];  // Next per-track pattern (0xFF = none)
@@ -168,6 +173,7 @@ uint32_t seq_lock(void);
 void seq_unlock(uint32_t irq_state);
 
 // sequencer.c — Core 1
+void sequencer_init(void); // Core 0, before launching Core 1
 void sequencer_core1_entry(void);
 
 // transport
@@ -175,8 +181,8 @@ void transport_start(void);
 void transport_stop(void);
 void transport_continue(void);
 void transport_set_bpm(float bpm);
+void transport_set_mode(play_mode_t mode);
 void sequencer_panic(void);
-void sequencer_prepare_queued_pattern(uint8_t track, uint8_t pattern_index);
 void sequencer_refresh_track_playback(uint8_t track, uint8_t pattern_index);
 void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out);
 void sequencer_reset_jitter_stats(void);
@@ -213,9 +219,10 @@ bool song_move(uint16_t from, uint16_t to);
 void song_clear(void);
 void song_set_end_mode(song_end_mode_t mode);
 
-// Pattern queue — set next pattern to switch at end of current
-void transport_queue_pattern(uint8_t pattern_index);
-void transport_queue_track_pattern(uint8_t track, uint8_t pattern_index);
+// Core 0: queue at track loop end, or select immediately while stopped.
+// Returns false for invalid locations or Song mode.
+bool transport_queue_pattern(uint8_t pattern_index);
+bool transport_queue_track_pattern(uint8_t track, uint8_t pattern_index);
 void transport_clear_queue(void);
 void transport_clear_track_queue(uint8_t track);
 
@@ -235,6 +242,8 @@ void midi_send_stop(void);
 void midi_send_continue(void);
 void midi_send_all_notes_off(void);
 void midi_clear_output_queue(void);
+bool midi_output_overflowed(void);
+void midi_wait_output_idle(void); // Core 0 only, transport stopped
 // Buffered output — collect messages, then flush all at once
 void midi_buf_clear(void);
 void midi_buf_flush(void);

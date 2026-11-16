@@ -6,11 +6,12 @@
 // Check whether a valid save exists in flash.
 bool flash_storage_is_valid(void);
 
-// Save all patterns and song to flash. Pauses Core 1 during the write.
-// Returns true on success.
+// Core 0 only: save while stopped, drain MIDI, then pause Core 1 for the write.
+// Returns true after verifying the saved checksum. New saves use version 5.
 bool flash_storage_save(void);
 
-// Load patterns and song from flash. Returns false if no valid save exists.
+// Core 0 only, while stopped. Validates before replacing RAM and refreshing
+// prepared playback. Version 4 saves can still be loaded (without a checksum).
 bool flash_storage_load(void);
 
 #endif // FLASH_STORAGE_H
