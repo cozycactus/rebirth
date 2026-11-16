@@ -102,3 +102,10 @@ add_executable(test_session
 )
 target_include_directories(test_session PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME session_tests COMMAND test_session)
+
+add_executable(test_led_frame
+    test_led_frame.c
+    ${REBIRTH_SRC}/led_frame.c
+)
+target_include_directories(test_led_frame PRIVATE ${REBIRTH_INC})
+add_test(NAME led_frame_tests COMMAND test_led_frame)
