@@ -7,6 +7,7 @@
 #include <stdint.h>
 void uart_putc_raw(void *uart, uint8_t c);
 #define uart0 ((void*)0)
+#define __not_in_flash_func(name) name
 #endif
 #include "sequencer.h"
 
@@ -72,9 +73,12 @@ static void midi_tx_unlock(uint32_t irq_state) {
 
 // The writable check, dequeue, write and IRQ mask change share one lock across
 // both cores and the UART ISR. No second consumer can overtake a byte.
-// One byte per writable check; with the UART FIFO off nothing is committed ahead
-// of a pending Clock beyond the byte being sent. At a message boundary a queued
-// Start/Continue/Stop goes first, then a pending Clock, then the next message.
+// One byte per writable check; with the UART FIFO off the UART holds at most the
+// byte on the line and one in its holding register. A pending Clock waits for one
+// message plus the holding-register byte at worst (the byte on the line, then a
+// whole message whose status already sits in the holding register): four byte
+// times, about 1.3 ms. At a message boundary a queued Start/Continue/Stop goes
+// first, then a pending Clock, then the next message.
 // A message whose status equals the last one written goes without it, unless the
 // queue ran empty since: the first message after a gap always carries its status,
 // so a receiver that lost a byte resyncs.
@@ -159,7 +163,8 @@ void midi_init(void) {
 
     // MIDI is 8N1
     uart_set_format(MIDI_UART, 8, 1, UART_PARITY_NONE);
-    // One byte at a time: a Clock waits at most for the rest of one message.
+    // One byte at a time: a Clock waits at most for one message plus the
+    // holding-register byte, about 1.3 ms.
     uart_set_fifo_enabled(MIDI_UART, false);
 
     irq_set_exclusive_handler(UART0_IRQ, midi_uart_irq_handler);
@@ -186,7 +191,9 @@ void midi_send_bytes(const uint8_t *data, uint16_t length) {
 #endif
 }
 
-bool midi_try_send_bytes_reserve(const uint8_t *data, uint16_t length, uint16_t reserve) {
+// In RAM: the timer ISR calls it for every flam's second hits.
+bool __not_in_flash_func(midi_try_send_bytes_reserve)(const uint8_t *data, uint16_t length,
+                                                      uint16_t reserve) {
 #ifndef MOCK_HARDWARE
     uint32_t lock_state = midi_tx_lock();
     bool queued = midi_tx_enqueue_locked(data, length, reserve);

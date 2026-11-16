@@ -382,8 +382,8 @@ static void commit_step(void) {
 
 // Writes a release for every voice the kit on `track` has sounding into `out`, on the
 // note and channel each was sent on; the voices stop sounding and a pending flam is
-// cancelled. Returns the byte count.
-static uint8_t kit_take_release(uint8_t track, uint8_t *out) {
+// cancelled. Returns the byte count. In RAM: the timer ISR calls it on every release.
+static uint8_t __not_in_flash_func(kit_take_release)(uint8_t track, uint8_t *out) {
     kit_runtime_t *k = &kit_runtime[track];
     uint8_t length = 0;
     if (k->sounding) {
@@ -412,7 +412,8 @@ static void kit_release(uint8_t track) {
 }
 
 // Stop, Panic, Start while playing and a play-mode change: every kit voice in one send,
-// before the Stop byte. Its buffer is guarded by the playback lock all callers hold.
+// queued before the Stop byte (which, a real-time byte, may overtake it on the wire).
+// Its buffer is guarded by the playback lock all callers hold.
 static void kit_release_all(void) {
     static uint8_t message[NUM_TRACKS * KIT_VOICES * 3];
     uint16_t length = 0;

@@ -55,6 +55,9 @@
 #define KIT_SIZE        PAGE_ROUND(KIT_BYTES)
 
 // Versions 4 and 5: patterns were pattern_t before kit_steps was added.
+// Frozen: this is the pre-v6 pattern_t, the record v4 and v5 saves were written
+// with. Never change it to follow pattern_t; and step_t and track_config_t, which
+// it embeds, must not change size or layout, or v4/v5 saves no longer load.
 typedef struct {
     step_t         steps[NUM_TRACKS][STEPS_PER_PATTERN];
     track_config_t tracks[NUM_TRACKS];

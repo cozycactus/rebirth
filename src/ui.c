@@ -836,6 +836,8 @@ enum { TRACK_PARAM_TYPE, TRACK_PARAM_CHANNEL, TRACK_PARAM_OUTPUT, TRACK_PARAM_GA
        TRACK_PARAM_NOTE };
 
 #define TRACK_TYPE_COUNT 3
+_Static_assert(TRACK_TYPE_KIT + 1 == TRACK_TYPE_COUNT,
+               "TRACK_TYPE_COUNT must follow the last track type");
 
 // SYNTH -> DRUM -> KIT -> SYNTH; backwards on a left turn.
 static track_type_t next_track_type(track_type_t type, int8_t direction) {
