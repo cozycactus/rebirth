@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-11-16-drum-kit-track-design.md` (builds on `docs/superpowers/specs/2026-11-16-session-panel-design.md`; this branch is based on `session-panel`).
 
+**Execution:** subagent-driven with a review after each task (chosen by the user on 2026-11-16); starts once `session-panel` is merged, on a branch rebased onto it.
+
 ## Global Constraints
 
 - Lanes, in this order: 0 AC, 1 BD, 2 SD, 3 LT, 4 MT, 5 HT, 6 RS, 7 CP, 8 CH, 9 OH, 10 CC, 11 RC. Voice `v` is lane `v + 1`; every per-voice array is indexed by voice in lane order.
