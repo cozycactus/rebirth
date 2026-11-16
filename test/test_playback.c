@@ -24,10 +24,56 @@ static void pulses(unsigned count) {
 
 static void next_step(void) { pulses(PULSES_PER_STEP); }
 
+// Real-time bytes only: channel messages may go out with running status.
 static unsigned count_byte(uint8_t byte) {
     unsigned count = 0;
     for (unsigned i = 0; i < fake_midi_length; i++) count += fake_midi[i] == byte;
     return count;
+}
+
+static fake_midi_msg_t midi_msgs[FAKE_MIDI_CAPACITY];
+
+// Decodes all MIDI sent so far into midi_msgs; returns the message count.
+static unsigned decode_midi(void) {
+    return fake_midi_decode(midi_msgs, FAKE_MIDI_CAPACITY);
+}
+
+static bool msg_is(fake_midi_msg_t msg, uint8_t status, uint8_t data1, uint8_t data2) {
+    return msg.status == status && msg.data1 == data1 && msg.data2 == data2;
+}
+
+// The decoded message `back` places before the last one.
+static fake_midi_msg_t last_msg(unsigned back) {
+    unsigned count = decode_midi();
+    CHECK(count > back);
+    return midi_msgs[count - 1 - back];
+}
+
+static unsigned count_note_on(uint8_t channel, uint8_t note) {
+    unsigned count = 0;
+    unsigned decoded = decode_midi();
+    for (unsigned i = 0; i < decoded; i++) {
+        count += midi_msgs[i].status == (MIDI_NOTE_ON | channel) && midi_msgs[i].data1 == note;
+    }
+    return count;
+}
+
+// True when byte `index` of fake_midi does not fall inside a channel message.
+static bool message_boundary(unsigned index) {
+    uint8_t running = 0;
+    unsigned left = 0; // data bytes still due in the current message
+    for (unsigned i = 0; i < index; i++) {
+        uint8_t byte = fake_midi[i];
+        if (byte >= 0xF8) continue;
+        if (byte & 0x80) {
+            running = byte;
+            left = ((byte & 0xE0) == 0xC0) ? 1 : 2;
+            continue;
+        }
+        if (left == 0) left = ((running & 0xE0) == 0xC0) ? 1 : 2; // running status
+        left--;
+    }
+    return left == 0;
 }
 
 static void reset(void) {
@@ -62,9 +108,10 @@ static void test_clock_rate_and_start_order(void) {
     transport_start();
     pulses(PPQN);
     CHECK(count_byte(MIDI_CLOCK) == 24);
-    CHECK(fake_midi[0] == MIDI_START);
-    CHECK(fake_midi[1] == MIDI_CLOCK);
-    CHECK(fake_midi[2] == MIDI_NOTE_ON);
+    CHECK(decode_midi() >= 3);
+    CHECK(midi_msgs[0].status == MIDI_START);
+    CHECK(midi_msgs[1].status == MIDI_CLOCK);
+    CHECK(msg_is(midi_msgs[2], MIDI_NOTE_ON, 60, 100));
 }
 
 static void test_stopped_selection_survives_start(void) {
@@ -194,14 +241,14 @@ static void test_mute_cuts_sounding_note_on_next_pulse(void) {
     tick();
     CHECK(fake_gates == 0);
     CHECK(!note_is_on[0]);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
 }
 
 static void test_restart_releases_previous_note(void) {
     sound_note();
     transport_start();
     CHECK(fake_gates == 0);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
     tick();
     CHECK(fake_gates == 1);
 }
@@ -221,11 +268,12 @@ static void test_panic_clears_all_outputs_and_queues(void) {
         CHECK(g_seq.transport.queued_pattern[track] == NO_QUEUED_PATTERN);
         CHECK(!note_is_on[track]);
     }
+    unsigned count = decode_midi();
+    CHECK(count >= 32);
     for (uint8_t channel = 0; channel < 16; channel++) {
-        unsigned offset = length - 96 + channel * 6;
-        CHECK(fake_midi[offset] == (MIDI_CC | channel));
-        CHECK(fake_midi[offset + 1] == MIDI_CC_ALL_SOUND_OFF);
-        CHECK(fake_midi[offset + 4] == MIDI_CC_ALL_NOTES_OFF);
+        const fake_midi_msg_t *pair = &midi_msgs[count - 32 + channel * 2];
+        CHECK(msg_is(pair[0], MIDI_CC | channel, MIDI_CC_ALL_SOUND_OFF, 0));
+        CHECK(msg_is(pair[1], MIDI_CC | channel, MIDI_CC_ALL_NOTES_OFF, 0));
     }
 }
 
@@ -236,7 +284,7 @@ static void test_slide_route_change_releases_old_destination(void) {
     g_seq.patterns[0].tracks[0].output_mode = OUTPUT_CV_GATE;
     set_note(0, 0, 1, 65, 0);
     next_step();
-    CHECK(count_byte(MIDI_NOTE_OFF) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
     CHECK(fake_gates == 1);
 }
 
@@ -246,8 +294,8 @@ static void test_same_note_slide_does_not_end_with_note_off(void) {
     transport_start();
     tick();
     next_step();
-    CHECK(count_byte(MIDI_NOTE_ON) == 1);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_ON) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 0);
     CHECK(note_is_on[0]);
 }
 
@@ -258,8 +306,8 @@ static void test_tie_does_not_keep_old_midi_channel(void) {
     g_seq.patterns[0].tracks[0].midi_channel = 3;
     set_note(0, 0, 1, 60, 0);
     next_step();
-    CHECK(count_byte(MIDI_NOTE_OFF) == 1);
-    CHECK(count_byte(MIDI_NOTE_ON | 3) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_ON | 3) == 1);
 }
 
 static void test_midi_only_tie_ignores_unused_cv_channel(void) {
@@ -273,12 +321,12 @@ static void test_midi_only_tie_ignores_unused_cv_channel(void) {
     sequencer_refresh_track_playback(0, 0);
     next_step();
 
-    CHECK(count_byte(MIDI_NOTE_ON) == 1);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_ON) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 0);
     CHECK(fake_gates == 0);
     pulses(PULSES_PER_STEP / 2);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 1);
-    CHECK(fake_midi[fake_midi_length - 2] == 60);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
+    CHECK(msg_is(last_msg(0), MIDI_NOTE_OFF, 60, 0));
 }
 
 static void test_cv_only_tie_ignores_unused_midi_channel(void) {
@@ -296,11 +344,11 @@ static void test_cv_only_tie_ignores_unused_midi_channel(void) {
 
     CHECK(fake_gates == 1);
     CHECK(fake_gate_rises == rises);
-    CHECK(count_byte(MIDI_NOTE_ON | 3) == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_ON | 3) == 0);
     pulses(PULSES_PER_STEP / 2);
     CHECK(fake_gates == 0);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 0);
-    CHECK(count_byte(MIDI_NOTE_OFF | 3) == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF | 3) == 0);
 }
 
 static void test_tie_does_not_keep_old_cv_channel(void) {
@@ -316,11 +364,11 @@ static void test_tie_does_not_keep_old_cv_channel(void) {
     next_step();
 
     CHECK(fake_gates == (1u << 2));
-    CHECK(count_byte(MIDI_NOTE_OFF) == 1);
-    CHECK(count_byte(MIDI_NOTE_ON) == 2);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_ON) == 2);
     pulses(PULSES_PER_STEP / 2);
     CHECK(fake_gates == 0);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 2);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 2);
 }
 
 static void test_midi_only_slide_ignores_unused_cv_channel(void) {
@@ -334,14 +382,12 @@ static void test_midi_only_slide_ignores_unused_cv_channel(void) {
     sequencer_refresh_track_playback(0, 0);
     next_step();
 
-    const uint8_t expected[] = {MIDI_NOTE_ON, 65, 100, MIDI_NOTE_OFF, 60, 0};
-    CHECK(fake_midi_length >= sizeof(expected));
-    CHECK(memcmp(fake_midi + fake_midi_length - sizeof(expected),
-                 expected, sizeof(expected)) == 0);
+    CHECK(msg_is(last_msg(1), MIDI_NOTE_ON, 65, 100));
+    CHECK(msg_is(last_msg(0), MIDI_NOTE_OFF, 60, 0));
     CHECK(fake_gates == 0);
     pulses(PULSES_PER_STEP / 2);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 2);
-    CHECK(fake_midi[fake_midi_length - 2] == 65);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 2);
+    CHECK(msg_is(last_msg(0), MIDI_NOTE_OFF, 65, 0));
 }
 
 static void test_queued_pattern_tie_ignores_unused_cv_channel(void) {
@@ -357,21 +403,21 @@ static void test_queued_pattern_tie_ignores_unused_cv_channel(void) {
     next_step();
 
     CHECK(g_seq.transport.current_pattern[0] == 1);
-    CHECK(count_byte(MIDI_NOTE_ON) == 1);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_ON) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 0);
     CHECK(fake_gates == 0);
     pulses(PULSES_PER_STEP / 2);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
 }
 
 static void test_midi_and_gate_share_note_duration(void) {
     sound_note();
     pulses(PULSES_PER_STEP / 2 - 1);
     CHECK(fake_gates == 1);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 0);
     tick();
     CHECK(fake_gates == 0);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
 }
 
 static void test_outgoing_tie_keeps_gate_and_midi_connected(void) {
@@ -386,11 +432,11 @@ static void test_outgoing_tie_keeps_gate_and_midi_connected(void) {
         CHECK(fake_gates == 1);
     }
     CHECK(fake_gate_rises == rises);
-    CHECK(count_byte(MIDI_NOTE_ON) == 1);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_ON) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 0);
     pulses(PULSES_PER_STEP / 2);
     CHECK(fake_gates == 0);
-    CHECK(count_byte(MIDI_NOTE_OFF) == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
 }
 
 static void test_outgoing_slide_keeps_gate_and_changes_note(void) {
@@ -402,10 +448,8 @@ static void test_outgoing_slide_keeps_gate_and_changes_note(void) {
     next_step();
     CHECK(fake_gates == 1);
     CHECK(active_notes[0] == 65);
-    CHECK(fake_midi[fake_midi_length - 6] == MIDI_NOTE_ON);
-    CHECK(fake_midi[fake_midi_length - 5] == 65);
-    CHECK(fake_midi[fake_midi_length - 3] == MIDI_NOTE_OFF);
-    CHECK(fake_midi[fake_midi_length - 2] == 60);
+    CHECK(msg_is(last_msg(1), MIDI_NOTE_ON, 65, 100));
+    CHECK(msg_is(last_msg(0), MIDI_NOTE_OFF, 60, 0));
 }
 
 static void test_tempo_change_does_not_fake_jitter(void) {
@@ -449,12 +493,12 @@ static void test_uart_overflow_never_sends_partial_message(void) {
     CHECK(fake_midi_length == 0);
     fake_uart_writable = true;
     fake_irq_handlers[UART0_IRQ]();
-    CHECK(fake_midi_length == 253);
+    CHECK(decode_midi() == 85);
     for (unsigned note = 0; note < 84; note++) {
-        CHECK(fake_midi[note * 3] == MIDI_NOTE_ON);
-        CHECK(fake_midi[note * 3 + 1] == note);
+        CHECK(msg_is(midi_msgs[note], MIDI_NOTE_ON, note, 100));
     }
-    CHECK(fake_midi[252] == MIDI_CLOCK);
+    CHECK(midi_msgs[84].status == MIDI_CLOCK);
+    CHECK(message_boundary(fake_midi_length));
     CHECK(!fake_uart_tx_irq);
 }
 
@@ -466,8 +510,8 @@ static void test_full_queue_drains_free_uart_before_dropping(void) {
     midi_send_note_on(1, 42, 100);
     CHECK(!midi_output_overflowed());
     fake_irq_handlers[UART0_IRQ]();
-    CHECK(fake_midi_length == 258);
-    CHECK(fake_midi[256] == 42);
+    CHECK(decode_midi() == 86);
+    CHECK(msg_is(midi_msgs[85], MIDI_NOTE_ON | 1, 42, 100));
 }
 
 static void play_song_entries(unsigned entries) {
@@ -532,7 +576,8 @@ static void test_moving_song_entry_keeps_playing_entry_anchor(void) {
 static void test_staging_overflow_never_sends_partial_message(void) {
     for (unsigned note = 0; note < 22; note++) midi_buf_note_on(0, note, 100);
     midi_buf_flush();
-    CHECK(fake_midi_length == 63);
+    CHECK(fake_midi_count(MIDI_NOTE_ON) == 21);
+    CHECK(message_boundary(fake_midi_length));
     CHECK(midi_output_overflowed());
 }
 
@@ -546,7 +591,7 @@ static void test_output_overflow_stops_transport(void) {
     CHECK(!midi_output_overflowed());
     fake_uart_writable = true;
     fake_irq_handlers[UART0_IRQ]();
-    CHECK(fake_midi[fake_midi_length - 2] == MIDI_CC_ALL_NOTES_OFF);
+    CHECK(msg_is(last_msg(0), MIDI_CC | 15, MIDI_CC_ALL_NOTES_OFF, 0));
 }
 
 #ifdef REBIRTH_THREADED_TEST
@@ -633,14 +678,14 @@ static void test_concurrent_midi_producers_and_uart_irq(void) {
     }
     for (unsigned i = 0; i < 2; i++) CHECK(pthread_join(producers[i], NULL) == 0);
     CHECK(pthread_join(consumer, NULL) == 0);
-    CHECK(fake_midi_length == 3000);
+    CHECK(decode_midi() == 1000);
+    CHECK(message_boundary(fake_midi_length));
     unsigned notes[2] = {0};
-    for (unsigned i = 0; i < fake_midi_length; i += 3) {
-        uint8_t channel = fake_midi[i] & 0x0F;
+    for (unsigned i = 0; i < 1000; i++) {
+        uint8_t channel = midi_msgs[i].status & 0x0F;
         CHECK(channel < 2);
-        CHECK(fake_midi[i] == (MIDI_NOTE_ON | channel));
-        CHECK(fake_midi[i + 1] == (notes[channel]++ & 0x7F));
-        CHECK(fake_midi[i + 2] == 100 + channel);
+        uint8_t note = notes[channel]++ & 0x7F;
+        CHECK(msg_is(midi_msgs[i], MIDI_NOTE_ON | channel, note, 100 + channel));
     }
     CHECK(notes[0] == 500 && notes[1] == 500);
     CHECK(!midi_output_overflowed());
@@ -693,11 +738,11 @@ static void test_beat_launch_joins_in_phase(void) {
     CHECK(transport_queue_track_pattern(0, 1));
     run_through_step(7);
     CHECK(g_seq.transport.current_pattern[0] == 0);
-    fake_midi_length = 0;
+    CHECK(count_note_on(0, 64) == 0);
     run_through_step(8);
     CHECK(g_seq.transport.current_pattern[0] == 1);
     CHECK(g_seq.transport.current_track_step[0] == 8);
-    CHECK(count_byte(64) == 1);
+    CHECK(count_note_on(0, 64) == 1);
 }
 
 static void test_launch_phase_matrix(void) {
@@ -775,11 +820,7 @@ static void test_launch_keeps_track_routing(void) {
     CHECK(transport_queue_track_pattern(0, 3));
     run_through_step(16);
     CHECK(g_seq.transport.current_pattern[0] == 3);
-    bool found = false;
-    for (unsigned i = 0; i + 2 < fake_midi_length; i++) {
-        found |= fake_midi[i] == 0x95 && fake_midi[i + 1] == 60;
-    }
-    CHECK(found);
+    CHECK(count_note_on(5, 60) > 0);
 }
 
 static void test_launch_quant_setter_ignores_invalid(void) {
@@ -790,7 +831,8 @@ static void test_launch_quant_setter_ignores_invalid(void) {
 
 static unsigned count_note_ons(void) {
     unsigned count = 0;
-    for (unsigned i = 0; i < fake_midi_length; i++) count += (fake_midi[i] & 0xF0) == 0x90;
+    unsigned decoded = decode_midi();
+    for (unsigned i = 0; i < decoded; i++) count += (midi_msgs[i].status & 0xF0) == MIDI_NOTE_ON;
     return count;
 }
 
@@ -882,10 +924,7 @@ static void test_track_config_keeps_each_stored_mute(void) {
 }
 
 static bool track_note_on(uint8_t channel, uint8_t note) {
-    for (unsigned i = 0; i + 1 < fake_midi_length; i++) {
-        if (fake_midi[i] == (MIDI_NOTE_ON | channel) && fake_midi[i + 1] == note) return true;
-    }
-    return false;
+    return count_note_on(channel, note) > 0;
 }
 
 static void test_mute_button_undoes_a_stored_mute(void) {
