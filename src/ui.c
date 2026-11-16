@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "sequencer.h"
+#include "kit.h"
 #include "ssd1309.h"
 #include "encoder.h"
 #include "mcp23017.h"
@@ -35,8 +36,8 @@ typedef struct {
     bool panic_latched;
     uint16_t step_gestures;         // steps pressed on this screen, still held
     uint16_t select_short_pending;
-    uint16_t step_short_pending;    // SESSION: steps pressed here, toggled on release
-    session_focus_t step_cell[STEPS_PER_PATTERN]; // SESSION: cell focused at each press
+    uint16_t step_short_pending;    // SESSION, kit in PATTERN_VIEW: acted on at release
+    session_focus_t step_cell[STEPS_PER_PATTERN]; // cell and lane focused at each press
 
     // PATTERN_VIEW
     uint8_t selected_track;         // 0–7
@@ -116,6 +117,53 @@ static void toggle_steps(uint8_t track, uint8_t location, uint16_t mask) {
     }
     seq_unlock(lock_state);
     sequencer_refresh_track_playback(track, location);
+}
+
+// A cell is a kit cell when its own type is KIT. Patterns are written by
+// Core 0 only: read without a lock.
+static bool is_kit_cell(uint8_t track, uint8_t location) {
+    return g_seq.patterns[location].tracks[track].type == TRACK_TYPE_KIT;
+}
+
+static uint16_t steps_within_length(uint8_t track, uint8_t location) {
+    uint8_t len = clamp_pattern_length(
+        pattern_get_track_length(&g_seq.patterns[location], track));
+    return (uint16_t)((1u << len) - 1u);
+}
+
+// Presses step `step` of a kit lane (kit_press) and refreshes its playback.
+// Takes seq_lock: call with no lock held.
+static void press_kit_step(session_focus_t cell, uint8_t step) {
+    uint32_t lock_state = seq_lock();
+    uint32_t *word = &g_seq.patterns[cell.location].kit_steps[cell.track][step];
+    *word = kit_press(*word, cell.lane);
+    seq_unlock(lock_state);
+    sequencer_refresh_track_playback(cell.track, cell.location);
+}
+
+// A step press belongs to the cell and lane focused when it was made, whatever
+// the focus does before release. Steps pressed now within `bind` are bound to
+// `cell`; a short press acts on release on its own cell (a kit lane cycles,
+// other cells toggle). Returns the long presses of bound keys, which no longer
+// act on release.
+static uint16_t handle_bound_steps(session_focus_t cell, uint16_t bind,
+                                   const step_buttons_t *steps) {
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (steps->pressed & bind & (1u << s)) ui.step_cell[s] = cell;
+    }
+    uint16_t long_presses;
+    uint16_t short_releases = take_short_releases(&ui.step_short_pending, steps,
+                                                  bind, &long_presses);
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (!(short_releases & (1u << s))) continue;
+        session_focus_t bound = ui.step_cell[s];
+        if (is_kit_cell(bound.track, bound.location)) {
+            press_kit_step(bound, s);
+        } else {
+            toggle_steps(bound.track, bound.location, (uint16_t)(1u << s));
+        }
+    }
+    return long_presses;
 }
 
 static void show_notify(const char *msg) {
@@ -216,9 +264,11 @@ static void handle_tempo_led(void) {
 
 // ─── Session Handler ───────────────────────────────────────────
 
-// Points the editing screens (selected_track, active_pattern) at the focus.
+// Points the editing screens (selected_track, active_pattern and, on a kit,
+// the track's lane) at the focus.
 static void target_focus(session_focus_t focus) {
     ui.selected_track = focus.track;
+    if (is_kit_cell(focus.track, focus.location)) session_set_kit_lane(focus.track, focus.lane);
     uint32_t lock_state = seq_lock();
     g_seq.active_pattern[focus.track] = focus.location;
     seq_unlock(lock_state);
@@ -227,7 +277,7 @@ static void target_focus(session_focus_t focus) {
 static void handle_session_view(int8_t e1d, int8_t e2d,
                                 button_event_t e1b, button_event_t e2b,
                                 step_buttons_t *steps) {
-    // TRACK rotate: focus the previous/next track.
+    // TRACK rotate (detents): walk the stops, a kit's lanes included.
     if (e1d != 0) {
         session_move_focus(e1d);
     }
@@ -274,29 +324,15 @@ static void handle_session_view(int8_t e1d, int8_t e2d,
     // A step pressed here and released on another screen does nothing.
     if (ui.mode != UI_SESSION) return;
 
-    // A step press belongs to the cell focused when it was made, whatever the
-    // focus does before release; steps beyond that cell's length do nothing.
-    uint8_t len = clamp_pattern_length(
-        pattern_get_track_length(&g_seq.patterns[focus.location], focus.track));
-    uint16_t in_length = (uint16_t)((1u << len) - 1u);
-    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
-        if (steps->pressed & in_length & (1u << s)) ui.step_cell[s] = focus;
-    }
-
-    // Only keys pressed in this view count: a short press toggles on release,
-    // a long press opens the step editor on that step without toggling it.
-    uint16_t long_presses;
-    uint16_t short_releases = take_short_releases(&ui.step_short_pending, steps,
-                                                  in_length, &long_presses);
-    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
-        if (short_releases & (1u << s)) {
-            toggle_steps(ui.step_cell[s].track, ui.step_cell[s].location,
-                         (uint16_t)(1u << s));
-        }
-    }
-
+    // Only keys pressed in this view count, on the cell and lane focused at
+    // the press; steps beyond that cell's length do nothing. A short press acts
+    // on release, a long press opens the step editor on that step without
+    // toggling it. On a kit the long press drops the key (Task 9: kit editor).
+    uint16_t long_presses = handle_bound_steps(
+        focus, steps_within_length(focus.track, focus.location), steps);
     for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
         if (long_presses & (1u << s)) {
+            if (is_kit_cell(ui.step_cell[s].track, ui.step_cell[s].location)) continue;
             target_focus(ui.step_cell[s]);
             ui.edit_step = s;
             ui.step_edit_return = UI_SESSION;
@@ -311,10 +347,18 @@ static void handle_session_view(int8_t e1d, int8_t e2d,
 static void handle_pattern_view(int8_t e1d, int8_t e2d,
                                  button_event_t e1b, button_event_t e2b,
                                  step_buttons_t *steps) {
-    // Enc1 rotate: select track
+    // Enc1 rotate (detents): walk the stops of the tracks' active patterns, a
+    // kit's lanes included; the lane reached is the kit track's remembered one.
     if (e1d != 0) {
-        int16_t t = (int16_t)ui.selected_track + e1d;
-        ui.selected_track = clamp_i8(t, 0, NUM_TRACKS - 1);
+        uint8_t kit_mask = 0;
+        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+            if (is_kit_cell(t, g_seq.active_pattern[t])) kit_mask |= (uint8_t)(1u << t);
+        }
+        uint8_t track = ui.selected_track;
+        uint8_t lane = session_kit_lane(track);
+        session_walk_stops(&track, &lane, e1d, kit_mask);
+        ui.selected_track = track;
+        if (kit_mask & (1u << track)) session_set_kit_lane(track, lane);
     }
 
     // Enc2 rotate: adjust BPM
@@ -341,9 +385,19 @@ static void handle_pattern_view(int8_t e1d, int8_t e2d,
         ui.select_pattern = g_seq.active_pattern[ui.selected_track];
     }
 
-    // Step buttons: toggle steps on current track (active_pattern is Core 0's)
-    toggle_steps(ui.selected_track, g_seq.active_pattern[ui.selected_track],
-                 steps->pressed);
+    // Step buttons (active_pattern is Core 0's): other cells toggle on press;
+    // a kit follows the Session rule on its remembered lane, its presses bound
+    // to the cell and lane focused when they were made.
+    uint8_t track = ui.selected_track;
+    uint8_t location = g_seq.active_pattern[track];
+    bool kit = is_kit_cell(track, location);
+    if (!kit) toggle_steps(track, location, steps->pressed);
+
+    // A kit step pressed here and released on another screen does nothing.
+    if (ui.mode != UI_PATTERN_VIEW) return;
+    session_focus_t cell = {track, location, session_kit_lane(track)};
+    // Long presses drop the key (Task 9: kit editor).
+    handle_bound_steps(cell, kit ? steps_within_length(track, location) : 0, steps);
 }
 
 // ─── Step Edit Handler ─────────────────────────────────────────
@@ -568,18 +622,31 @@ static uint16_t build_step_activity_mask(const pattern_t *pat, uint8_t track) {
     return mask;
 }
 
+// Session and Pattern view: on a kit cell the steps of `lane` that are not
+// off, else the active steps; within the length either way.
+static uint16_t build_cell_mask(const pattern_t *pat, uint8_t track, uint8_t lane) {
+    if (pat->tracks[track].type != TRACK_TYPE_KIT) return build_step_activity_mask(pat, track);
+    uint16_t mask = 0;
+    uint8_t len = clamp_pattern_length(pattern_get_track_length(pat, track));
+    for (uint8_t s = 0; s < len; s++) {
+        if (kit_get(pat->kit_steps[track][s], lane) != KIT_OFF) mask |= (uint16_t)(1u << s);
+    }
+    return mask;
+}
+
 // On for the first 8th note of every quarter, like the panel's fast blink.
 static bool eighth_blink_on(uint32_t pulse) {
     return (pulse / (PPQN / 2)) % 2 == 0;
 }
 
-// Session step LEDs: the focused cell's active steps within its length. While
-// the cell is the playing location of its track, its playhead blinks on 8th
-// notes of the transport. Uses the frame's snapshot; takes no lock.
+// Session step LEDs: the focused cell's active steps (on a kit, the focused
+// lane's steps) within its length. While the cell is the playing location of
+// its track, its playhead blinks on 8th notes of the transport. Uses the
+// frame's snapshot; takes no lock.
 static uint16_t build_session_mask(const transport_snapshot_t *snap) {
     session_focus_t focus = session_get_focus();
     const pattern_t *pat = &g_seq.patterns[focus.location];
-    uint16_t mask = build_step_activity_mask(pat, focus.track);
+    uint16_t mask = build_cell_mask(pat, focus.track, focus.lane);
 
     uint8_t playhead = snap->track_step[focus.track];
     if (snap->state == TRANSPORT_PLAYING &&
@@ -629,7 +696,7 @@ static void update_step_leds(void) {
 
         case UI_PATTERN_VIEW: {
             pattern_t *p = seq_active_pattern(ui.selected_track);
-            mask = build_step_activity_mask(p, ui.selected_track);
+            mask = build_cell_mask(p, ui.selected_track, session_kit_lane(ui.selected_track));
             if (g_seq.transport.state == TRANSPORT_PLAYING &&
                 g_seq.active_pattern[ui.selected_track] == g_seq.transport.current_pattern[ui.selected_track] &&
                 ui.led_anim_phase &&
@@ -1016,8 +1083,10 @@ void ui_update(void) {
     encoder_poll();
     mcp23017_poll();
 
-    // 2. Read encoder events
-    int8_t e1d = encoder_get_delta(0);
+    // 2. Read encoder events. TRACK walks whole detents where it walks the
+    // focus stops (one detent, one stop); elsewhere it keeps acceleration.
+    int8_t e1d = (ui.mode == UI_SESSION || ui.mode == UI_PATTERN_VIEW)
+                     ? encoder_get_detents(0) : encoder_get_delta(0);
     int8_t e2d = encoder_get_delta(1);
     button_event_t e1b = encoder_get_button(0);
     button_event_t e2b = encoder_get_button(1);
