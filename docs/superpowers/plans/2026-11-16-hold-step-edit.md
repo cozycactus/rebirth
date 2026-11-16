@@ -830,3 +830,196 @@ git add src/ui.c test/test_ui.c
 git commit -m "Fix hold-step issues found in the multi-model review"
 ```
 
+
+### Task 4: Port to the Session-panel master
+
+Tasks 1-3 were built on `48bac06`. `origin/master` has since gained the
+Session view, the panel keys and a reworked step-button driver, and conflicts
+with this branch in `README.md`, `include/sequencer.h`, `src/display.c`,
+`src/ui.c` and `test/test_ui.c`. This task merges `origin/master` into the
+branch. The spec's "Port to master" section is the authority on behaviour.
+
+**Files:**
+- Merge: `origin/master` into `claude/hold-step-edit` (one merge commit)
+- Resolve: `README.md`, `include/sequencer.h`, `src/display.c`, `src/ui.c`, `test/test_ui.c`
+- Test: `test/test_ui.c`
+
+**Port rules:**
+
+1. `master` is the baseline for everything except the gesture. In every
+   conflict take `master`'s side, then add the gesture to it. After the merge
+   `git diff origin/master HEAD` must show the gesture, its tests and its docs
+   and nothing else: no line of `master` reverted, reworded or reordered.
+2. `handle_pattern_view`: keep `master`'s five navigation actions exactly as
+   `master` has them (encoder 1 turn = track, encoder 2 turn = tempo, encoder 1
+   short = Step Edit with `ui.step_edit_return = UI_PATTERN_VIEW`, encoder 1
+   long = `UI_SESSION`, encoder 2 long = Pattern Select) and run them only when
+   no gesture is active. Remove `master`'s toggle-on-press call. The gesture
+   logic is the branch's, unchanged.
+3. Encoder 2 short does not call `toggle_transport()` in Pattern View, with or
+   without a hold. During a hold it only cancels the tap.
+4. Gesture state is cleared in `drop_step_gestures()`. There is no separate
+   `clear_grid_gesture()` and no extra clearing in `ui_update()`: `master`
+   already calls `drop_step_gestures()` on a screen change, on Panic and after
+   a flash save or load.
+5. Step Edit uses the shared `apply_step_edit()`; `master`'s
+   `ui.mode = ui.step_edit_return` stays.
+6. `display_draw_pattern_view()` keeps the fourth parameter `int8_t held_step`
+   from Task 2.
+7. The gesture does not use `toggle_steps()`: edits and taps stay in one
+   `seq_lock()` section followed by one refresh, as on the branch.
+
+**Tests:**
+
+- Harness: keep `master`'s (`reset`, `tick`, `pulses`, panel fakes,
+  `press_step`, `long_step`, `release_step`, `panel`, `patterns_before`,
+  `render_views`). Add the branch helpers that `master` lacks (`STEP`,
+  `step_down`, `step_up`, `turn`, `encoder_down`, `encoder_up`,
+  `encoder_short`, `encoder_long`, `enter_pattern_view`, `count_note_on`,
+  `render`, `check_info_line`); drop the branch's duplicate `tick`.
+- Every test that exists on `master` stays exactly as on `master`, with its
+  `RUN` line. Tests of the old base that `master` removed stay removed.
+- All 32 gesture tests of Tasks 1-3 stay, with their assertions. Change one
+  only where `master` forces it, and say in the report which and why. Known
+  cases:
+  - `enter_pattern_view()` now runs from the Session view, where encoder 1
+    short calls `target_focus()` and so overwrites `ui.selected_track` and
+    `g_seq.active_pattern[]`. A test that needs another track or pattern must
+    choose it after entering, or move the focus first, and must assert after
+    entering that the target is the one it means. Tests about "the edited
+    track and pattern" must use a track other than 0 and a pattern other than
+    0 and check that track 0 and pattern 0 are untouched.
+  - `test_grid_play_during_hold_cancels_the_tap` becomes
+    `test_grid_encoder2_short_during_hold_only_cancels_the_tap`: the transport
+    stays `TRANSPORT_STOPPED` and the step is not toggled.
+  - Any other test that started the transport with encoder 2 short uses
+    `panel(PANEL_PLAY, 0, 0)`; any assertion that encoder 2 short started it
+    is inverted.
+  - `test_grid_panic_forgets_held_steps`: Panic lands in `UI_SESSION`. The
+    step is still down; releasing it must not toggle, in the Session view and
+    after entering Pattern View again.
+  - `test_grid_ignores_button_held_before_entering`: the button goes down in
+    the Session view.
+- Add these tests, each with a `RUN` line:
+
+```c
+static void test_pattern_view_navigation_without_a_hold(void) {
+    enter_pattern_view();
+    turn(0, 1);
+    CHECK(ui.selected_track == 1);
+    float bpm = g_seq.transport.bpm;
+    turn(1, 10);
+    CHECK(g_seq.transport.bpm > bpm);
+    encoder_long(1);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    encoder_short(0);                       // confirm: back to Pattern View
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_short(0);
+    CHECK(ui.mode == UI_STEP_EDIT);
+    encoder_short(1);
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_short(1);                       // no action in Pattern View
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    encoder_long(0);
+    CHECK(ui.mode == UI_SESSION);
+}
+
+static void test_grid_hold_suspends_every_screen_change(void) {
+    enter_pattern_view();
+    step_down(1u << 2);
+    encoder_short(0);                       // would open Step Edit
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_long(0);                        // would return to the Session view
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_long(1);                        // would open Pattern Select
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    encoder_short(1);
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    step_up(1u << 2);
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    CHECK(STEP(0, 2).flags & STEP_FLAG_ACTIVE);     // created by the first edit
+    CHECK(STEP(0, 2).flags & STEP_FLAG_ACCENT);
+    CHECK(STEP(0, 2).flags & STEP_FLAG_TIE);
+    CHECK(!(STEP(0, 2).flags & STEP_FLAG_SLIDE));   // cleared by the tie
+}
+
+static void test_grid_panel_keys_during_a_hold_leave_the_tap(void) {
+    enter_pattern_view();
+    step_down(1u << 3);
+    panel(PANEL_PLAY, 0, 0);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    panel(PANEL_MUTE, 1, 0);
+    CHECK(g_seq.track_mutes == 2);
+    step_up(1u << 3);
+    CHECK(STEP(0, 3).flags & STEP_FLAG_ACTIVE);
+}
+
+static void test_grid_step_that_vanishes_without_a_release_ends_the_hold(void) {
+    enter_pattern_view();
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    step_down(1u << 4);
+    step_buttons.held = 0;                  // driver took a new baseline: no release event
+    ui_update();
+    turn(0, 3);
+    CHECK(ui.selected_track == 3);          // navigation is back
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+}
+
+static void test_grid_step_held_without_a_press_event_never_joins(void) {
+    enter_pattern_view();
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    step_buttons.held = 1u << 4;            // appeared at a driver baseline: no press event
+    ui_update();
+    turn(0, 3);
+    CHECK(ui.selected_track == 3);
+    step_up(1u << 4);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+}
+```
+
+**README:** take `master`'s "Live Controls" unchanged and add this bullet
+after the one that begins "The step editor returns to the screen it was opened
+from"; the branch's old bullet goes away with the old section:
+
+```markdown
+- Pattern view step buttons: a tap shorter than half a second toggles the step
+  when the button is released. Hold one or more steps and turn encoder 1 for
+  note or encoder 2 for velocity; encoder 1 short/long toggles accent/slide and
+  encoder 2 long toggles tie on the held steps. The first edit of a held empty
+  step creates it. A step held longer, or held while an encoder is turned or
+  pressed, is not toggled on release. While a step is held the encoders do not
+  change track, tempo or screen; pads, SCENE, MUTE and PLAY work as usual.
+```
+
+- [ ] **Step 1: Merge and resolve**
+
+```bash
+git merge --no-commit --no-ff origin/master
+```
+
+Resolve the five files by the port rules. Do not touch any file the merge did
+not mark as conflicted, except to make the result compile.
+
+- [ ] **Step 2: Adapt and add the tests**
+
+As listed under "Tests". Before fixing a test that fails after the merge,
+decide whether the test or the code is wrong: the spec decides.
+
+- [ ] **Step 3: Run all host tests and build the firmware**
+
+Run: `cmake -S test -B test/build && cmake --build test/build -j && ctest --test-dir test/build --output-on-failure`
+Expected: `100% tests passed out of 11`.
+
+Run: `cmake --build build -j`
+Expected: ends with `Built target rp2040_sequencer`.
+
+- [ ] **Step 4: Check the diff against master**
+
+Run: `git diff origin/master -- src include README.md test/CMakeLists.txt`
+Expected: only gesture lines. Anything else is a reverted line of `master`: restore it.
+
+- [ ] **Step 5: Commit**
+
+Commit the merge with the message `Merge origin/master: port hold-step editing to the Session panel`.

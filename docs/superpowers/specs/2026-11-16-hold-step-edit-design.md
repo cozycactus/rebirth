@@ -1,7 +1,8 @@
 # Hold-Step Editing in Pattern View — Design
 
 Date: 2026-11-16. Status: approved by the project owner; revised the same day
-after an independent review (see "Review changes").
+after an independent review (see "Review changes") and when the work was moved
+onto the Session-panel `master` (see "Port to master").
 
 ## Intent
 
@@ -12,7 +13,8 @@ can be shaped without leaving the grid, including while the sequencer plays.
 
 ## Behaviour
 
-Applies to `UI_PATTERN_VIEW` only.
+Applies to `UI_PATTERN_VIEW` only. The Session view keeps its own step
+gestures: a short press toggles on release, a long press opens Step Edit.
 
 1. **Tap.** A step button released less than `MCP_LONG_PRESS_MS` (500 ms) after
    the UI saw it pressed, with no encoder input during the hold, toggles the
@@ -31,7 +33,8 @@ Applies to `UI_PATTERN_VIEW` only.
    those steps were released before the encoder button: encoder 1 short
    toggles accent, encoder 1 long toggles slide (clearing tie), encoder 2 long
    toggles tie (clearing slide). Each step is toggled independently. Encoder 2
-   short stays play/stop. A long press that has already fired also applies,
+   short has no action in Pattern View, during a hold or otherwise: PLAY is
+   the only start/stop. A long press that has already fired also applies,
    once, to each step that joins the hold while the button is still down. A
    press whose button is already up when a step is first seen down does not
    belong to that step: it neither edits the step nor cancels its tap.
@@ -39,18 +42,20 @@ Applies to `UI_PATTERN_VIEW` only.
    same defaults `pattern_toggle_step()` applies, then applies the edit.
 5. **No toggle after encoder input.** A held step is not toggled on release
    once an encoder was turned or an encoder button was down during its hold.
-   This includes encoder 2 pressed for play/stop, and a turn that clamping
-   left without effect.
+   This includes an encoder 2 short press, which does nothing else, and a
+   turn that clamping left without effect. Pads, SCENE, MUTE and PLAY are not
+   encoder input: they act as on every screen and do not cancel a tap.
 6. **Peek.** A step held for `MCP_LONG_PRESS_MS` or longer with no encoder
    input is not toggled on release. Nothing changes; the screen just shows its
    values.
 7. **Navigation is suspended while a gesture is active**, that is while a step
    is held or an encoder button that joined a hold is still down. Encoder 1
    does not change the track, encoder 2 does not change tempo, and encoder
-   presses do not change the UI mode.
+   presses do not open Step Edit, the Session view or Pattern Select.
 8. **Only presses seen in Pattern View count.** A button that was already down
    when Pattern View was entered is not editable and its release does not
-   toggle. Leaving Pattern View or triggering Panic forgets the whole gesture.
+   toggle. Whatever drops step gestures elsewhere in the UI (a screen change,
+   Panic, a flash save or load) forgets the whole gesture.
 
 ## Screen
 
@@ -68,8 +73,8 @@ The line must fit `FONT_COLS` (21 characters). Step LEDs are unchanged.
 ## Goals, non-goals, anti-goals
 
 - Goal: note, velocity, accent, slide and tie editable from the grid.
-- Non-goal: changes to Performance view, Step Edit, Pattern Select, Song Edit,
-  the sequencer engine, storage format or step LEDs.
+- Non-goal: changes to the Session view, Step Edit, Pattern Select, Song Edit,
+  the panel keys, the sequencer engine, storage format or step LEDs.
 - Non-goal: making the step note meaningful on drum tracks. Playback uses the
   track's `drum_note` there, as before; the gesture edits the stored note the
   same way Step Edit does.
@@ -89,9 +94,14 @@ The line must fit `FONT_COLS` (21 characters). Step LEDs are unchanged.
   `pressed`, `released` and `long_pressed` are edge events cleared at the end
   of each `ui_update()`. The 500 ms boundary therefore carries that sampling
   uncertainty.
+- After a resync or a chip recovery the button driver takes the ports as the
+  new `held` state with no events. A step that leaves `held` with no
+  `released` drops out of the gesture without toggling; a step that appears
+  in `held` with no `pressed` never joins it.
 - An encoder's short press is reported when its button is released, a long
   press while it is still down; `encoder_button_held()` is the only signal
-  that a press has begun.
+  that a press has begun. No screen hands over to Pattern View while an
+  encoder button is down.
 - Host tests (`test/test_ui.c`) include `src/ui.c` directly and drive it
   through fake encoder and button state and a fake clock.
 
@@ -110,7 +120,8 @@ The line must fit `FONT_COLS` (21 characters). Step LEDs are unchanged.
 
 - New UI state: a mask of steps held since a press seen in Pattern View, a
   mask of those still eligible for a tap toggle, the time each was pressed,
-  and per encoder the steps its button press belongs to.
+  and per encoder the steps its button press belongs to. `drop_step_gestures()`
+  forgets all of it together with the other screens' step gestures.
 - The note/velocity/flag edit code is shared between Step Edit and the hold
   gesture so both stay identical.
 - `display_draw_pattern_view()` learns which step is held (none = unchanged
@@ -148,3 +159,27 @@ After the implementation, three reviewers read the code. Changed as a result:
   down. Before, a short press completing in the same update as a new step
   press edited that step.
 - Behaviour 2: a turn in the same update as a first press cancels the tap.
+
+## Port to master
+
+The gesture was built on commit `48bac06`. While it was in work, `master`
+gained the Session view, the panel keys (pads, SCENE, MUTE, PLAY) and a
+reworked step-button driver. Moving the gesture onto that `master` changed:
+
+- Behaviour 3 and 5: encoder 2 short no longer starts or stops the transport
+  anywhere; PLAY does. In Pattern View it has no action. During a hold it
+  still cancels the tap, so the rule "any encoder input cancels the tap" has
+  no exception.
+- Behaviour 5: panel keys pressed during a hold act as usual and leave the
+  tap alone. They are handled before the screen's own handler and are not
+  part of the gesture.
+- Behaviour 7: the suspended navigation is now Step Edit (encoder 1 short),
+  the Session view (encoder 1 long) and Pattern Select (encoder 2 long).
+- Behaviour 8: Panic returns to the Session view. The gesture state is
+  dropped by `drop_step_gestures()`, which `master` already calls on a screen
+  change, on Panic and after a flash save or load.
+- Constraints: the driver can change `held` with no event (resync, chip
+  recovery); the two cases are stated there.
+- The Session view is out of scope. A hold of half a second there opens Step
+  Edit, which a hold gesture would have to replace or coexist with; that is a
+  separate design.
