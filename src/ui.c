@@ -993,7 +993,7 @@ void ui_render(void) {
 void ui_init(void) {
     encoder_init();
     mcp23017_init();
-    panel_input_init();     // TCA8418 shares I2C0, set up by mcp23017_init
+    panel_input_init();     // the key-scan MCP23017s share I2C0, set up by mcp23017_init
     step_leds_init();
     rgb_leds_init();        // Sends an all-off frame
 

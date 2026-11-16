@@ -319,6 +319,20 @@ static void test_column_step_transfers(void) {
     check_step(0, 4, 3 + 4 + 5);
 }
 
+// A column past COL9 is refused before any transfer, and the selection stays:
+// COL3 to COL4 is still a single U801 write.
+static void test_column_out_of_range_is_refused(void) {
+    start_configured();
+    column(3);
+    int txn = fake_matrix_txn;
+    uint8_t down = 0x5A;
+    CHECK(!key_scan_column(10, &down));
+    CHECK(!key_scan_column(255, &down));
+    CHECK(fake_matrix_txn == txn);
+    CHECK(down == 0x5A);
+    check_step(4, 3, 4 + 5);
+}
+
 // The spec's bus budget: a scan (the check, then columns 0-9 from COL9) is 36
 // transfers and 107 wire bytes, about 2.41 ms at 400 kHz.
 static void test_scan_wire_budget(void) {
@@ -387,6 +401,7 @@ int main(void) {
     RUN(test_failed_u801_write_is_redone);
     RUN(test_failed_select_is_released_by_the_next_step);
     RUN(test_column_step_transfers);
+    RUN(test_column_out_of_range_is_refused);
     RUN(test_scan_wire_budget);
     RUN(test_column_steps_leave_a_reset_chip_to_the_check);
     return 0;

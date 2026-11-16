@@ -27,7 +27,8 @@ bool key_scan_check(bool *intact);
 // column that may still be low is released first, so at most one column is
 // low when the rows are read. False on an I2C error: *down is not written
 // and the selection becomes unknown, so the next step releases both chips'
-// columns as needed.
+// columns as needed. A col of KEY_SCAN_COLS or more is refused: false, with
+// no transfer and the selection unchanged.
 bool key_scan_column(uint8_t col, uint8_t *down);
 
 #endif

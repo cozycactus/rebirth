@@ -88,6 +88,7 @@ static bool select_on_u802(uint8_t col) {
 }
 
 bool key_scan_column(uint8_t col, uint8_t *down) {
+    if (col >= KEY_SCAN_COLS) return false;     // no transfer: the selection still holds
     bool u801_may_be_low = selected == SELECTION_UNKNOWN || selected < U801_COLS;
     bool u802_may_be_low = selected == SELECTION_UNKNOWN || selected >= U801_COLS;
     selected = SELECTION_UNKNOWN;   // until this step has succeeded
