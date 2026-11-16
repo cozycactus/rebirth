@@ -25,6 +25,7 @@ void uart_putc_raw(void *uart, uint8_t c);
 
 static uint8_t midi_buf[MIDI_BUF_SIZE];
 static uint8_t midi_buf_len = 0;
+static volatile bool midi_overflow;
 
 #ifndef MOCK_HARDWARE
 _Static_assert((MIDI_TX_QUEUE_SIZE & (MIDI_TX_QUEUE_SIZE - 1u)) == 0,
@@ -51,52 +52,20 @@ static void midi_tx_unlock(uint32_t irq_state) {
     spin_unlock(spin_lock_instance(midi_tx_spinlock_num), irq_state);
 }
 
-static bool midi_tx_pop(uint8_t *out) {
-    uint32_t lock_state = midi_tx_lock();
-    if (midi_tx_tail == midi_tx_head) {
-        midi_tx_unlock(lock_state);
-        return false;
+// The FIFO check, dequeue, write and IRQ mask change share one lock across
+// both cores and the UART ISR. No second consumer can overtake a byte.
+static void midi_tx_drain_locked(void) {
+    while (uart_is_writable(MIDI_UART) && midi_tx_tail != midi_tx_head) {
+        uart_putc_raw(MIDI_UART, midi_tx_queue[midi_tx_tail]);
+        midi_tx_tail = midi_tx_next(midi_tx_tail);
     }
-
-    *out = midi_tx_queue[midi_tx_tail];
-    midi_tx_tail = midi_tx_next(midi_tx_tail);
-    midi_tx_unlock(lock_state);
-    return true;
-}
-
-static bool midi_tx_pending(void) {
-    uint32_t lock_state = midi_tx_lock();
-    bool pending = midi_tx_tail != midi_tx_head;
-    midi_tx_unlock(lock_state);
-    return pending;
-}
-
-static void midi_tx_enqueue_byte(uint8_t b) {
-    uint32_t lock_state = midi_tx_lock();
-    uint16_t next = midi_tx_next(midi_tx_head);
-
-    if (next == midi_tx_tail) {
-        midi_tx_dropped_bytes++;
-        midi_tx_unlock(lock_state);
-        return;
-    }
-
-    midi_tx_queue[midi_tx_head] = b;
-    midi_tx_head = next;
-    midi_tx_unlock(lock_state);
-}
-
-static void midi_tx_kick(void) {
-    uint8_t b;
-    while (uart_is_writable(MIDI_UART) && midi_tx_pop(&b)) {
-        uart_putc_raw(MIDI_UART, b);
-    }
-
-    uart_set_irq_enables(MIDI_UART, false, midi_tx_pending());
+    uart_set_irq_enables(MIDI_UART, false, midi_tx_tail != midi_tx_head);
 }
 
 static void __isr midi_uart_irq_handler(void) {
-    midi_tx_kick();
+    uint32_t lock_state = midi_tx_lock();
+    midi_tx_drain_locked();
+    midi_tx_unlock(lock_state);
 }
 #endif
 
@@ -104,7 +73,7 @@ static void __isr midi_uart_irq_handler(void) {
 
 void midi_init(void) {
 #ifndef MOCK_HARDWARE
-    midi_tx_spinlock_num = spin_lock_claim_unused(true);
+    if (!midi_tx_spinlock_ready) midi_tx_spinlock_num = spin_lock_claim_unused(true);
     midi_tx_spinlock_ready = true;
     midi_tx_head = 0;
     midi_tx_tail = 0;
@@ -124,24 +93,41 @@ void midi_init(void) {
 #endif
 
     midi_buf_len = 0;
+    midi_overflow = false;
 }
 
 // ─── Low-level send ─────────────────────────────────────────────
 
-static inline void midi_send_byte(uint8_t b) {
+static void midi_send_message(const uint8_t *data, uint16_t length) {
 #ifndef MOCK_HARDWARE
-    midi_tx_enqueue_byte(b);
-    midi_tx_kick();
+    uint32_t lock_state = midi_tx_lock();
+    uint16_t free_bytes = (midi_tx_tail - midi_tx_head - 1u) & (MIDI_TX_QUEUE_SIZE - 1u);
+    if (length > free_bytes) {
+        midi_tx_dropped_bytes += length;
+        midi_overflow = true;
+    } else {
+        // Publish complete messages/batches, never a partial MIDI packet.
+        for (uint16_t i = 0; i < length; i++) {
+            midi_tx_queue[midi_tx_head] = data[i];
+            midi_tx_head = midi_tx_next(midi_tx_head);
+        }
+    }
+    midi_tx_drain_locked();
+    midi_tx_unlock(lock_state);
 #else
-    uart_putc_raw(MIDI_UART, b);
+    for (uint16_t i = 0; i < length; i++) uart_putc_raw(MIDI_UART, data[i]);
 #endif
 }
 
 // ─── Buffered output ────────────────────────────────────────────
 
-static inline void midi_buf_push(uint8_t b) {
-    if (midi_buf_len < MIDI_BUF_SIZE) {
-        midi_buf[midi_buf_len++] = b;
+static void midi_buf_message(uint8_t status, uint8_t data1, uint8_t data2) {
+    if (midi_buf_len + 3u <= MIDI_BUF_SIZE) {
+        midi_buf[midi_buf_len++] = status;
+        midi_buf[midi_buf_len++] = data1;
+        midi_buf[midi_buf_len++] = data2;
+    } else {
+        midi_overflow = true;
     }
 }
 
@@ -150,18 +136,8 @@ void midi_buf_clear(void) {
 }
 
 void midi_buf_flush(void) {
-#ifndef MOCK_HARDWARE
-    for (uint8_t i = 0; i < midi_buf_len; i++) {
-        midi_tx_enqueue_byte(midi_buf[i]);
-    }
+    midi_send_message(midi_buf, midi_buf_len);
     midi_buf_len = 0;
-    midi_tx_kick();
-#else
-    for (uint8_t i = 0; i < midi_buf_len; i++) {
-        midi_send_byte(midi_buf[i]);
-    }
-    midi_buf_len = 0;
-#endif
 }
 
 void midi_clear_output_queue(void) {
@@ -169,57 +145,81 @@ void midi_clear_output_queue(void) {
 #ifndef MOCK_HARDWARE
     uint32_t lock_state = midi_tx_lock();
     midi_tx_tail = midi_tx_head;
-    midi_tx_unlock(lock_state);
+    midi_overflow = false;
     uart_set_irq_enables(MIDI_UART, false, false);
+    midi_tx_unlock(lock_state);
+#else
+    midi_overflow = false;
+#endif
+}
+
+bool midi_output_overflowed(void) {
+#ifndef MOCK_HARDWARE
+    uint32_t lock_state = midi_tx_lock();
+    bool overflowed = midi_overflow;
+    midi_tx_unlock(lock_state);
+    return overflowed;
+#else
+    return midi_overflow;
+#endif
+}
+
+void midi_wait_output_idle(void) {
+#ifndef MOCK_HARDWARE
+    bool pending;
+    do {
+        uint32_t lock_state = midi_tx_lock();
+        midi_tx_drain_locked();
+        pending = midi_tx_tail != midi_tx_head;
+        midi_tx_unlock(lock_state);
+    } while (pending);
+    uart_tx_wait_blocking(MIDI_UART);
 #endif
 }
 
 void midi_buf_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
-    midi_buf_push(MIDI_NOTE_ON | (channel & 0x0F));
-    midi_buf_push(note & 0x7F);
-    midi_buf_push(velocity & 0x7F);
+    midi_buf_message(MIDI_NOTE_ON | (channel & 0x0F), note & 0x7F, velocity & 0x7F);
 }
 
 void midi_buf_note_off(uint8_t channel, uint8_t note) {
-    midi_buf_push(MIDI_NOTE_OFF | (channel & 0x0F));
-    midi_buf_push(note & 0x7F);
-    midi_buf_push(0);
+    midi_buf_message(MIDI_NOTE_OFF | (channel & 0x0F), note & 0x7F, 0);
 }
 
 // ─── MIDI Messages ──────────────────────────────────────────────
 
 void midi_send_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
-    midi_send_byte(MIDI_NOTE_ON | (channel & 0x0F));
-    midi_send_byte(note & 0x7F);
-    midi_send_byte(velocity & 0x7F);
+    const uint8_t message[] = {MIDI_NOTE_ON | (channel & 0x0F), note & 0x7F, velocity & 0x7F};
+    midi_send_message(message, sizeof(message));
 }
 
 void midi_send_note_off(uint8_t channel, uint8_t note) {
-    midi_send_byte(MIDI_NOTE_OFF | (channel & 0x0F));
-    midi_send_byte(note & 0x7F);
-    midi_send_byte(0);
+    const uint8_t message[] = {MIDI_NOTE_OFF | (channel & 0x0F), note & 0x7F, 0};
+    midi_send_message(message, sizeof(message));
 }
 
 void midi_send_cc(uint8_t channel, uint8_t cc, uint8_t value) {
-    midi_send_byte(MIDI_CC | (channel & 0x0F));
-    midi_send_byte(cc & 0x7F);
-    midi_send_byte(value & 0x7F);
+    const uint8_t message[] = {MIDI_CC | (channel & 0x0F), cc & 0x7F, value & 0x7F};
+    midi_send_message(message, sizeof(message));
 }
 
 void midi_send_clock(void) {
-    midi_send_byte(MIDI_CLOCK);
+    const uint8_t message = MIDI_CLOCK;
+    midi_send_message(&message, 1);
 }
 
 void midi_send_start(void) {
-    midi_send_byte(MIDI_START);
+    const uint8_t message = MIDI_START;
+    midi_send_message(&message, 1);
 }
 
 void midi_send_stop(void) {
-    midi_send_byte(MIDI_STOP);
+    const uint8_t message = MIDI_STOP;
+    midi_send_message(&message, 1);
 }
 
 void midi_send_continue(void) {
-    midi_send_byte(MIDI_CONTINUE);
+    const uint8_t message = MIDI_CONTINUE;
+    midi_send_message(&message, 1);
 }
 
 void midi_send_all_notes_off(void) {

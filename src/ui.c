@@ -1,16 +1,4 @@
-#ifndef MOCK_HARDWARE
 #include "pico/stdlib.h"
-#else
-#include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
-void gpio_init(uint8_t pin) { (void)pin; }
-void gpio_set_dir(uint8_t pin, bool out) { (void)pin; (void)out; }
-void gpio_put(uint8_t pin, bool val) { (void)pin; (void)val; }
-uint32_t to_ms_since_boot(uint64_t t) { (void)t; return 0; }
-uint64_t get_absolute_time(void) { return 0; }
-#define GPIO_OUT 1
-#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -41,6 +29,8 @@ typedef enum {
 typedef struct {
     ui_mode_t mode;
     uint8_t performance_bank;       // A-D bank used by live queue buttons
+    bool panic_latched;
+    uint16_t select_short_pending;
 
     // PATTERN_VIEW
     uint8_t selected_track;         // 0–7
@@ -102,9 +92,17 @@ static void toggle_transport(void) {
 }
 
 static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
+    if (ui.panic_latched) {
+        if (!encoder_button_held(0) && !encoder_button_held(1)) {
+            ui.panic_latched = false;
+        }
+        return true; // Consume both releases, including a late short press.
+    }
     if ((e1b == BTN_LONG_PRESS && encoder_button_held(1)) ||
         (e2b == BTN_LONG_PRESS && encoder_button_held(0))) {
         sequencer_panic();
+        ui.panic_latched = true;
+        ui.select_short_pending = 0;
         ui.mode = UI_PERFORMANCE;
         show_notify("PANIC: ALL OFF");
         return true;
@@ -133,26 +131,6 @@ static void handle_tempo_led(void) {
     }
 }
 
-static void refresh_scheduled_playback_tracks(void) {
-    uint8_t current_patterns[NUM_TRACKS];
-    uint8_t queued_patterns[NUM_TRACKS];
-
-    uint32_t lock_state = seq_lock();
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        current_patterns[track] = g_seq.transport.current_pattern[track];
-        queued_patterns[track] = g_seq.transport.queued_pattern[track];
-    }
-    seq_unlock(lock_state);
-
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        sequencer_refresh_track_playback(track, current_patterns[track]);
-        if (queued_patterns[track] != NO_QUEUED_PATTERN &&
-            queued_patterns[track] != current_patterns[track]) {
-            sequencer_refresh_track_playback(track, queued_patterns[track]);
-        }
-    }
-}
-
 // ─── Performance Handler ───────────────────────────────────────
 
 static void handle_performance_view(int8_t e1d, int8_t e2d,
@@ -172,6 +150,9 @@ static void handle_performance_view(int8_t e1d, int8_t e2d,
 
     // Enc1 press enters the editable pattern grid.
     if (e1b == BTN_PRESS) {
+        uint32_t lock_state = seq_lock();
+        g_seq.active_pattern[ui.selected_track] = g_seq.transport.current_pattern[ui.selected_track];
+        seq_unlock(lock_state);
         ui.mode = UI_PATTERN_VIEW;
     }
 
@@ -215,15 +196,17 @@ static void handle_performance_view(int8_t e1d, int8_t e2d,
         if (queued == pattern_index) {
             transport_clear_track_queue(ui.selected_track);
             show_notify("QUEUE CLEARED");
-        } else {
-            transport_queue_track_pattern(ui.selected_track, pattern_index);
+        } else if (transport_queue_track_pattern(ui.selected_track, pattern_index)) {
             char label[4];
             char msg[17];
             ui_pattern_label(pattern_index, label, sizeof(label));
-            snprintf(msg, sizeof(msg), "QUEUE T%d %s",
+            snprintf(msg, sizeof(msg), "%s T%d %s",
+                     g_seq.transport.state == TRANSPORT_PLAYING ? "QUEUE" : "SELECT",
                      ui.selected_track + 1,
                      label);
             show_notify(msg);
+        } else {
+            show_notify("SONG MODE");
         }
     }
 }
@@ -320,22 +303,17 @@ static void handle_step_edit(int8_t e1d, int8_t e2d,
         }
     }
 
-    // Enc1 press: cycle flags (accent → slide → tie → clear)
+    // Accent is independent of the outgoing connection type.
     if (e1b == BTN_PRESS) {
-        uint8_t extra = st->flags & ~(STEP_FLAG_ACCENT | STEP_FLAG_SLIDE | STEP_FLAG_TIE);
-        if (st->flags & STEP_FLAG_TIE) {
-            // Tie → clear all extra flags
-            st->flags = extra;
-        } else if (st->flags & STEP_FLAG_SLIDE) {
-            // Slide → Tie
-            st->flags = extra | STEP_FLAG_TIE;
-        } else if (st->flags & STEP_FLAG_ACCENT) {
-            // Accent → Slide
-            st->flags = extra | STEP_FLAG_SLIDE;
-        } else {
-            // None → Accent
-            st->flags = extra | STEP_FLAG_ACCENT;
-        }
+        st->flags ^= STEP_FLAG_ACCENT;
+        changed = true;
+    }
+    if (e1b == BTN_LONG_PRESS) {
+        st->flags = (st->flags ^ STEP_FLAG_SLIDE) & (uint8_t)~STEP_FLAG_TIE;
+        changed = true;
+    }
+    if (e2b == BTN_LONG_PRESS) {
+        st->flags = (st->flags ^ STEP_FLAG_TIE) & (uint8_t)~STEP_FLAG_SLIDE;
         changed = true;
     }
 
@@ -410,7 +388,9 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
 
     // Enc2 press: queue pattern
     if (e2b == BTN_PRESS) {
-        transport_queue_track_pattern(ui.selected_track, ui.select_pattern);
+        if (!transport_queue_track_pattern(ui.selected_track, ui.select_pattern)) {
+            show_notify("SONG MODE");
+        }
     }
 
     // Enc2 long press: back to safe performance view (escape)
@@ -418,10 +398,15 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
         ui.mode = UI_PERFORMANCE;
     }
 
-    // Step buttons 1–8: toggle track mutes
-    if (steps->pressed) {
+    // In the selector only, defer short presses until release so opening
+    // track configuration never changes the audible mute state.
+    ui.select_short_pending |= steps->pressed & 0xFFu;
+    ui.select_short_pending &= (uint16_t)~steps->long_pressed;
+    uint16_t short_releases = steps->released & ui.select_short_pending;
+    ui.select_short_pending &= (uint16_t)~steps->released;
+    if (short_releases) {
         for (int t = 0; t < NUM_TRACKS; t++) {
-            if (steps->pressed & (1u << t)) {
+            if (short_releases & (1u << t)) {
                 seq_toggle_track_mute(t);
             }
         }
@@ -434,6 +419,7 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
                 ui.mode = UI_TRACK_CONFIG;
                 ui.config_track = t;
                 ui.config_param = 0;
+                ui.select_short_pending = 0;
                 break;
             }
         }
@@ -441,25 +427,20 @@ static void handle_pattern_select(int8_t e1d, int8_t e2d,
 
     // Step button 9 (index 8): save to flash
     if (steps->pressed & (1u << 8)) {
-        if (flash_storage_save()) {
-            memcpy(ui.notify_msg, "  SAVED  OK   ", 15);
+        if (g_seq.transport.state != TRANSPORT_STOPPED) {
+            show_notify("STOP TO SAVE");
         } else {
-            memcpy(ui.notify_msg, "  SAVE FAILED ", 15);
+            show_notify(flash_storage_save() ? "SAVED OK" : "SAVE FAILED");
         }
-        ui.notify_msg[15] = '\0';
-        ui.notify_ticks = 30;   // ~1 second at 30 fps
     }
 
     // Step button 10 (index 9): load from flash
     if (steps->pressed & (1u << 9)) {
-        if (flash_storage_load()) {
-            refresh_scheduled_playback_tracks();
-            memcpy(ui.notify_msg, "  LOADED OK   ", 15);
+        if (g_seq.transport.state != TRANSPORT_STOPPED) {
+            show_notify("STOP TO LOAD");
         } else {
-            memcpy(ui.notify_msg, "  LOAD FAILED ", 15);
+            show_notify(flash_storage_load() ? "LOADED OK" : "LOAD FAILED");
         }
-        ui.notify_msg[15] = '\0';
-        ui.notify_ticks = 30;
     }
 
     // Step button 11 (index 10): shorten pattern length
@@ -591,6 +572,7 @@ static void update_step_leds(void) {
             pattern_t *p = seq_active_pattern(ui.selected_track);
             mask = build_step_activity_mask(p, ui.selected_track);
             if (g_seq.transport.state == TRANSPORT_PLAYING &&
+                g_seq.active_pattern[ui.selected_track] == g_seq.transport.current_pattern[ui.selected_track] &&
                 ui.led_anim_phase &&
                 g_seq.transport.current_track_step[ui.selected_track] <
                     clamp_pattern_length(pattern_get_track_length(p, ui.selected_track))) {
@@ -626,7 +608,7 @@ static void update_step_leds(void) {
             break;
 
         case UI_SONG_EDIT:
-            // Song controls: button 1 = loop/stop, button 2 = song play/start.
+            // Button 1 = loop/stop, button 2 = song, button 3 = pattern playback.
             mask = (1u << 0) | (1u << 1);
             break;
     }
@@ -833,9 +815,11 @@ static void handle_song_edit(int8_t e1d, int8_t e2d,
 
     // Step button 2: switch to song play mode and start
     if (steps->pressed & (1u << 1)) {
-        uint32_t lock_state = seq_lock();
-        g_seq.transport.mode = PLAY_MODE_SONG;
-        seq_unlock(lock_state);
+        transport_set_mode(PLAY_MODE_SONG);
+        transport_start();
+    }
+    if (steps->pressed & (1u << 2)) {
+        transport_set_mode(PLAY_MODE_PATTERN);
         transport_start();
     }
 }
@@ -971,6 +955,7 @@ void ui_update(void) {
     update_step_leds();
 
     // 6. Clear consumed button events
+    if (ui.mode != UI_PATTERN_SELECT) ui.select_short_pending = 0;
     steps->pressed = 0;
     steps->released = 0;
     steps->long_pressed = 0;

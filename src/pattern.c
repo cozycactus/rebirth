@@ -105,7 +105,6 @@ void pattern_set_track_length(pattern_t *p, uint8_t track, uint8_t length) {
     if (length < 1) length = 1;
     if (length > STEPS_PER_PATTERN) length = STEPS_PER_PATTERN;
     p->track_length[track] = length;
-    p->length = length;
 }
 
 uint8_t pattern_bank(uint8_t pattern_index) {

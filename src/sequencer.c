@@ -5,11 +5,24 @@
 #include "hardware/irq.h"
 #include "sequencer.h"
 #include <string.h>
+#include <math.h>
 
 // ─── Internal state ─────────────────────────────────────────────
 
 static uint32_t timer_alarm_num;
 static uint32_t pulse_interval_us;
+static uint32_t playback_spinlock_num;
+
+// Lock order: playback -> shared state / MIDI. UI edits only take shared state.
+static uint32_t playback_lock(void) {
+    return spin_lock_blocking(spin_lock_instance(playback_spinlock_num));
+}
+
+static void playback_unlock(uint32_t irq_state) {
+    spin_unlock(spin_lock_instance(playback_spinlock_num), irq_state);
+}
+
+_Static_assert(PPQN % MIDI_PPQN == 0, "MIDI clock must divide the internal clock");
 
 typedef struct {
     uint8_t flags;
@@ -32,6 +45,7 @@ typedef struct {
 
 typedef struct {
     uint8_t note;
+    uint8_t flags;
     uint8_t midi_channel;
     uint8_t output_mode;
     uint8_t cv_channel;
@@ -42,18 +56,20 @@ static uint8_t active_notes[NUM_TRACKS];
 static bool    note_is_on[NUM_TRACKS];
 static active_note_state_t active_note_state[NUM_TRACKS];
 
-// Gate timing: count down pulses until gate off
-static uint8_t gate_off_countdown[NUM_CV_CHANNELS];
+// Note durations share one countdown for MIDI and CV/Gate on each track.
+static uint8_t note_off_countdown[NUM_TRACKS];
 
 static prepared_playback_t prepared_playback;
-static prepared_track_pattern_t prepared_queued_tracks[NUM_TRACKS];
-static prepared_track_pattern_t prepared_refresh_tracks[NUM_TRACKS];
-static volatile uint8_t prepared_refresh_mask;
+static prepared_track_pattern_t prepared_patterns[MAX_PATTERNS][NUM_TRACKS];
+static uint32_t prepared_revision[MAX_PATTERNS][NUM_TRACKS];
+static uint32_t playback_revision[NUM_TRACKS];
+static uint8_t playback_pattern[NUM_TRACKS];
 
 static volatile sequencer_jitter_stats_t jitter_stats;
 static uint32_t jitter_last_irq_us;
 static bool jitter_have_last_irq;
 static volatile bool jitter_reset_pending;
+static uint32_t jitter_expected_period_us;
 
 // ─── Helpers ────────────────────────────────────────────────────
 
@@ -63,7 +79,7 @@ static uint32_t bpm_to_pulse_interval_us(float bpm) {
 }
 
 static uint32_t abs_i32(int32_t value) {
-    return (value < 0) ? (uint32_t)(-value) : (uint32_t)value;
+    return (value < 0) ? 0u - (uint32_t)value : (uint32_t)value;
 }
 
 static void jitter_reset_now(void) {
@@ -104,13 +120,13 @@ static void jitter_record_entry(uint32_t now_us, uint32_t scheduled_us) {
         }
     }
 
-    if (latency_us > (int32_t)pulse_interval_us) {
+    if (latency_us >= (int32_t)jitter_expected_period_us) {
         jitter_stats.overruns++;
     }
 
     if (jitter_have_last_irq) {
         int32_t period_us = (int32_t)(now_us - jitter_last_irq_us);
-        int32_t period_error_us = period_us - (int32_t)pulse_interval_us;
+        int32_t period_error_us = period_us - (int32_t)jitter_expected_period_us;
         uint32_t abs_period_error_us = abs_i32(period_error_us);
 
         jitter_stats.last_period_error_us = period_error_us;
@@ -155,10 +171,14 @@ static void fill_prepared_track(prepared_track_pattern_t *dst,
     uint32_t lock_state = seq_lock();
     const pattern_t *pat = &g_seq.patterns[pattern_index];
     dst->length = pattern_get_track_length(pat, track);
+    step_t steps[STEPS_PER_PATTERN];
+    track_config_t config = pat->tracks[track];
+    memcpy(steps, pat->steps[track], sizeof(steps));
+    seq_unlock(lock_state);
 
     for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
-        const step_t *src_step = &pat->steps[track][step];
-        const track_config_t *tc = &pat->tracks[track];
+        const step_t *src_step = &steps[step];
+        const track_config_t *tc = &config;
         prepared_track_event_t *dst_event = &dst->step[step];
 
         dst_event->flags = src_step->flags;
@@ -180,59 +200,17 @@ static void fill_prepared_track(prepared_track_pattern_t *dst,
         if (gate_pulses < 1) gate_pulses = 1;
         dst_event->gate_pulses = gate_pulses;
     }
-    seq_unlock(lock_state);
 }
 
-static void reset_prepared_buffers_for_current(void) {
-    uint8_t current_patterns[NUM_TRACKS];
+static void load_prepared_track(uint8_t track) {
     uint32_t lock_state = seq_lock();
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        current_patterns[track] = g_seq.transport.current_pattern[track];
-    }
-    seq_unlock(lock_state);
-
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        fill_prepared_track(&prepared_playback.track[track], track, current_patterns[track]);
-    }
-
-    lock_state = seq_lock();
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        g_seq.transport.queued_pattern[track] = NO_QUEUED_PATTERN;
-    }
-    prepared_refresh_mask = 0;
-    seq_unlock(lock_state);
-}
-
-static void refresh_prepared_tracks_for_current(uint8_t track_mask) {
-    uint8_t current_patterns[NUM_TRACKS];
-    uint32_t lock_state = seq_lock();
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        current_patterns[track] = g_seq.transport.current_pattern[track];
-    }
-    seq_unlock(lock_state);
-
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        uint8_t mask = (uint8_t)(1u << track);
-        if (track_mask & mask) {
-            fill_prepared_track(&prepared_playback.track[track],
-                                track,
-                                current_patterns[track]);
-        }
-    }
-
-    lock_state = seq_lock();
-    prepared_refresh_mask &= (uint8_t)~track_mask;
-    seq_unlock(lock_state);
-}
-
-static void apply_track_refresh_if_ready(uint8_t track) {
-    uint8_t mask = (uint8_t)(1u << track);
-    if (!(prepared_refresh_mask & mask)) return;
-
-    uint32_t lock_state = seq_lock();
-    if (prepared_refresh_mask & mask) {
-        prepared_playback.track[track] = prepared_refresh_tracks[track];
-        prepared_refresh_mask &= (uint8_t)~mask;
+    uint8_t pattern = g_seq.transport.current_pattern[track];
+    if (pattern >= MAX_PATTERNS) pattern = 0;
+    if (playback_pattern[track] != pattern ||
+        playback_revision[track] != prepared_revision[pattern][track]) {
+        prepared_playback.track[track] = prepared_patterns[pattern][track];
+        playback_revision[track] = prepared_revision[pattern][track];
+        playback_pattern[track] = pattern;
     }
     seq_unlock(lock_state);
 }
@@ -244,12 +222,11 @@ static void apply_track_queue_if_ready(uint8_t track) {
     uint32_t lock_state = seq_lock();
     uint8_t queued = t->queued_pattern[track];
     if (queued != NO_QUEUED_PATTERN) {
-        prepared_playback.track[track] = prepared_queued_tracks[track];
-        prepared_refresh_mask &= (uint8_t)~(1u << track);
         t->current_pattern[track] = queued;
         t->queued_pattern[track] = NO_QUEUED_PATTERN;
     }
     seq_unlock(lock_state);
+    load_prepared_track(track);
 }
 
 // Immediate note-off (used by transport_stop)
@@ -266,6 +243,7 @@ static void send_note_off_if_active(uint8_t track) {
         gate_off(state->cv_channel);
     }
     note_is_on[track] = false;
+    note_off_countdown[track] = 0;
 }
 
 // ─── Two-phase commit state ─────────────────────────────────────
@@ -289,6 +267,7 @@ static void prepare_note_off(uint8_t track) {
         pending_gate_off |= (1u << state->cv_channel);
     }
     note_is_on[track] = false;
+    note_off_countdown[track] = 0;
 }
 
 static void prepare_trigger(uint8_t track, const prepared_track_event_t *event,
@@ -299,20 +278,34 @@ static void prepare_trigger(uint8_t track, const prepared_track_event_t *event,
 
     uint8_t note = event->note;
     uint8_t vel = event->velocity;
+    const active_note_state_t *previous = &active_note_state[track];
+    bool same_route = note_is_on[track] &&
+        previous->output_mode == event->output_mode &&
+        (event->output_mode == OUTPUT_CV_GATE ||
+         previous->midi_channel == event->midi_channel) &&
+        (event->output_mode == OUTPUT_MIDI_ONLY ||
+         previous->cv_channel == event->cv_channel);
 
-    // Tie — keep the note ringing, no retrigger
-    if (event->flags & STEP_FLAG_TIE && note_is_on[track] && active_notes[track] == note) {
+    // Slide/tie belong to the outgoing step, matching the pattern flags and
+    // the connection drawn to its right in the editor.
+    bool connected = same_route && (previous->flags & (STEP_FLAG_SLIDE | STEP_FLAG_TIE));
+    if (connected && active_notes[track] == note) {
+        active_note_state[track].flags = event->flags;
+        note_off_countdown[track] = (event->flags & (STEP_FLAG_SLIDE | STEP_FLAG_TIE))
+                                  ? 0 : event->gate_pulses;
         return;
     }
 
-    // Turn off previous note (unless slide)
-    if (!(event->flags & STEP_FLAG_SLIDE)) {
+    // Legato is valid only on the same destination. A same-pitch on/off pair
+    // in that order would silence the newly triggered MIDI note.
+    bool slide = same_route && (previous->flags & STEP_FLAG_SLIDE);
+    if (!slide) {
         prepare_note_off(track);
     }
 
     // Queue MIDI messages
     if (event->output_mode == OUTPUT_MIDI_ONLY || event->output_mode == OUTPUT_BOTH) {
-        if (event->flags & STEP_FLAG_SLIDE && note_is_on[track]) {
+        if (slide) {
             midi_buf_note_on(event->midi_channel, note, vel);
             midi_buf_note_off(active_note_state[track].midi_channel, active_notes[track]);
         } else {
@@ -325,15 +318,17 @@ static void prepare_trigger(uint8_t track, const prepared_track_event_t *event,
         && event->cv_channel < NUM_CV_CHANNELS) {
         cv_set_note(event->cv_channel, note);
         pending_gate_on |= (1u << event->cv_channel);
-        gate_off_countdown[event->cv_channel] = event->gate_pulses;
     }
 
     active_notes[track] = note;
     active_note_state[track].note = note;
+    active_note_state[track].flags = event->flags;
     active_note_state[track].midi_channel = event->midi_channel;
     active_note_state[track].output_mode = event->output_mode;
     active_note_state[track].cv_channel = event->cv_channel;
     note_is_on[track] = true;
+    note_off_countdown[track] = (event->flags & (STEP_FLAG_SLIDE | STEP_FLAG_TIE))
+                              ? 0 : event->gate_pulses;
 }
 
 static void commit_step(void) {
@@ -347,16 +342,19 @@ static void commit_step(void) {
 }
 
 static void clear_runtime_note_state(void) {
+    pending_gate_on = 0;
+    pending_gate_off = 0;
     for (int i = 0; i < NUM_TRACKS; i++) {
         active_notes[i] = 0;
         note_is_on[i] = false;
         active_note_state[i].note = 0;
+        active_note_state[i].flags = 0;
         active_note_state[i].midi_channel = 0;
         active_note_state[i].output_mode = OUTPUT_MIDI_ONLY;
         active_note_state[i].cv_channel = 0;
     }
-    for (int i = 0; i < NUM_CV_CHANNELS; i++) {
-        gate_off_countdown[i] = 0;
+    for (int i = 0; i < NUM_TRACKS; i++) {
+        note_off_countdown[i] = 0;
     }
 }
 
@@ -368,6 +366,16 @@ static void stop_playback_outputs(void) {
     cv_gate_all_off();
     clear_runtime_note_state();
     midi_send_stop();
+}
+
+static void panic_playback(void) {
+    g_seq.transport.state = TRANSPORT_STOPPED;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        g_seq.transport.queued_pattern[track] = NO_QUEUED_PATTERN;
+    }
+    midi_clear_output_queue();
+    stop_playback_outputs();
+    midi_send_all_notes_off();
 }
 
 // ─── Song mode advancement ──────────────────────────────────────
@@ -414,7 +422,14 @@ static uint8_t advance_song_position(void) {
     uint16_t start = t->song_position;
     while (s->entries[t->song_position].repeats == 0) {
         t->song_position++;
-        if (t->song_position >= s->length) t->song_position = 0;
+        if (t->song_position >= s->length) {
+            if (s->end_mode == SONG_END_STOP) {
+                t->state = TRANSPORT_STOPPED;
+                should_stop = true;
+                goto done;
+            }
+            t->song_position = 0;
+        }
         if (t->song_position == start) {
             // All entries are 0-repeat — stop to avoid infinite loop
             t->state = TRANSPORT_STOPPED;
@@ -444,29 +459,30 @@ done:
 
 static void __isr __time_critical_func(sequencer_timer_isr)(void) {
     uint32_t isr_start_us = timer_hw->timerawl;
-    uint32_t scheduled_us = timer_hw->alarm[timer_alarm_num];
     gpio_put(JITTER_PROBE_PIN, 1);
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t scheduled_us = timer_hw->alarm[timer_alarm_num];
     jitter_record_entry(isr_start_us, scheduled_us);
 
     // Clear the alarm IRQ
     hw_clear_bits(&timer_hw->intr, 1u << timer_alarm_num);
 
-    // Schedule next alarm
-    uint64_t target = timer_hw->alarm[timer_alarm_num] + pulse_interval_us;
-    timer_hw->alarm[timer_alarm_num] = (uint32_t)target;
-
     transport_t *t = (transport_t *)&g_seq.transport;
     if (t->state != TRANSPORT_PLAYING) goto isr_done;
 
-    // Send MIDI clock on every pulse
-    midi_send_clock();
+    if ((t->pulse_count % (PPQN / MIDI_PPQN)) == 0) midi_send_clock();
 
-    // Decrement gate-off countdowns
-    for (int ch = 0; ch < NUM_CV_CHANNELS; ch++) {
-        if (gate_off_countdown[ch] > 0) {
-            gate_off_countdown[ch]--;
-            if (gate_off_countdown[ch] == 0) {
-                gate_off(ch);
+    // A mute cuts an already sounding note on the next internal pulse.
+    uint8_t track_mutes = g_seq.track_mutes;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        if (track_mutes & (1u << track)) send_note_off_if_active(track);
+    }
+
+    for (int track = 0; track < NUM_TRACKS; track++) {
+        if (note_off_countdown[track] > 0) {
+            note_off_countdown[track]--;
+            if (note_off_countdown[track] == 0) {
+                send_note_off_if_active(track);
             }
         }
     }
@@ -491,10 +507,6 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
                     t->track_step_count[tr] = 0;
                 }
             }
-            if (changed_mask) {
-                refresh_prepared_tracks_for_current(changed_mask);
-                prepared = &prepared_playback;
-            }
             t->pulse_count = 0;
             global_step_count = 0;
         }
@@ -502,28 +514,24 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
         t->current_step = (uint8_t)(global_step_count % STEPS_PER_PATTERN);
         t->step_triggered = true;
 
-        uint8_t track_mutes = g_seq.track_mutes;
-
         // ── Phase 1: Collect ── prepare all outputs without sending
         midi_buf_clear();
         pending_gate_on = 0;
         pending_gate_off = 0;
 
         for (int tr = 0; tr < NUM_TRACKS; tr++) {
-            apply_track_refresh_if_ready((uint8_t)tr);
+            load_prepared_track((uint8_t)tr);
             prepared = &prepared_playback;
 
             uint8_t track_len = clamp_pattern_steps(prepared->track[tr].length);
-            if (t->mode == PLAY_MODE_PATTERN &&
-                t->track_step_count[tr] > 0 &&
-                (t->track_step_count[tr] % track_len) == 0) {
-                apply_track_queue_if_ready((uint8_t)tr);
+            if (t->track_step_count[tr] >= track_len) {
+                if (t->mode == PLAY_MODE_PATTERN) apply_track_queue_if_ready((uint8_t)tr);
                 prepared = &prepared_playback;
                 t->track_step_count[tr] = 0;
                 track_len = clamp_pattern_steps(prepared->track[tr].length);
             }
 
-            uint8_t track_step = (uint8_t)(t->track_step_count[tr] % track_len);
+            uint8_t track_step = (uint8_t)t->track_step_count[tr];
             t->current_track_step[tr] = track_step;
             const prepared_track_event_t *event = &prepared->track[tr].step[track_step];
             if (!(event->flags & STEP_FLAG_ACTIVE) || (track_mutes & (1u << tr))) {
@@ -542,24 +550,55 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
     t->pulse_count++;
 
 isr_done:
+    if (midi_output_overflowed()) panic_playback();
+
+    // Re-arm after processing. Writing an alarm in the past would stall for
+    // the 32-bit timer wrap (about 72 minutes); recover without a clock burst.
+    uint32_t target = scheduled_us + pulse_interval_us;
+    uint32_t now_us = timer_hw->timerawl;
+    if ((int32_t)(target - now_us) <= 0) {
+        if ((int32_t)(isr_start_us - scheduled_us) < (int32_t)jitter_expected_period_us) {
+            jitter_stats.overruns++;
+        }
+        target = now_us + pulse_interval_us;
+    }
+    timer_hw->alarm[timer_alarm_num] = target;
+    if ((int32_t)(target - timer_hw->timerawl) <= 0) {
+        hw_clear_bits(&timer_hw->intr, 1u << timer_alarm_num);
+        irq_clear(TIMER_IRQ_0);
+        timer_hw->alarm[timer_alarm_num] = timer_hw->timerawl + pulse_interval_us;
+    }
+    jitter_expected_period_us = pulse_interval_us;
     jitter_record_exit(isr_start_us);
     gpio_put(JITTER_PROBE_PIN, 0);
+    playback_unlock(playback_irq_state);
 }
 
 // ─── Core 1 Entry ───────────────────────────────────────────────
 
-void sequencer_core1_entry(void) {
-    // Initialize timer alarm for sequencer
-    timer_alarm_num = 0;  // Use alarm 0
-
+void sequencer_init(void) {
+    static bool lock_ready;
+    if (!lock_ready) {
+        playback_spinlock_num = spin_lock_claim_unused(true);
+        lock_ready = true;
+    }
+    timer_alarm_num = 0;
     pulse_interval_us = bpm_to_pulse_interval_us(g_seq.transport.bpm);
+    jitter_expected_period_us = pulse_interval_us;
     jitter_reset_now();
+    clear_runtime_note_state();
+    memset(playback_pattern, NO_QUEUED_PATTERN, sizeof(playback_pattern));
+    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
+        for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+            sequencer_refresh_track_playback(track, pattern);
+        }
+    }
+}
 
+void sequencer_core1_entry(void) {
     gpio_init(JITTER_PROBE_PIN);
     gpio_set_dir(JITTER_PROBE_PIN, GPIO_OUT);
     gpio_put(JITTER_PROBE_PIN, 0);
-
-    clear_runtime_note_state();
 
     // Set up the hardware alarm
     hw_set_bits(&timer_hw->inte, 1u << timer_alarm_num);
@@ -582,8 +621,12 @@ void sequencer_core1_entry(void) {
 // ─── Transport Controls (called from Core 0) ───────────────────
 
 void transport_start(void) {
+    uint32_t playback_irq_state = playback_lock();
+    if (g_seq.transport.state == TRANSPORT_PLAYING) stop_playback_outputs();
+    clear_runtime_note_state();
     uint32_t lock_state = seq_lock();
     transport_t *t = (transport_t *)&g_seq.transport;
+    t->state = TRANSPORT_STOPPED;
 
     // Reset position
     t->pulse_count = 0;
@@ -594,103 +637,165 @@ void transport_start(void) {
         t->queued_pattern[track] = NO_QUEUED_PATTERN;
     }
 
-    if (t->mode == PLAY_MODE_SONG && g_seq.song.length > 0) {
+    if (t->mode == PLAY_MODE_SONG) {
         t->song_position = 0;
+        while (t->song_position < g_seq.song.length &&
+               g_seq.song.entries[t->song_position].repeats == 0) {
+            t->song_position++;
+        }
+        if (t->song_position >= g_seq.song.length) {
+            seq_unlock(lock_state);
+            playback_unlock(playback_irq_state);
+            return;
+        }
         memcpy(t->current_pattern,
-               g_seq.song.entries[0].pattern_index,
+               g_seq.song.entries[t->song_position].pattern_index,
                sizeof(t->current_pattern));
-        t->song_repeat_count = g_seq.song.entries[0].repeats;
+        t->song_repeat_count = g_seq.song.entries[t->song_position].repeats;
     }
 
     seq_unlock(lock_state);
 
-    reset_prepared_buffers_for_current();
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) load_prepared_track(track);
 
     lock_state = seq_lock();
     t = (transport_t *)&g_seq.transport;
     t->state = TRANSPORT_PLAYING;
     seq_unlock(lock_state);
     midi_send_start();
+    playback_unlock(playback_irq_state);
 }
 
 void transport_stop(void) {
-    uint32_t lock_state = seq_lock();
-    transport_t *t = (transport_t *)&g_seq.transport;
-    t->state = TRANSPORT_STOPPED;
-    seq_unlock(lock_state);
-
-    // All notes off
-    stop_playback_outputs();
-}
-
-void transport_continue(void) {
-    uint32_t lock_state = seq_lock();
-    transport_t *t = (transport_t *)&g_seq.transport;
-    t->state = TRANSPORT_PLAYING;
-    seq_unlock(lock_state);
-    midi_send_continue();
-}
-
-void transport_set_bpm(float bpm) {
-    if (bpm < MIN_BPM) bpm = MIN_BPM;
-    if (bpm > MAX_BPM) bpm = MAX_BPM;
-    uint32_t lock_state = seq_lock();
-    g_seq.transport.bpm = bpm;
-    pulse_interval_us = bpm_to_pulse_interval_us(bpm);
-    seq_unlock(lock_state);
-}
-
-void sequencer_panic(void) {
+    uint32_t playback_irq_state = playback_lock();
     uint32_t lock_state = seq_lock();
     transport_t *t = (transport_t *)&g_seq.transport;
     t->state = TRANSPORT_STOPPED;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         t->queued_pattern[track] = NO_QUEUED_PATTERN;
     }
-    prepared_refresh_mask = 0;
     seq_unlock(lock_state);
 
-    midi_clear_output_queue();
+    // All notes off
     stop_playback_outputs();
-    midi_send_all_notes_off();
+    playback_unlock(playback_irq_state);
 }
 
-void sequencer_prepare_queued_pattern(uint8_t track, uint8_t pattern_index) {
-    if (track >= NUM_TRACKS) return;
-    if (pattern_index >= MAX_PATTERNS) return;
+void transport_continue(void) {
+    uint32_t playback_irq_state = playback_lock();
+    if (g_seq.transport.state == TRANSPORT_PLAYING ||
+        (g_seq.transport.mode == PLAY_MODE_SONG &&
+         g_seq.transport.song_position >= g_seq.song.length)) {
+        playback_unlock(playback_irq_state);
+        return;
+    }
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) load_prepared_track(track);
+    uint32_t lock_state = seq_lock();
+    transport_t *t = (transport_t *)&g_seq.transport;
+    t->state = TRANSPORT_PLAYING;
+    seq_unlock(lock_state);
+    midi_send_continue();
+    playback_unlock(playback_irq_state);
+}
 
-    fill_prepared_track(&prepared_queued_tracks[track], track, pattern_index);
+void transport_set_bpm(float bpm) {
+    if (!isfinite(bpm)) return;
+    if (bpm < MIN_BPM) bpm = MIN_BPM;
+    if (bpm > MAX_BPM) bpm = MAX_BPM;
+    uint32_t interval_us = bpm_to_pulse_interval_us(bpm);
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t lock_state = seq_lock();
+    g_seq.transport.bpm = bpm;
+    pulse_interval_us = interval_us;
+    seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
+}
+
+void transport_set_mode(play_mode_t mode) {
+    if (mode != PLAY_MODE_PATTERN && mode != PLAY_MODE_SONG) return;
+    uint32_t playback_irq_state = playback_lock();
+    if (g_seq.transport.mode != mode) {
+        g_seq.transport.state = TRANSPORT_STOPPED;
+        stop_playback_outputs();
+        g_seq.transport.mode = mode;
+        for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+            g_seq.transport.queued_pattern[track] = NO_QUEUED_PATTERN;
+        }
+    }
+    playback_unlock(playback_irq_state);
+}
+
+static bool queue_patterns(uint8_t track_mask, uint8_t pattern_index) {
+    if (pattern_index >= MAX_PATTERNS) return false;
+    uint32_t playback_irq_state = playback_lock();
+    if (g_seq.transport.mode != PLAY_MODE_PATTERN) {
+        playback_unlock(playback_irq_state);
+        return false;
+    }
+    uint32_t lock_state = seq_lock();
+    transport_t *t = (transport_t *)&g_seq.transport;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        if (!(track_mask & (1u << track))) continue;
+        if (t->state == TRANSPORT_PLAYING) {
+            t->queued_pattern[track] = pattern_index;
+        } else {
+            t->current_pattern[track] = pattern_index;
+            t->queued_pattern[track] = NO_QUEUED_PATTERN;
+            t->track_step_count[track] = 0;
+            t->current_track_step[track] = 0;
+        }
+    }
+    seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
+    return true;
+}
+
+bool transport_queue_pattern(uint8_t pattern_index) {
+    return queue_patterns(UINT8_MAX, pattern_index);
+}
+
+bool transport_queue_track_pattern(uint8_t track, uint8_t pattern_index) {
+    if (track >= NUM_TRACKS) return false;
+    return queue_patterns((uint8_t)(1u << track), pattern_index);
+}
+
+void transport_clear_queue(void) {
+    uint32_t playback_irq_state = playback_lock();
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        g_seq.transport.queued_pattern[track] = NO_QUEUED_PATTERN;
+    }
+    playback_unlock(playback_irq_state);
+}
+
+void transport_clear_track_queue(uint8_t track) {
+    if (track >= NUM_TRACKS) return;
+    uint32_t playback_irq_state = playback_lock();
+    g_seq.transport.queued_pattern[track] = NO_QUEUED_PATTERN;
+    playback_unlock(playback_irq_state);
+}
+
+void sequencer_panic(void) {
+    uint32_t playback_irq_state = playback_lock();
+    panic_playback();
+    playback_unlock(playback_irq_state);
 }
 
 void sequencer_refresh_track_playback(uint8_t track, uint8_t pattern_index) {
     if (track >= NUM_TRACKS) return;
     if (pattern_index >= MAX_PATTERNS) return;
 
-    uint32_t lock_state = seq_lock();
-    transport_t *t = (transport_t *)&g_seq.transport;
-    bool is_current = t->current_pattern[track] == pattern_index;
-    bool is_queued = t->queued_pattern[track] == pattern_index;
-    seq_unlock(lock_state);
-
-    if (!is_current && !is_queued) return;
-
     prepared_track_pattern_t updated;
     fill_prepared_track(&updated, track, pattern_index);
 
-    lock_state = seq_lock();
-    t = (transport_t *)&g_seq.transport;
-    if (t->current_pattern[track] == pattern_index) {
-        prepared_refresh_tracks[track] = updated;
-        prepared_refresh_mask |= (uint8_t)(1u << track);
-    }
-    if (t->queued_pattern[track] == pattern_index) {
-        prepared_queued_tracks[track] = updated;
-    }
+    uint32_t lock_state = seq_lock();
+    prepared_patterns[pattern_index][track] = updated;
+    prepared_revision[pattern_index][track]++;
     seq_unlock(lock_state);
 }
 
 void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out) {
     if (!out) return;
+    uint32_t playback_irq_state = playback_lock();
 
     out->samples = jitter_stats.samples;
     out->last_irq_latency_us = jitter_stats.last_irq_latency_us;
@@ -703,8 +808,11 @@ void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out) {
     out->last_isr_duration_us = jitter_stats.last_isr_duration_us;
     out->max_isr_duration_us = jitter_stats.max_isr_duration_us;
     out->overruns = jitter_stats.overruns;
+    playback_unlock(playback_irq_state);
 }
 
 void sequencer_reset_jitter_stats(void) {
+    uint32_t playback_irq_state = playback_lock();
     jitter_reset_pending = true;
+    playback_unlock(playback_irq_state);
 }

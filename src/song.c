@@ -145,48 +145,6 @@ void song_set_end_mode(song_end_mode_t mode) {
     seq_unlock(lock_state);
 }
 
-// ─── Pattern queue ──────────────────────────────────────────────
-
-void transport_queue_pattern(uint8_t pattern_index) {
-    if (pattern_index >= MAX_PATTERNS) return;
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        transport_queue_track_pattern(track, pattern_index);
-    }
-}
-
-void transport_queue_track_pattern(uint8_t track, uint8_t pattern_index) {
-    if (track >= NUM_TRACKS) return;
-    if (pattern_index >= MAX_PATTERNS) return;
-
-    uint32_t lock_state = seq_lock();
-    transport_t *t = (transport_t *)&g_seq.transport;
-    t->queued_pattern[track] = NO_QUEUED_PATTERN;
-    seq_unlock(lock_state);
-
-#ifndef REBIRTH_HOST_TEST
-    sequencer_prepare_queued_pattern(track, pattern_index);
-#endif
-
-    lock_state = seq_lock();
-    t = (transport_t *)&g_seq.transport;
-    t->queued_pattern[track] = pattern_index;
-    seq_unlock(lock_state);
-}
-
-void transport_clear_queue(void) {
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        transport_clear_track_queue(track);
-    }
-}
-
-void transport_clear_track_queue(uint8_t track) {
-    if (track >= NUM_TRACKS) return;
-    uint32_t lock_state = seq_lock();
-    transport_t *t = (transport_t *)&g_seq.transport;
-    t->queued_pattern[track] = NO_QUEUED_PATTERN;
-    seq_unlock(lock_state);
-}
-
 // ─── Track mutes ────────────────────────────────────────────────
 
 void seq_set_track_mute(uint8_t track, bool muted) {

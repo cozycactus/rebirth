@@ -293,7 +293,7 @@ TEST(test_pattern_copy) {
     ASSERT_EQ(dst.steps[3][7].note, 48);
     ASSERT_EQ(dst.steps[3][7].flags, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
     ASSERT_TRUE(dst.tracks[1].muted);
-    ASSERT_EQ(dst.length, 11);
+    ASSERT_EQ(dst.length, 7);
     ASSERT_EQ(pattern_get_track_length(&dst, 3), 11);
     ASSERT_EQ(dst.swing, 65);
     ASSERT_STR_EQ(dst.name, "PA6");
@@ -337,6 +337,16 @@ TEST(test_track_length_clamps) {
     ASSERT_EQ(pattern_get_track_length(&p, 0), STEPS_PER_PATTERN);
 }
 
+TEST(test_track_length_does_not_change_other_tracks_fallback) {
+    pattern_t p;
+    pattern_init(&p, 0);
+    p.length = 12;
+    p.track_length[1] = 0;
+    pattern_set_track_length(&p, 0, 5);
+    ASSERT_EQ(pattern_get_track_length(&p, 0), 5);
+    ASSERT_EQ(pattern_get_track_length(&p, 1), 12);
+}
+
 TEST(test_pattern_clear_track) {
     pattern_t p;
     pattern_init(&p, 0);
@@ -378,6 +388,7 @@ TEST(test_pattern_shift_track_left_wraps_16_steps) {
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(void) {
+    RUN(test_track_length_does_not_change_other_tracks_fallback);
     printf("\n=== rebirth pattern unit tests ===\n\n");
 
     /* pattern_init */
