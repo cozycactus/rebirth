@@ -85,6 +85,7 @@ void encoder_poll(void) {
 
         if (d != 0) {
             e->delta += d;
+            e->_edges += d;
 
             // Track acceleration
             if (now - e->_last_tick_ms < ENC_ACCEL_FAST_MS) {
@@ -161,6 +162,7 @@ int8_t encoder_get_delta(uint8_t enc) {
 
     int8_t raw = e->delta;
     e->delta = 0;
+    e->_edges = 0;
 
     if (raw == 0) return 0;
 
@@ -179,6 +181,18 @@ int8_t encoder_get_delta(uint8_t enc) {
     if (result < -128) result = -128;
 
     return (int8_t)result;
+}
+
+int8_t encoder_get_detents(uint8_t enc) {
+    if (enc >= NUM_ENCODERS) return 0;
+    encoder_state_t *e = &encoders[enc];
+
+    int16_t whole = e->_edges / ENC_EDGES_PER_DETENT;   // truncates toward zero
+    e->_edges -= whole * ENC_EDGES_PER_DETENT;
+    e->delta = 0;
+    if (whole > 127) whole = 127;
+    if (whole < -128) whole = -128;
+    return (int8_t)whole;
 }
 
 button_event_t encoder_get_button(uint8_t enc) {

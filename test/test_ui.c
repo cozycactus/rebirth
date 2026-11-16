@@ -9,6 +9,7 @@
 sequencer_state_t g_seq;
 static button_event_t buttons[2];
 static int8_t deltas[2];
+static int8_t delta_scale = 1;   // encoder_get_delta returns deltas * delta_scale
 static bool held[2];
 static step_buttons_t step_buttons;
 static uint16_t led_mask;
@@ -20,6 +21,9 @@ static unsigned rgb_inits;
 void encoder_init(void) {}
 void encoder_poll(void) {}
 int8_t encoder_get_delta(uint8_t encoder) {
+    int8_t value = deltas[encoder] * delta_scale; deltas[encoder] = 0; return value;
+}
+int8_t encoder_get_detents(uint8_t encoder) {
     int8_t value = deltas[encoder]; deltas[encoder] = 0; return value;
 }
 button_event_t encoder_get_button(uint8_t encoder) {
@@ -108,6 +112,7 @@ static void reset(void) {
     memset(&step_buttons, 0, sizeof(step_buttons));
     memset(buttons, 0, sizeof(buttons));
     memset(deltas, 0, sizeof(deltas));
+    delta_scale = 1;
     memset(held, 0, sizeof(held));
     panel_head = panel_tail = panel_resyncs = 0;
     debounce_polls = 0;

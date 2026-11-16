@@ -25,6 +25,8 @@
 #define ENC_ACCEL_MULT_LO   4       // Multiplier after >3 fast ticks
 #define ENC_ACCEL_MULT_HI   8       // Multiplier after >6 fast ticks
 
+#define ENC_EDGES_PER_DETENT 4      // quadrature edges per detent (EC11 type: 4)
+
 // ─── Types ─────────────────────────────────────────────────────
 
 typedef enum {
@@ -47,6 +49,7 @@ typedef struct {
     bool            _btn_prev;          // Previous debounced state
     uint32_t        _btn_debounce_ms;   // Last debounce sample time
     bool            _long_fired;        // Long press already emitted
+    int16_t         _edges;             // edges not yet counted as a detent
     int8_t          _accel_count;       // Rapid rotation counter
     uint32_t        _last_tick_ms;      // Time of last rotation tick
 } encoder_state_t;
@@ -68,6 +71,11 @@ void encoder_resync(void);
 // Positive = clockwise, negative = counter-clockwise
 // Applies acceleration: fast turns yield larger deltas
 int8_t encoder_get_delta(uint8_t enc);
+
+// Read and consume whole detents (ENC_EDGES_PER_DETENT edges each), no
+// acceleration; the remainder stays for the next call. Use this or
+// encoder_get_delta per encoder, not both: each call clears the other's count.
+int8_t encoder_get_detents(uint8_t enc);
 
 // Read and consume button event
 button_event_t encoder_get_button(uint8_t enc);
