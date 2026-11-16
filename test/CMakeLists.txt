@@ -109,3 +109,12 @@ add_executable(test_led_frame
 )
 target_include_directories(test_led_frame PRIVATE ${REBIRTH_INC})
 add_test(NAME led_frame_tests COMMAND test_led_frame)
+
+add_executable(test_panel_input
+    test_panel_input.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/tca8418.c
+    ${REBIRTH_SRC}/panel_input.c
+)
+target_include_directories(test_panel_input PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME panel_input_tests COMMAND test_panel_input)

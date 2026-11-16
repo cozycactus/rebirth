@@ -33,6 +33,7 @@ static bool uart_drained;
 
 void fake_hardware_reset(void) {
     memset(&timer, 0, sizeof(timer));
+    for (int i = 0; i < 32; i++) fake_gpio_level[i] = true;
     fake_midi_length = 0;
     fake_uart_writable = true;
     fake_uart_tx_irq = false;
@@ -90,6 +91,14 @@ void spi_write_blocking(void *spi, const uint8_t *data, int length) {
 }
 void sleep_ms(uint32_t milliseconds) { timer.timerawl += milliseconds * 1000; }
 void gpio_put(uint8_t pin, bool value) { (void)pin; (void)value; }
+bool fake_gpio_level[32] = {
+    true, true, true, true, true, true, true, true, true, true, true,
+    true, true, true, true, true, true, true, true, true, true, true,
+    true, true, true, true, true, true, true, true, true, true
+};
+bool gpio_get(uint8_t pin) { return fake_gpio_level[pin & 31]; }
+void gpio_pull_up(uint8_t pin) { (void)pin; }
+void gpio_disable_pulls(uint8_t pin) { (void)pin; }
 uint64_t get_absolute_time(void) { return timer.timerawl; }
 uint32_t to_ms_since_boot(uint64_t time) { return (uint32_t)(time / 1000); }
 void fake_wait_for_interrupt(void) { abort(); }
