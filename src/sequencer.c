@@ -421,8 +421,8 @@ static uint8_t __not_in_flash_func(kit_take_release)(uint8_t track, uint8_t *out
 }
 
 // Live mutes, note-off countdowns and a step's leftovers: a send of its own, never
-// through midi_buf.
-static void kit_release(uint8_t track) {
+// through midi_buf. In RAM, as the rest of the kit path the timer ISR runs.
+static void __not_in_flash_func(kit_release)(uint8_t track) {
     uint8_t message[KIT_VOICES * 3];
     uint8_t length = kit_take_release(track, message);
     if (length) midi_send_bytes(message, length);
@@ -443,8 +443,9 @@ static void kit_release_all(void) {
 // A kit step on an audible track: leftovers released first, then the step's Note Ons
 // into midi_buf in kit_voice_order. A flam plays its first hit at the note level and
 // arms its second hit, one level up, `flam_pulses` later; the step's note-off then
-// waits for the second hit's gate, up to the step boundary.
-static void play_kit_step(uint8_t track, const prepared_track_pattern_t *row, uint8_t step) {
+// waits for the second hit's gate, up to the step boundary. In RAM.
+static void __not_in_flash_func(play_kit_step)(uint8_t track, const prepared_track_pattern_t *row,
+                                               uint8_t step) {
     kit_release(track);              // leftovers only: the countdown ends by now
     uint32_t word = row->kit.lanes[step];
     if (!(word & 0x00FFFFFCu)) return;  // no voice lane set
@@ -485,7 +486,8 @@ static void play_kit_step(uint8_t track, const prepared_track_pattern_t *row, ui
 // then Note On at the flam velocity, in one send of their own, never through midi_buf.
 // The only kit message that may be dropped: skipped when it would leave the TX queue
 // under KIT_FLAM_RESERVE bytes free; the voices then sound on until their note-off.
-static void kit_play_flam(uint8_t track) {
+// In RAM.
+static void __not_in_flash_func(kit_play_flam)(uint8_t track) {
     kit_runtime_t *k = &kit_runtime[track];
     uint8_t message[KIT_VOICES * 6];
     uint8_t length = 0;
@@ -687,12 +689,15 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
 
     if ((t->pulse_count % (PPQN / MIDI_PPQN)) == 0) midi_send_clock();
 
-    // A mute cuts an already sounding note on the next internal pulse.
+    // A mute cuts an already sounding note on the next internal pulse. A kit with
+    // nothing sounding and no flam pending has nothing to release.
     uint8_t track_mutes = g_seq.track_mutes;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         if (track_mutes & (1u << track)) {
             send_note_off_if_active(track);
-            kit_release(track);
+            if (kit_runtime[track].sounding || kit_runtime[track].flam_countdown) {
+                kit_release(track);
+            }
         }
     }
 

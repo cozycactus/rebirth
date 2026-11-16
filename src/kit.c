@@ -1,5 +1,10 @@
 #include "kit.h"
 
+// The timer ISR reads it on every kit step, flam and release. On the RP2040 it is
+// copied to RAM with .data, so the kit path makes no flash access.
+#if defined(__arm__)
+__attribute__((section(".data.kit_voice_order")))
+#endif
 const uint8_t kit_voice_order[KIT_VOICES] = {0, 1, 6, 7, 8, 5, 2, 3, 4, 9, 10};
 
 static const char *const lane_names[KIT_LANES] = {

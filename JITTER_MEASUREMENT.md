@@ -71,9 +71,18 @@ Use a logic analyzer or oscilloscope:
   ISR duration (`I`, and the GPIO 7 pulse width) and wire-level MIDI Clock
   must match the idle capture. Core 1 never touches I2C or the LEDs, so a
   change points to lock contention (launches, the per-frame transport
-  snapshot), bus contention (the LED DMA), or XIP-cache contention: only the
-  timer handler itself runs from RAM, and the functions it calls share the
-  flash cache with Core 0 code running from flash.
+  snapshot), bus contention (the LED DMA), or XIP-cache contention. The timer
+  handler and the whole kit and MIDI path it runs are in RAM: the kit step,
+  flam and release code (inlined into the handler, plus `kit_take_release()`
+  and the `kit_voice_order` table), the MIDI sends it makes, the step buffer,
+  the TX drain and the UART TX interrupt handler. Its other callees stay in
+  flash as on the base commit and share the flash cache with Core 0 code:
+  `load_prepared_track()` (every step), `send_note_off_if_active()` and
+  `prepare_note_off()` (event tracks), `seq_lock()`/`seq_unlock()` (launches,
+  Song advances), `gate_commit()` and `cv_set_note()` (CV/gate), the SDK's
+  divider wrapper (`pulse_count % 24` and `/ 24` on every pulse: the Cortex-M0+
+  has no long multiply), and on Stop and overflow `stop_playback_outputs()`,
+  `midi_clear_output_queue()` and `midi_send_all_notes_off()`.
 - Kit track load case (two kits): make two tracks kits with every voice on every
   step, the flam lane on as many steps as possible with FLAM at 3 and at 12
   pulses, the other six tracks busy, MIDI and CV/Gate on, and capture at 140-150

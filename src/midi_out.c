@@ -82,7 +82,9 @@ static void midi_tx_unlock(uint32_t irq_state) {
 // A message whose status equals the last one written goes without it, unless the
 // queue ran empty since: the first message after a gap always carries its status,
 // so a receiver that lost a byte resyncs.
-static void midi_tx_drain_locked(void) {
+// The MIDI path the timer ISR and the UART interrupt run is in RAM: the drain, the
+// TX interrupt handler, the sends and the step buffer.
+static void __not_in_flash_func(midi_tx_drain_locked)(void) {
     while (uart_is_writable(MIDI_UART)) {
         if (midi_tx_message_left == 0) {
             if (midi_rt_count != 0) {
@@ -140,7 +142,7 @@ static void midi_tx_reset_locked(void) {
     midi_clock_pending = false;
 }
 
-static void __isr midi_uart_irq_handler(void) {
+static void __isr __not_in_flash_func(midi_uart_irq_handler)(void) {
     uint32_t lock_state = midi_tx_lock();
     midi_tx_drain_locked();
     midi_tx_unlock(lock_state);
@@ -178,7 +180,7 @@ void midi_init(void) {
 
 // ─── Low-level send ─────────────────────────────────────────────
 
-void midi_send_bytes(const uint8_t *data, uint16_t length) {
+void __not_in_flash_func(midi_send_bytes)(const uint8_t *data, uint16_t length) {
 #ifndef MOCK_HARDWARE
     uint32_t lock_state = midi_tx_lock();
     if (!midi_tx_enqueue_locked(data, length, 0)) {
@@ -237,11 +239,11 @@ static void midi_buf_message(uint8_t status, uint8_t data1, uint8_t data2) {
     }
 }
 
-void midi_buf_clear(void) {
+void __not_in_flash_func(midi_buf_clear)(void) {
     midi_buf_len = 0;
 }
 
-void midi_buf_flush(void) {
+void __not_in_flash_func(midi_buf_flush)(void) {
     midi_send_bytes(midi_buf, midi_buf_len);
     midi_buf_len = 0;
 }
@@ -259,7 +261,7 @@ void midi_clear_output_queue(void) {
 #endif
 }
 
-bool midi_output_overflowed(void) {
+bool __not_in_flash_func(midi_output_overflowed)(void) {
 #ifndef MOCK_HARDWARE
     uint32_t lock_state = midi_tx_lock();
     bool overflowed = midi_overflow;
@@ -283,11 +285,11 @@ void midi_wait_output_idle(void) {
 #endif
 }
 
-void midi_buf_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
+void __not_in_flash_func(midi_buf_note_on)(uint8_t channel, uint8_t note, uint8_t velocity) {
     midi_buf_message(MIDI_NOTE_ON | (channel & 0x0F), note & 0x7F, velocity & 0x7F);
 }
 
-void midi_buf_note_off(uint8_t channel, uint8_t note) {
+void __not_in_flash_func(midi_buf_note_off)(uint8_t channel, uint8_t note) {
     midi_buf_message(MIDI_NOTE_OFF | (channel & 0x0F), note & 0x7F, 0);
 }
 
@@ -298,7 +300,7 @@ void midi_send_note_on(uint8_t channel, uint8_t note, uint8_t velocity) {
     midi_send_bytes(message, sizeof(message));
 }
 
-void midi_send_note_off(uint8_t channel, uint8_t note) {
+void __not_in_flash_func(midi_send_note_off)(uint8_t channel, uint8_t note) {
     const uint8_t message[] = {MIDI_NOTE_OFF | (channel & 0x0F), note & 0x7F, 0};
     midi_send_bytes(message, sizeof(message));
 }
@@ -308,7 +310,7 @@ void midi_send_cc(uint8_t channel, uint8_t cc, uint8_t value) {
     midi_send_bytes(message, sizeof(message));
 }
 
-void midi_send_clock(void) {
+void __not_in_flash_func(midi_send_clock)(void) {
 #ifndef MOCK_HARDWARE
     uint32_t lock_state = midi_tx_lock();
     midi_clock_pending = true;
