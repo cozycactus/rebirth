@@ -35,8 +35,17 @@ jobs:
         run: ctest --preset host-tests-debug
 
   host-sanitizers:
-    name: Host address and undefined behavior checks
+    name: Host address and undefined behavior checks (${{ matrix.variant }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: host enums
+            enum_flags: ''
+          # The RP2040 toolchain sizes enums to fit, which changes the saved records.
+          - variant: short enums, as on the RP2040
+            enum_flags: -fshort-enums
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -44,7 +53,7 @@ jobs:
         run: >-
           cmake -S test -B test/build/sanitizers
           -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_COMPILER=clang
-          '-DCMAKE_C_FLAGS=-Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer'
+          '-DCMAKE_C_FLAGS=-Wall -Wextra -Werror ${{ matrix.enum_flags }} -fsanitize=address,undefined -fno-omit-frame-pointer'
           '-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address,undefined'
       - name: Build instrumented tests
         run: cmake --build test/build/sanitizers --parallel

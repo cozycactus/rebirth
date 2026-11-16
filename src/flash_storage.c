@@ -77,6 +77,13 @@ _Static_assert(offsetof(pattern_v5_t, swing) == offsetof(pattern_t, swing), "v5 
 _Static_assert(offsetof(pattern_v5_t, name) == offsetof(pattern_t, name), "v5 name");
 _Static_assert(sizeof(pattern_v5_t) <= offsetof(pattern_t, kit_steps),
                "a v5 record must end before kit_steps");
+// The records as the RP2040 (short enums) writes them: saves made by earlier firmware
+// must keep loading. A host build with -fshort-enums (CI) runs the same code.
+#if defined(__arm__)
+_Static_assert(sizeof(pattern_v5_t) == 459, "v4/v5 pattern record on the RP2040");
+_Static_assert(offsetof(pattern_t, kit_steps) == 460, "v6 kit_steps offset on the RP2040");
+_Static_assert(sizeof(pattern_t) == 972, "v6 pattern record on the RP2040");
+#endif
 
 #define V5_PAT_BYTES    (sizeof(pattern_v5_t) * MAX_PATTERNS)
 #define V5_SONG_OFFSET  (PAT_OFFSET + PAGE_ROUND(V5_PAT_BYTES))
