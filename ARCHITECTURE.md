@@ -84,8 +84,9 @@ lane order.
   note.
 - **Kind change.** When a row of another kind is installed (type change, load),
   the ISR first releases what the old kind left sounding. Stop, Panic, Start
-  while playing and a play-mode change release every sounding kit voice before
-  the MIDI Stop byte.
+  while playing and a play-mode change queue a release of every sounding kit
+  voice before the MIDI Stop byte. The Stop, a real-time byte, may overtake
+  them on the wire; every voice is still released before the next run.
 - **Flam reserve.** A flam's second hits are the only kit message that may be
   dropped: they are queued only if at least 192 bytes of the TX queue stay free
   after them (`KIT_FLAM_RESERVE`, the most one pulse adds in mandatory messages:
@@ -190,16 +191,17 @@ current `pattern_t`, rounded to a page), the song (rounded to a page) and the
 kit settings (`kit_config[NUM_TRACKS]`, rounded to a page). Its CRC32 covers the
 three payloads at their unpadded lengths. Versions 4 and 5 are still loaded:
 their patterns are the legacy record, which is the start of today's
-`pattern_t` (a byte prefix, 459 bytes on the RP2040), so the song sits at the
-offset after the page-rounded legacy patterns and the checksum covers the legacy
-lengths. Each legacy record is copied into a zeroed `pattern_t`, so the kit steps
-are empty and every kit setting gets its default. Version 4 has no checksum and
+`pattern_t` (a byte prefix, 459 bytes on the RP2040; `kit_steps` follows at
+offset 460, after one padding byte), so the song sits at the offset after the
+page-rounded legacy patterns and the checksum covers the legacy lengths. Each
+legacy record is copied into a zeroed `pattern_t`, so the kit steps are empty
+and every kit setting gets its default. Version 4 has no checksum and
 is accepted after validation. Every offset and length is taken from the version
 and the compiler's type sizes, never hard-coded. Validation also requires: type
 KIT in at most two tracks across all locations, kit step bits 24-31 zero, AC 0 or
 1, and kit settings in range. The patterns payload is 31,104 bytes and the save
 builds each payload in a static RAM copy buffer padded to whole pages, so
-`.data` + `.bss` is about 112 KB (see [HARDWARE_STATUS.md](HARDWARE_STATUS.md)).
+`.data` + `.bss` is about 110.5 KiB (see [HARDWARE_STATUS.md](HARDWARE_STATUS.md)).
 
 This is one save region. Power loss during erase/program may lose the previous
 save; an incomplete new save is rejected. Preserving the old save across power

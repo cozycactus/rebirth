@@ -33,8 +33,12 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
   independent loops, live edits, note durations and overflow recovery.
 - Unix two-thread tests cover Stop/Panic during a pending gate commit.
 - UI tests cover Panic releases, selection/edit focus, mute/config presses and
-  stopped-only storage. All six OLED views render with the production framebuffer.
-- Storage tests cover CRC32, validated version-4 imports, and interrupted writes.
+  stopped-only storage. The six screens (Session view, pattern view, step editor,
+  pattern select, track config, Song editor) and the four kit screens (Session
+  lane strip, kit pattern view, kit step editor, kit config) render with the
+  production framebuffer.
+- Storage tests cover CRC32, validated version-4, version-5 and version-6 loads,
+  and interrupted writes.
 - Expander tests cover failed MCP23017 reads (state kept, chip reconfigured),
   failed step LED writes (direction and mask rewritten), chip resets found by
   config readback, retries limited to one per 100 ms on a dead bus, step
@@ -48,13 +52,22 @@ every 100 ms); without the LED chain GPIO 27 drives nothing.
   flams at exactly `flam_pulses`, note-offs as Note On velocity 0, releases on
   mute, Stop, Panic and type change, the two-kit limit, running status and Clock
   ahead of note bytes over a fake UART, the 192-byte flam reserve, save format v6
-  and loading real v4/v5 images, whole-detent encoder reading, and the kit OLED
-  screens. The sanitizer build passes too.
+  and loading real v4/v5 images, encoder clicks with detent-rate acceleration
+  for numbers only, and the kit OLED screens. The sanitizer build passes too.
 - RAM from `arm-none-eabi-size -A build/fw1/rp2040_sequencer.elf` after a fresh
-  build: `.data` 7,596 + `.bss` 104,664 = 112,260 bytes (about 110 KiB) of the
-  RP2040's 264 KiB. The design expected about 108 KB with the grown flash copy
-  buffer; the figure is about 4 KB above that and still fits.
-  The `.heap` and the two stack sections are separate (2,048 bytes each).
+  build: `.data` 8,524 + `.bss` 104,672 = 113,196 bytes (about 110.5 KiB) of the
+  RP2040's 264 KiB; the `.heap` and the two stack sections are separate (2,048
+  bytes each). The branch base has `.data` 4,396 + `.bss` 69,876 = 74,272 bytes
+  (about 72.5 KiB). The design expected about 108,000 bytes (about 105.5 KiB) with
+  the grown flash copy buffer; the build is about 5 KiB above that and still
+  fits. `.bss` grew by 34,796 bytes, as estimated: the kit steps and settings in
+  `g_seq` (16,536 bytes), the save's copy buffer `pattern_buf` (14,848 to 31,232
+  bytes), the prepared rows and the kit runtime state. The estimate left out
+  `.data`, which also holds the code that runs from RAM; it grew by 4,128 bytes.
+  The timer ISR grew from 2,736 to 5,880 bytes with the kit code inlined into it,
+  and the two functions it calls on kit releases and flams,
+  `kit_take_release()` (708 bytes) and `midi_try_send_bytes_reserve()` (232
+  bytes), run from RAM too.
 
 ## Needs Bench Verification
 
@@ -91,9 +104,8 @@ measured first with the same densest pattern load.
   kits no worse than the baseline; the worst wait for a Clock behind a note
   burst is about 1.3 ms by design.
 - `NOT VERIFIED` Longest Core 0 interrupts-off window while playing (editing,
-  launching, track-config edits, Song edits) under 100 us. Song list inserts and
-  removes near the front of a 256-entry song are estimated at 130-165 us under
-  `seq_lock` and are a known open item (JITTER_MEASUREMENT.md).
+  launching, track-config edits, Song edits) under 100 us, Song list edits near
+  the front of a long song excepted (Known Follow-Ups).
 - `NOT VERIFIED` UI loop time with the per-byte UART interrupt (3,125 interrupts
   per second at full rate) shows no new input lag or missed encoder edges.
 - `NOT VERIFIED` OLED kit screens (Session lane strip, kit pattern view, kit step
@@ -101,6 +113,9 @@ measured first with the same densest pattern load.
   screen are legible and not clipped on the real SSD1309.
 - `NOT VERIFIED` Edges per detent of the fitted encoders (`ENC_EDGES_PER_DETENT`
   is 4, EC11 type): one click moves one lane, one value or one config row.
+- `NOT VERIFIED` Encoder acceleration feels right: clicks under 60 ms apart
+  (`ENC_ACCEL_FAST_MS`) count x4 from the fifth and x8 from the eighth, for
+  numbers only. At full speed the tempo moves 0.8 BPM per click.
 
 ### Session panel
 
@@ -122,13 +137,9 @@ measured first with the same densest pattern load.
 
 ## Known Follow-Ups
 
-- Pattern select, the Song editor and the SYNTH/DRUM OUTPUT row still read raw
-  encoder edges, so one click can move several slots or pass through
-  intermediate modes. The kit screens, the Session view, the Pattern view and
-  the track config rows read whole detents.
 - Song list edits (`song_insert*()`, `song_remove()`, `song_move()`) near the
   front of a 256-entry song keep Core 0's interrupts off for an estimated
-  130-165 us (a `memmove` under `seq_lock`).
+  130-165 us (a `memmove` under `seq_lock`; JITTER_MEASUREMENT.md).
 
 ## Not Implemented Yet
 

@@ -277,7 +277,9 @@ traffic never trips the TX-overflow panic.
   today: the refreshed row is installed at the step boundary, and voices already sounding end at
   their countdown.
 - Stop, Panic, Start while playing and a play-mode change release all sounding kit voices and
-  cancel flams through the direct send path, before the MIDI Stop byte, never through `midi_buf`.
+  cancel flams through the direct send path, never through `midi_buf`. The releases are queued
+  before the MIDI Stop byte; the Stop, a real-time byte, may overtake them on the wire, and every
+  voice is still released before the next run.
   Panic still clears the TX queue and sends All Notes Off afterwards.
 - Launches, launch quantization and Song mode treat a kit like any track. A pending flam always
   resolves inside its step (`flam_pulses` <= 12 < 24 pulses), so it never crosses a launch point.
@@ -377,7 +379,9 @@ the focused location; leaving the kit moves to the next track as today.
 **One detent is one stop (A).** `encoder_get_delta()` today returns quadrature edges, multiplied by
 4 or 8 when turned fast. Walking the stops uses whole detents instead: edges are accumulated and
 divided by the edges per detent of the chosen encoder part (the remainder is kept), without
-acceleration. VALUE keeps its acceleration for tempo and values.
+acceleration. VALUE keeps its acceleration for tempo and values. (Final review: every screen reads
+whole detents, `encoder_get_turn()`. Numbers accelerate by detent rate, x4 then x8 on a fast turn,
+in one place, `encoder_accel_detent()`; choices never accelerate.)
 
 Each kit track remembers its last focused lane in UI RAM (A; not saved; BD, lane 1, after
 power-up, not the zero value AC). A pad press on a kit column moves the focus there onto that

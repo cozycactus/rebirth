@@ -109,15 +109,15 @@ location):
 
 | Section | Locks | Work inside |
 |---|---|---|
-| `transport_start()` while playing | playback, seq, TX | note-offs of up to 8 tracks as one send, Stop, position reset, the Song entry; lock released; each track's prepared row loaded in its own `seq_lock` section; then state and Start |
-| `transport_stop()` | playback, seq, TX | state, note-offs as one send, Stop |
-| `sequencer_panic()` | playback, TX | queue cleared, note-offs as one send, Stop, the 32 All Sound Off / All Notes Off messages as one 96-byte send |
+| `transport_start()` while playing | playback, seq, TX | kit releases as one send, note-offs of up to 8 tracks as a second send, Stop, position reset, the Song entry; lock released; each track's prepared row loaded in its own `seq_lock` section; then state and Start |
+| `transport_stop()` | playback, seq, TX | state, kit releases as one send, note-offs as a second send, Stop |
+| `sequencer_panic()` | playback, TX | queue cleared, kit releases as one send, note-offs as a second send, Stop, the 32 All Sound Off / All Notes Off messages as one 96-byte send |
 | `transport_set_mode()` with a change | playback, TX | as `transport_stop()`, plus 8 queue slots |
 | `transport_set_bpm()`, `transport_set_launch_quant()` | playback, seq | one or two values |
 | `transport_queue_pattern()`, `transport_queue_track_pattern()`, `transport_launch()` | playback, seq | 8 tracks' queue and current-location slots (transport fields only) |
 | `transport_clear_queue()`, `transport_clear_track_queue()` | playback | 8 or 1 queue slots |
 | `sequencer_snapshot()`, once per UI frame | playback, seq | 8 tracks' transport fields and the stored-mute byte of each playing location, in one section so a frame sees one transport state |
-| `sequencer_get_jitter_stats()`, `sequencer_reset_jitter_stats()` | playback | 11 values, or one flag |
+| `sequencer_get_jitter_stats()`, `sequencer_reset_jitter_stats()` | playback | 12 values, or one flag |
 | `transport_continue()` | playback | returns at once while playing (its 8-track load runs only when stopped) |
 | `sequencer_refresh_track_playback()`, after every edit | seq, twice | one location's steps (or kit steps) and config copied out; the row built with interrupts on; one prepared row (116 bytes) and its clip bit published |
 | `seq_kit_tracks()` | seq | one short section per location (32): the kit mask of one location's track types |

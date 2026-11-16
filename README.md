@@ -96,8 +96,8 @@ both DAC gains (`test_sync`, `test_sync_gain2`), the real timer/transport code
 (`test_playback`), flash storage (`test_storage`), the Session view
 (`test_session`), the LED frame builder (`test_led_frame`), the TCA8418 panel
 input (`test_panel_input`), the MCP23017 button/LED expanders and encoder
-buttons (`test_expanders`), whole-detent encoder reading (`test_encoder`) and
-UI/OLED rendering (`test_ui`). Launch
+buttons (`test_expanders`), encoder clicks and their acceleration
+(`test_encoder`) and UI/OLED rendering (`test_ui`). Launch
 quantization runs in `sequencer.c` and is tested in `test_playback`.
 Unix builds also exercise concurrent Stop/Panic during a pending gate commit.
 
@@ -131,6 +131,15 @@ buttons edit it.
 - **Encoder 2 (VALUE):** turn for tempo; press cycles the launch quantization
   (1 BAR, 1 BEAT, NEXT STEP, TRACK LOOP; 1 BAR after power-up); long press opens
   the pattern selector on the focus.
+- **Turning either encoder:** every screen counts whole clicks. A choice moves
+  one per click however fast the turn: the focus, a list row, a kit lane, TYPE,
+  OUTPUT, a kit step's value, the pattern slot and bank, the song cursor and a
+  song entry's pattern. A number moves one per slow click and faster on a fast
+  turn: clicks under 60 ms apart count 1 for the first four, then 4 each for
+  three more, then 8 each. A pause of 60 ms or a turn back starts again at 1.
+  Numbers are the tempo (0.1 BPM a step), a step's note and velocity, CHANNEL,
+  GATE, a drum's NOTE, FLAM, the kit velocities and NOTE rows, and a song
+  entry's repeats.
 - Pads, SCENE, MUTE and PLAY work on every screen. Outside the Session view a
   pad launches without moving the focus.
 - The step editor returns to the screen it was opened from. In the pattern
@@ -201,6 +210,9 @@ Three things follow:
   lower that velocity in the step editor.
 - The kick track and the kit's BD lane send the same note on the same channel,
   and a kit Note Off would cut the kick track's note, so use one or the other.
+  The same holds for two kits on one MIDI channel: a Note Off from one cuts the
+  other's note wherever their note maps share a note, so give each kit its own
+  channel.
 
 **Drums on the leftmost columns.** Inside one step the notes go out in track
 order, so the kick and the kit on the leftmost tracks get the earliest bytes.
@@ -218,10 +230,8 @@ step LEDs show the lane's non-zero steps; accent and flam are shown on the OLED
 strip (`.` off, `o` note, `O` accent, `f` flam). A long press on a step, or a
 TRACK press in the Pattern view, opens the kit step editor: TRACK moves the
 lane cursor, VALUE sets the lane's value, step buttons choose another step and
-a VALUE press returns. Whole encoder detents are read for TRACK in the Session
-view, Pattern view, kit step editor and track config, and for VALUE in the kit
-step editor and on the track config TYPE row; tempo, velocities, notes, channel,
-gate and flam keep the accelerated reading.
+a VALUE press returns. One click moves one lane, one row or one value step;
+the kit settings are numbers and speed up on a fast turn (see Live Controls).
 
 A kit track keeps its `step_t` data when its type changes, and its kit steps
 are kept too, so changing the type back restores either.
@@ -256,7 +266,7 @@ JITTER_MEASUREMENT.md — Timing measurement procedure
 test/
   test_pattern.c    — Pattern logic tests
   test_kit.c        — Kit lane, settings and glyph helpers
-  test_encoder.c    — Whole-detent encoder reading
+  test_encoder.c    — Encoder clicks and detent-rate acceleration
   test_sync.c       — Synchronization layer tests
   test_song.c       — Song mode tests
   test_playback.c   — Timer, transport, launch quantization, note and MIDI
@@ -293,9 +303,6 @@ test/
 
 ## Known Issues
 
-- Pattern select, the Song editor and the SYNTH/DRUM OUTPUT row still read raw
-  encoder edges, so one click can move several slots or pass through
-  intermediate modes. The kit screens read whole detents.
 - The kit feature is not bench verified; see [HARDWARE_STATUS.md](HARDWARE_STATUS.md).
 
 ## License
