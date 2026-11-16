@@ -325,9 +325,17 @@ void midi_send_continue(void) {
     midi_send_realtime(MIDI_CONTINUE, false);
 }
 
+// One send for all 32 messages keeps Panic to one short TX lock section.
 void midi_send_all_notes_off(void) {
+    uint8_t messages[16 * 6];
     for (uint8_t ch = 0; ch < 16; ch++) {
-        midi_send_cc(ch, MIDI_CC_ALL_SOUND_OFF, 0);
-        midi_send_cc(ch, MIDI_CC_ALL_NOTES_OFF, 0);
+        uint8_t *m = &messages[ch * 6];
+        m[0] = MIDI_CC | ch;
+        m[1] = MIDI_CC_ALL_SOUND_OFF;
+        m[2] = 0;
+        m[3] = MIDI_CC | ch;
+        m[4] = MIDI_CC_ALL_NOTES_OFF;
+        m[5] = 0;
     }
+    midi_send_bytes(messages, sizeof(messages));
 }

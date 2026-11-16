@@ -371,10 +371,12 @@ static void clear_runtime_note_state(void) {
 }
 
 static void stop_playback_outputs(void) {
+    // All note-offs in one MIDI send: one short TX lock section, not one per track.
     midi_buf_clear();
-    for (int i = 0; i < NUM_TRACKS; i++) {
-        send_note_off_if_active(i);
+    for (uint8_t i = 0; i < NUM_TRACKS; i++) {
+        prepare_note_off(i);
     }
+    midi_buf_flush();
     cv_gate_all_off();
     clear_runtime_note_state();
     midi_send_stop();
@@ -688,9 +690,13 @@ void transport_start(void) {
     }
 
     seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
 
+    // Stopped, the timer ISR leaves the prepared rows alone: load them with
+    // interrupts on between tracks, not inside one long playback-lock section.
     for (uint8_t track = 0; track < NUM_TRACKS; track++) load_prepared_track(track);
 
+    playback_irq_state = playback_lock();
     lock_state = seq_lock();
     t = (transport_t *)&g_seq.transport;
     t->state = TRANSPORT_PLAYING;

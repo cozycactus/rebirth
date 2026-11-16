@@ -4,7 +4,10 @@ The firmware is DIN MIDI only. USB MIDI support was removed so timing is not exp
 
 The current timing path also removes two major avoidable ISR costs:
 
-- MIDI bytes are queued into a UART TX ring and drained by UART0's TX interrupt.
+- MIDI bytes are queued into a UART TX ring and drained by UART0's TX interrupt,
+  one byte per interrupt with the UART FIFO off. The drain applies running status;
+  Clock and Start/Continue/Stop go out at the next message boundary, ahead of
+  queued note bytes.
 - Pattern and Song playback use prepared events. Core 0 builds the cache on initialization and after edits.
 
 The playback lock serializes timer processing and transport controls. This prevents
@@ -56,8 +59,9 @@ Use a logic analyzer or oscilloscope:
 - MIDI TX bursts on GPIO 0 can be compared against gate edges to quantify output skew.
 - Decode MIDI Clock separately: 24 messages per quarter, approximately 20.833 ms
   apart at 120 BPM. GPIO 7 measures the 96 PPQN timer, not wire-level MIDI jitter.
-- DIN messages share a serial link at 320 us per byte. Note bursts and the UART
-  FIFO can delay Clock bytes; gate alignment does not prove MIDI alignment.
+- DIN messages share a serial link at 320 us per byte. Behind a note burst a
+  Clock byte waits for about the rest of one message, not for the whole burst;
+  gate alignment does not prove MIDI alignment.
 - Session panel load case: in pattern select, press step button 13 to reset the
   counters, then return to the Session view (encoder 2 long press) and run the
   load there: scenes launching every bar, the 82 LEDs animating, the TCA8418
@@ -73,6 +77,52 @@ Use a logic analyzer or oscilloscope:
   tempo changes, Stop and Panic. Check that gates stay low after Stop/Panic.
 - Save/load are rejected while running. After stopping, test save/load and restart
   to check alarm recovery after flash lockout.
+
+## Core 0 Interrupts-Off Sections
+
+`seq_lock()`, the playback lock and the MIDI TX lock are spin locks: the core
+that holds one has its interrupts off. On Core 0 that holds back the UART TX
+interrupt, which runs once per MIDI byte. A window longer than 100 us (a third
+of a byte time) leaves a gap on the wire and can hold a Clock back. A section
+that finds its lock held by Core 1 also waits with interrupts off: for the
+playback lock up to the rest of a running timer ISR (`I`), for the other two
+the length of one Core 1 section (one prepared row, one song advance, one burst).
+
+The sections Core 0 can enter while playing, the flash save aside. MIDI goes
+out in batches, never message by message, and no section copies more than one
+location's data (`sequencer_snapshot()` reads one byte from each playing
+location):
+
+| Section | Locks | Work inside |
+|---|---|---|
+| `transport_start()` while playing | playback, seq, TX | note-offs of up to 8 tracks as one send, Stop, position reset, the Song entry; lock released; each track's prepared row loaded in its own `seq_lock` section; then state and Start |
+| `transport_stop()` | playback, seq, TX | state, note-offs as one send, Stop |
+| `sequencer_panic()` | playback, TX | queue cleared, note-offs as one send, Stop, the 32 All Sound Off / All Notes Off messages as one 96-byte send |
+| `transport_set_mode()` with a change | playback, TX | as `transport_stop()`, plus 8 queue slots |
+| `transport_set_bpm()`, `transport_set_launch_quant()` | playback, seq | one or two values |
+| `transport_queue_pattern()`, `transport_queue_track_pattern()`, `transport_launch()` | playback, seq | 8 tracks' queue and current-location slots (transport fields only) |
+| `transport_clear_queue()`, `transport_clear_track_queue()` | playback | 8 or 1 queue slots |
+| `sequencer_snapshot()`, once per UI frame | playback, seq | 8 tracks' transport fields and the stored-mute byte of each playing location, in one section so a frame sees one transport state |
+| `sequencer_get_jitter_stats()`, `sequencer_reset_jitter_stats()` | playback | 11 values, or one flag |
+| `transport_continue()` | playback | returns at once while playing (its 8-track load runs only when stopped) |
+| `sequencer_refresh_track_playback()`, after every edit | seq, twice | one location's steps and config copied out; the row built with interrupts on; one prepared row (113 bytes) and its clip bit published |
+| `seq_set_track_config()` | seq | one location's config per section, 32 sections, then one refresh per location |
+| `seq_toggle_track_mute()` | seq | the live mute bit; then one location's stored mute per section |
+| `seq_set_track_mute()`, `seq_get_track_mutes()`, `sequencer_clip_mask()`, `song_clear()`, `song_set_end_mode()`, `song_append*()` | seq | a few bytes |
+| `song_insert*()`, `song_remove()`, `song_move()` | seq | `memmove` of the entries after the edit point: up to 255 x 9 = 2,295 bytes (see below) |
+| UI (`ui.c`): step toggles, step editor, length -/+, track config read, focus, pattern select, Song editor reads | seq | one location's steps or config, one song entry, or a few bytes |
+| UART0 TX interrupt | TX | a byte or two (the FIFO is off) |
+| `midi_send_*()`, `midi_output_overflowed()`, `midi_clear_output_queue()` | TX | one message or one batch copied in, then the drain as above |
+
+`flash_storage_load()` refuses while playing; the flash save and
+`midi_wait_output_idle()` run only when stopped.
+
+Song list edits are the exception: `memmove` copies byte by byte (7-9 cycles a
+byte in the firmware's newlib), so an insert, remove or move near the start of a
+long song keeps Core 0's interrupts off for about 130-165 us at 125 MHz with 256
+entries, and under 100 us below about 150 entries. This is an estimate from the
+instruction count, not a measurement. The same section can also hold back
+Core 1's timer ISR, which takes `seq_lock` every step.
 
 ## Current Bench Status
 

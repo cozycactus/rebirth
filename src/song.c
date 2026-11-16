@@ -197,14 +197,16 @@ static void refresh_track_rows(uint8_t track) {
 
 void seq_set_track_config(uint8_t track, const track_config_t *config) {
     if (track >= NUM_TRACKS || !config) return;
-    uint32_t lock_state = seq_lock();
+    // One location per lock section keeps Core 0's interrupts-off windows short;
+    // Core 1 reads routing only from the prepared rows refreshed below.
     for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        uint32_t lock_state = seq_lock();
         // Routing is the track's; the stored mute stays per location.
         bool muted = g_seq.patterns[p].tracks[track].muted;
         g_seq.patterns[p].tracks[track] = *config;
         g_seq.patterns[p].tracks[track].muted = muted;
+        seq_unlock(lock_state);
     }
-    seq_unlock(lock_state);
     refresh_track_rows(track);
 }
 
@@ -215,16 +217,22 @@ void seq_toggle_track_mute(uint8_t track) {
     uint32_t lock_state = seq_lock();
     uint8_t playing = g_seq.transport.current_pattern[track];
     bool stored = playing < MAX_PATTERNS && g_seq.patterns[playing].tracks[track].muted;
-    if ((g_seq.track_mutes & bit) || stored) {
+    bool unmute = (g_seq.track_mutes & bit) || stored;
+    if (unmute) {
         g_seq.track_mutes &= (uint8_t)~bit;
-        for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
-            stored_cleared |= g_seq.patterns[p].tracks[track].muted;
-            g_seq.patterns[p].tracks[track].muted = false;
-        }
     } else {
         g_seq.track_mutes |= bit;
     }
     seq_unlock(lock_state);
+    if (!unmute) return;
+    // Stored mutes reach Core 1 only through the prepared rows refreshed below,
+    // so they are cleared one location per lock section.
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        lock_state = seq_lock();
+        stored_cleared |= g_seq.patterns[p].tracks[track].muted;
+        g_seq.patterns[p].tracks[track].muted = false;
+        seq_unlock(lock_state);
+    }
     if (stored_cleared) refresh_track_rows(track);
 }
 
