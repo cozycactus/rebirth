@@ -14,11 +14,17 @@ static const rgb_t WHITE = {255, 255, 255};
 static const rgb_t SCENE_GREEN = {0, 255, 0};
 static const rgb_t OFF = {0, 0, 0};
 
+// Rounds up, so a channel that is part of a hue never vanishes: at the dim
+// level orange stays (3,1,0) instead of collapsing into red's (3,0,0).
+static uint8_t shade_channel(uint8_t channel, uint8_t level) {
+    return (uint8_t)((channel * level + 254) / 255);
+}
+
 static rgb_t shade(rgb_t hue, uint8_t level) {
     rgb_t c = {
-        (uint8_t)(hue.r * level / 255),
-        (uint8_t)(hue.g * level / 255),
-        (uint8_t)(hue.b * level / 255),
+        shade_channel(hue.r, level),
+        shade_channel(hue.g, level),
+        shade_channel(hue.b, level),
     };
     return c;
 }

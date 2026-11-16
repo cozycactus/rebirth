@@ -63,13 +63,11 @@ void session_mute(uint8_t track) {
     if (track < NUM_TRACKS) seq_toggle_track_mute(track);
 }
 
-uint8_t session_common_row(void) {
-    transport_snapshot_t snap;
-    sequencer_snapshot(&snap);
-    uint8_t first = snap.current[0];
+uint8_t session_common_row(const transport_snapshot_t *snap) {
+    uint8_t first = snap->current[0];
     if (first / SLOTS_PER_BANK != bank) return NO_COMMON_ROW;
     for (uint8_t track = 1; track < NUM_TRACKS; track++) {
-        if (snap.current[track] != first) return NO_COMMON_ROW;
+        if (snap->current[track] != first) return NO_COMMON_ROW;
     }
     return first % SLOTS_PER_BANK;
 }

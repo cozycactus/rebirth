@@ -17,9 +17,10 @@ static const rgb_t HUE[NUM_TRACKS] = {
     {0, 220, 255}, {0, 60, 255}, {140, 0, 255}, {255, 0, 120},
 };
 
+// The frame builder rounds every non-zero channel up.
 static rgb_t scaled(rgb_t hue, int level) {
-    rgb_t c = {(uint8_t)(hue.r * level / 255), (uint8_t)(hue.g * level / 255),
-               (uint8_t)(hue.b * level / 255)};
+    rgb_t c = {(uint8_t)((hue.r * level + 254) / 255), (uint8_t)((hue.g * level + 254) / 255),
+               (uint8_t)((hue.b * level + 254) / 255)};
     return c;
 }
 static rgb_t white(int level) { return scaled((rgb_t){255, 255, 255}, level); }
@@ -234,6 +235,39 @@ static void test_play_and_beat(void) {
     CHECK(same(light(&s, LED_BEAT), white(LED_LEVEL_FULL)));
 }
 
+static bool is_black(rgb_t c) { return same(c, BLACK); }
+
+// Pads of all eight tracks at one level: a stored clip (dim), the current clip
+// while stopped (half) or while playing (full).
+static void track_pads_at(int level_index, rgb_t out[NUM_TRACKS]) {
+    led_state_t s = base_state();
+    for (int t = 0; t < NUM_TRACKS; t++) {
+        set_clip(&s, t, 0);
+        s.current[t] = level_index == 0 ? 1 : 0;
+    }
+    s.playing = level_index == 2;
+    for (int t = 0; t < NUM_TRACKS; t++) out[t] = light(&s, LED_PAD(t, 0));
+}
+
+static void test_track_hues_stay_distinct_at_every_level(void) {
+    for (int level = 0; level < 3; level++) {
+        rgb_t pads[NUM_TRACKS];
+        track_pads_at(level, pads);
+        for (int a = 0; a < NUM_TRACKS; a++) {
+            CHECK(!is_black(pads[a]));
+            for (int b = a + 1; b < NUM_TRACKS; b++) CHECK(!same(pads[a], pads[b]));
+        }
+    }
+    // Dim track green (a stored clip of track 3) is not dim scene green (a row
+    // some tracks play).
+    led_state_t s = base_state();
+    s.playing = true;
+    set_clip(&s, 3, 2);
+    s.current[0] = 5;
+    CHECK(!same(light(&s, LED_PAD(3, 2)), light(&s, LED_SCENE(5))));
+    CHECK(same(light(&s, LED_SCENE(5)), green(LED_LEVEL_DIM)));
+}
+
 static led_state_t busiest_state(void) {
     led_state_t s = base_state();
     s.playing = true;
@@ -294,5 +328,6 @@ int main(void) {
     RUN(test_play_and_beat);
     RUN(test_busiest_designed_frame_fits_budget);
     RUN(test_budget_scales_only_dynamic_current);
+    RUN(test_track_hues_stay_distinct_at_every_level);
     return 0;
 }

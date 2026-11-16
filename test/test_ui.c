@@ -649,9 +649,9 @@ static void test_session_passes_take_no_playback_lock(void) {
     for (int pass = 0; pass < 100; pass++) ui_update();
     CHECK(ui.mode == UI_SESSION);
     CHECK(playback_locks == 0);
-    ui_render();    // its snapshot plus session_common_row's
+    ui_render();    // one snapshot serves the lights, the OLED and the step LEDs
     fake_before_lock = NULL;
-    CHECK(playback_locks <= 2);
+    CHECK(playback_locks == 1);
 }
 
 // The timer ISR runs through the bar line just before a session launch takes

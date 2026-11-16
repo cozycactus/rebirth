@@ -162,16 +162,21 @@ static void test_bank_change_keeps_focus(void) {
     CHECK(session_bank() == 1);
 }
 
+static uint8_t common_row(void) {
+    transport_snapshot_t s = snap();
+    return session_common_row(&s);
+}
+
 static void test_common_row(void) {
     reset();
     for (uint8_t t = 0; t < NUM_TRACKS; t++) session_pad(t, 2, false);
-    CHECK(session_common_row() == 2);
+    CHECK(common_row() == 2);
     session_pad(5, 4, false);
-    CHECK(session_common_row() == 0xFF);
+    CHECK(common_row() == 0xFF);
     session_pad(5, 2, false);
-    CHECK(session_common_row() == 2);
+    CHECK(common_row() == 2);
     session_next_bank();
-    CHECK(session_common_row() == 0xFF);
+    CHECK(common_row() == 0xFF);
 }
 
 int main(void) {

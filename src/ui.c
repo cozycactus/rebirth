@@ -927,7 +927,7 @@ static void render_session_view(const transport_snapshot_t *snap) {
     uint8_t bar_step = snap->state == TRANSPORT_PLAYING
         ? (uint8_t)((snap->pulse_count / PULSES_PER_STEP) % STEPS_PER_PATTERN)
         : STEPS_PER_PATTERN;    // none
-    display_draw_session_view(session_bank(), session_common_row(),
+    display_draw_session_view(session_bank(), session_common_row(snap),
                               focus.track, focus.location, length,
                               g_seq.transport.bpm, transport_get_launch_quant(),
                               bar_step);

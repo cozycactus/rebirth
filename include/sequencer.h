@@ -306,7 +306,7 @@ void cv_gate_all_off(void);
 void display_init(void);
 void display_clear(void);
 void display_update(void);
-// common_row: session_common_row(), 0xFF = MIXED. bar_step: global step in the
+// common_row: session_common_row(&snap), 0xFF = MIXED. bar_step: global step in the
 // bar (0-15); 16 or more lights none (stopped).
 void display_draw_session_view(uint8_t bank, uint8_t common_row,
                                uint8_t focus_track, uint8_t focus_location, uint8_t focus_length,

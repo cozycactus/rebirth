@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "sequencer.h"
 
 /* Session view model (Core 0 only). The grid shows one bank of 8 slots per
  * track: column = track, row = slot, location = bank * 8 + row. */
@@ -34,8 +35,9 @@ bool session_scene(uint8_t row);
 
 void session_mute(uint8_t track);
 
-// Slot 0..7 of the shown bank when every track's current location is on it in
-// the same slot, else 0xFF.
-uint8_t session_common_row(void);
+// Slot 0..7 of the shown bank when every track's current location in `snap`
+// is on it in the same slot, else 0xFF. Takes no lock: pass the frame's
+// snapshot.
+uint8_t session_common_row(const transport_snapshot_t *snap);
 
 #endif
