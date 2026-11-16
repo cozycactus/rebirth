@@ -217,7 +217,7 @@ void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mod
 //   Line 4 (y=36):  Beat markers / position
 //   Line 5+ (y=44): Mute status
 
-void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step) {
+void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step, int8_t held_step) {
     // ── Header line ──
     const char *transport_sym;
     switch (g_seq.transport.state) {
@@ -246,12 +246,21 @@ void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step) 
         case OUTPUT_BOTH:       out_str = "M+C"; break;
         default:                out_str = "MIDI"; break;
     }
-    snprintf(info, sizeof(info), "Ch:%-2d %-4s L:%-2d",
-             tc->midi_channel + 1, out_str, pattern_get_track_length(p, track));
+    bool held = held_step >= 0 && held_step < STEPS_PER_PATTERN;
+    if (held) {
+        // Values of the step held for editing replace the track info
+        const step_t *st = &p->steps[track][held_step];
+        char note_str[5];
+        note_to_str(st->note, note_str);
+        snprintf(info, sizeof(info), "S%02d Note:%-4s Vel:%3d", held_step + 1, note_str, st->velocity);
+    } else {
+        snprintf(info, sizeof(info), "Ch:%-2d %-4s L:%-2d",
+                 tc->midi_channel + 1, out_str, pattern_get_track_length(p, track));
+    }
     ssd1309_draw_string(0, 10, info, false);
 
     // ── Step grid ──
-    draw_step_grid(p, track, step, -1);     // -1 = no selected step
+    draw_step_grid(p, track, step, held ? held_step : -1);  // -1 = no selected step
 
     // ── Mute indicators ──
     uint8_t mutes = seq_get_track_mutes();

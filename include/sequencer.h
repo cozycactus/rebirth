@@ -317,7 +317,7 @@ void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mod
                                uint8_t focus_track, uint8_t focus_location, uint8_t focus_length,
                                float bpm, launch_quant_t quant, uint8_t bar_step);
 const char *display_launch_quant_name(launch_quant_t quant);
-void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step);
+void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step, int8_t held_step);
 void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step);
 void display_draw_pattern_select(uint8_t pattern,
                                   uint8_t length,

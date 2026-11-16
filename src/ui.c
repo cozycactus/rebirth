@@ -41,6 +41,13 @@ typedef struct {
     // PATTERN_VIEW
     uint8_t selected_track;         // 0–7
 
+    // PATTERN_VIEW hold gesture
+    uint16_t grid_hold;                         // Steps pressed in Pattern View and still down
+    uint16_t grid_tap_pending;                  // Subset that still toggles on release
+    uint32_t grid_press_ms[NUM_STEP_BUTTONS];   // When each held step was pressed
+    uint16_t grid_enc_target[NUM_ENCODERS];     // Steps held while that encoder's button was down
+    uint16_t grid_enc_long_done[NUM_ENCODERS];  // Targets that already got that button's long press
+
     // STEP_EDIT
     uint8_t edit_step;              // 0–15
     ui_mode_t step_edit_return;     // Screen the step editor was opened from
@@ -103,6 +110,12 @@ static void drop_step_gestures(void) {
     ui.step_gestures = 0;
     ui.select_short_pending = 0;
     ui.step_short_pending = 0;
+    ui.grid_hold = 0;
+    ui.grid_tap_pending = 0;
+    for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
+        ui.grid_enc_target[enc] = 0;
+        ui.grid_enc_long_done[enc] = 0;
+    }
 }
 
 // Toggles the steps in `mask` of one track at one location and refreshes its
@@ -308,55 +321,10 @@ static void handle_session_view(int8_t e1d, int8_t e2d,
 
 // ─── Pattern View Handler ──────────────────────────────────────
 
-static void handle_pattern_view(int8_t e1d, int8_t e2d,
-                                 button_event_t e1b, button_event_t e2b,
-                                 step_buttons_t *steps) {
-    // Enc1 rotate: select track
-    if (e1d != 0) {
-        int16_t t = (int16_t)ui.selected_track + e1d;
-        ui.selected_track = clamp_i8(t, 0, NUM_TRACKS - 1);
-    }
-
-    // Enc2 rotate: adjust BPM
-    if (e2d != 0) {
-        float new_bpm = g_seq.transport.bpm + (float)e2d * 0.1f;
-        transport_set_bpm(new_bpm);
-    }
-
-    // Enc1 press: enter step edit
-    if (e1b == BTN_PRESS) {
-        ui.mode = UI_STEP_EDIT;
-        ui.edit_step = 0;
-        ui.step_edit_return = UI_PATTERN_VIEW;
-    }
-
-    // Enc1 long: back to the Session view
-    if (e1b == BTN_LONG_PRESS) {
-        ui.mode = UI_SESSION;
-    }
-
-    // Enc2 long press: enter pattern select
-    if (e2b == BTN_LONG_PRESS) {
-        ui.mode = UI_PATTERN_SELECT;
-        ui.select_pattern = g_seq.active_pattern[ui.selected_track];
-    }
-
-    // Step buttons: toggle steps on current track (active_pattern is Core 0's)
-    toggle_steps(ui.selected_track, g_seq.active_pattern[ui.selected_track],
-                 steps->pressed);
-}
-
-// ─── Step Edit Handler ─────────────────────────────────────────
-
-static void handle_step_edit(int8_t e1d, int8_t e2d,
-                              button_event_t e1b, button_event_t e2b,
-                              step_buttons_t *steps) {
-    uint32_t lock_state = seq_lock();
-    uint8_t track = ui.selected_track;
-    uint8_t pattern_index = g_seq.active_pattern[track];
+// Applies Step Edit encoder input to one step. Returns true if the step changed.
+static bool apply_step_edit(step_t *st, int8_t e1d, int8_t e2d,
+                            button_event_t e1b, button_event_t e2b) {
     bool changed = false;
-    pattern_t *pat = &g_seq.patterns[pattern_index];
-    step_t *st = &pat->steps[track][ui.edit_step];
 
     // Enc1 rotate: change note
     if (e1d != 0) {
@@ -391,6 +359,197 @@ static void handle_step_edit(int8_t e1d, int8_t e2d,
         st->flags = (st->flags ^ STEP_FLAG_TIE) & (uint8_t)~STEP_FLAG_SLIDE;
         changed = true;
     }
+
+    return changed;
+}
+
+// For every step in mask: activate it if inactive, then apply_step_edit().
+// Returns true if any step changed; an activation counts. Caller holds seq_lock().
+static bool edit_held_steps(pattern_t *pat, uint8_t track, uint16_t mask,
+                            int8_t e1d, int8_t e2d,
+                            button_event_t e1b, button_event_t e2b) {
+    bool changed = false;
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (!(mask & (1u << s))) continue;
+        step_t *st = &pat->steps[track][s];
+        if (!(st->flags & STEP_FLAG_ACTIVE)) {
+            pattern_toggle_step(pat, track, s);
+            changed = true;
+        }
+        if (apply_step_edit(st, e1d, e2d, e1b, e2b)) changed = true;
+    }
+    return changed;
+}
+
+static void handle_pattern_view(int8_t e1d, int8_t e2d,
+                                 button_event_t e1b, button_event_t e2b,
+                                 step_buttons_t *steps) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    uint16_t down_or_released = (uint16_t)(steps->held | steps->released);
+
+    // 1. Steps already held when this update began (still down, or released
+    //    just now). Rotation edits only these.
+    uint16_t turn_targets = ui.grid_hold & down_or_released;
+
+    // 2. Holds that start in this view.
+    for (uint8_t s = 0; s < NUM_STEP_BUTTONS; s++) {
+        if (steps->pressed & (1u << s)) ui.grid_press_ms[s] = now;
+    }
+    ui.grid_hold |= steps->pressed;
+    ui.grid_tap_pending |= steps->pressed;
+
+    // 3. Keep only buttons that are down now or were released in this update.
+    ui.grid_hold &= down_or_released;
+    ui.grid_tap_pending &= ui.grid_hold;
+
+    // 4. An encoder button that is down while steps are held joins the gesture.
+    for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
+        if (encoder_button_held(enc) && ui.grid_hold) {
+            ui.grid_enc_target[enc] |= ui.grid_hold;
+            ui.grid_tap_pending &= (uint16_t)~ui.grid_hold;
+        }
+    }
+    // A button event belongs only to the steps that were held while its
+    // button was down.
+    uint16_t e1_targets = ui.grid_enc_target[0];
+    uint16_t e2_targets = ui.grid_enc_target[1];
+
+    // A long press that already fired reaches, once, each step that joined
+    // its button after it fired.
+    uint16_t long_late[NUM_ENCODERS];
+    for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
+        long_late[enc] = 0;
+        if (ui.grid_enc_long_done[enc] && encoder_button_held(enc)) {
+            long_late[enc] = ui.grid_enc_target[enc] &
+                             (uint16_t)~ui.grid_enc_long_done[enc];
+            ui.grid_enc_long_done[enc] |= long_late[enc];
+        }
+    }
+    bool gesture = ui.grid_hold || ui.grid_enc_target[0] || ui.grid_enc_target[1];
+
+    // 5. Dispatch. With a gesture active, input edits its targets or is
+    //    ignored; without one, the encoders navigate as before.
+    bool turn_edit = (e1d != 0 || e2d != 0) && turn_targets;
+    bool e1_edit = (e1b == BTN_PRESS || e1b == BTN_LONG_PRESS) && e1_targets;
+    bool e2_edit = e2b == BTN_LONG_PRESS && e2_targets;
+    if (turn_edit) ui.grid_tap_pending &= (uint16_t)~turn_targets;
+    // A turn in the same update as a first press does not edit that step,
+    // but its order relative to the press is unknown: cancel the tap.
+    if (e1d != 0 || e2d != 0) ui.grid_tap_pending &= (uint16_t)~steps->pressed;
+    if (e1_edit) ui.grid_tap_pending &= (uint16_t)~e1_targets;
+    if (e2_edit) ui.grid_tap_pending &= (uint16_t)~e2_targets;
+    if (e1_edit && e1b == BTN_LONG_PRESS) ui.grid_enc_long_done[0] |= e1_targets;
+    if (e2_edit) ui.grid_enc_long_done[1] |= e2_targets;
+    bool late_edit = long_late[0] || long_late[1];
+
+    if (!gesture) {
+        // Enc1 rotate: select track
+        if (e1d != 0) {
+            int16_t t = (int16_t)ui.selected_track + e1d;
+            ui.selected_track = clamp_i8(t, 0, NUM_TRACKS - 1);
+        }
+
+        // Enc2 rotate: adjust BPM
+        if (e2d != 0) {
+            float new_bpm = g_seq.transport.bpm + (float)e2d * 0.1f;
+            transport_set_bpm(new_bpm);
+        }
+
+        // Enc1 press: enter step edit
+        if (e1b == BTN_PRESS) {
+            ui.mode = UI_STEP_EDIT;
+            ui.edit_step = 0;
+            ui.step_edit_return = UI_PATTERN_VIEW;
+        }
+
+        // Enc1 long: back to the Session view
+        if (e1b == BTN_LONG_PRESS) {
+            ui.mode = UI_SESSION;
+        }
+
+        // Enc2 long press: enter pattern select
+        if (e2b == BTN_LONG_PRESS) {
+            ui.mode = UI_PATTERN_SELECT;
+            ui.select_pattern = g_seq.active_pattern[ui.selected_track];
+        }
+    }
+
+    // 6. Taps: a short hold with no encoder input toggles on release.
+    uint16_t taps = 0;
+    uint16_t tap_releases = steps->released & ui.grid_tap_pending;
+    for (uint8_t s = 0; s < NUM_STEP_BUTTONS; s++) {
+        if ((tap_releases & (1u << s)) &&
+            (uint32_t)(now - ui.grid_press_ms[s]) < MCP_LONG_PRESS_MS) {
+            taps |= (uint16_t)(1u << s);
+        }
+    }
+
+    if (turn_edit || e1_edit || e2_edit || late_edit || taps) {
+        bool changed = false;
+        uint8_t track = ui.selected_track;
+        uint8_t pattern_index;
+        uint32_t lock_state = seq_lock();
+        pattern_index = g_seq.active_pattern[track];
+        pattern_t *pat = &g_seq.patterns[pattern_index];
+        if (turn_edit &&
+            edit_held_steps(pat, track, turn_targets, e1d, e2d, BTN_NONE, BTN_NONE)) {
+            changed = true;
+        }
+        if (e1_edit &&
+            edit_held_steps(pat, track, e1_targets, 0, 0, e1b, BTN_NONE)) {
+            changed = true;
+        }
+        if (e2_edit &&
+            edit_held_steps(pat, track, e2_targets, 0, 0, BTN_NONE, e2b)) {
+            changed = true;
+        }
+        if (long_late[0] &&
+            edit_held_steps(pat, track, long_late[0], 0, 0, BTN_LONG_PRESS, BTN_NONE)) {
+            changed = true;
+        }
+        if (long_late[1] &&
+            edit_held_steps(pat, track, long_late[1], 0, 0, BTN_NONE, BTN_LONG_PRESS)) {
+            changed = true;
+        }
+        for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+            if (taps & (1u << s)) {
+                pattern_toggle_step(pat, track, s);
+                changed = true;
+            }
+        }
+        seq_unlock(lock_state);
+        if (changed) {
+            sequencer_refresh_track_playback(track, pattern_index);
+        }
+    }
+
+    // 7. Released steps leave the hold.
+    ui.grid_hold &= (uint16_t)~steps->released;
+    ui.grid_tap_pending &= (uint16_t)~steps->released;
+
+    // 8. An encoder whose button is up gives up its targets. This runs after
+    //    the dispatch because a short press arrives once the button is up.
+    for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
+        if (!encoder_button_held(enc)) {
+            ui.grid_enc_target[enc] = 0;
+            ui.grid_enc_long_done[enc] = 0;
+        }
+    }
+}
+
+// ─── Step Edit Handler ─────────────────────────────────────────
+
+static void handle_step_edit(int8_t e1d, int8_t e2d,
+                              button_event_t e1b, button_event_t e2b,
+                              step_buttons_t *steps) {
+    uint32_t lock_state = seq_lock();
+    uint8_t track = ui.selected_track;
+    uint8_t pattern_index = g_seq.active_pattern[track];
+    bool changed = false;
+    pattern_t *pat = &g_seq.patterns[pattern_index];
+    step_t *st = &pat->steps[track][ui.edit_step];
+
+    if (apply_step_edit(st, e1d, e2d, e1b, e2b)) changed = true;
 
     // Enc2 press: back to the screen the editor was opened from
     if (e2b == BTN_PRESS) {
@@ -948,13 +1107,19 @@ void ui_render(void) {
             if (step_leds_available()) step_leds_set_mask(build_session_mask(&snap));
             break;
 
-        case UI_PATTERN_VIEW:
+        case UI_PATTERN_VIEW: {
+            int8_t held_step = -1;          // lowest held step, -1 = none
+            for (int8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+                if (ui.grid_hold & (1u << s)) { held_step = s; break; }
+            }
             display_draw_pattern_view(
                 seq_active_pattern(ui.selected_track),
                 ui.selected_track,
-                g_seq.transport.current_track_step[ui.selected_track]);
+                g_seq.transport.current_track_step[ui.selected_track],
+                held_step);
             display_draw_bpm(g_seq.transport.bpm);
             break;
+        }
 
         case UI_STEP_EDIT:
             display_draw_step_edit(
