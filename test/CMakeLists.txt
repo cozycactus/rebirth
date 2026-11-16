@@ -89,3 +89,16 @@ add_executable(test_ui
 )
 target_include_directories(test_ui PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME ui_tests COMMAND test_ui)
+
+add_executable(test_session
+    test_session.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/session.c
+    ${REBIRTH_SRC}/sequencer.c
+    ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/song.c
+    ${REBIRTH_SRC}/shared_state.c
+    ${REBIRTH_SRC}/midi_out.c
+)
+target_include_directories(test_session PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME session_tests COMMAND test_session)
