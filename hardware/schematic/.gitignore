@@ -3,3 +3,5 @@
 *-backups/
 fp-info-cache
 gen/__pycache__/
+sim/out/
+sim/__pycache__/

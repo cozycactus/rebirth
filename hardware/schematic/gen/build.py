@@ -490,7 +490,7 @@ def cv_stage(sh, unit, Xo, Yo, n, dac_net, refs):
     pull_down(sh, rpd, "100k", Xo - 20.32, Yo - 2.54, dac_net)
     sh.wire((Xo - 7.62, Yo + 2.54), (Xo - 10.16, Yo + 2.54), (Xo - 10.16, Yo + 15.24), (Xo + 1.27, Yo + 15.24))
     sh.wire((Xo - 10.16, Yo + 7.62), (Xo - 3.81, Yo + 7.62))
-    cap(sh, rcf, "100p", Xo, Yo + 7.62, {"1": inv, "2": out}, horiz=True,
+    cap(sh, rcf, "1n C0G", Xo, Yo + 7.62, {"1": inv, "2": out}, horiz=True,
         fields=((0, 3.048, "center"), (0, 5.08, "center")), hide_val=True)
     sh.wire((Xo + 3.81, Yo + 7.62), (Xo + 10.16, Yo + 7.62), (Xo + 10.16, Yo))
     sh.wire((Xo + 7.62, Yo), (Xo + 11.43, Yo))
@@ -539,12 +539,13 @@ def sheet_cv(d):
     note(sh, 180.34, 50.8,
          "U503 MCP6004 (rail-to-rail, VBUS): unity gain at DC. R511-R514 (1 k) sit inside",
          "the loop: R521-R524 (10 k) take the feedback from the jack side, C511-C514",
-         "(100 pF) close the loop at high frequency, so the load does not shift the pitch",
-         "and cable capacitance does not upset the stage. R515-R518 (100 k) hold the inputs",
-         "at 0 V while the DACs are unpowered or in their power-on shutdown.",
-         "The output cannot reach 0 V exactly (MCP6004 swing, ~25 mV at light load = up to",
-         "30 cents sharp at note 24). DAC gain/offset errors (about +-2 % FSR) and op-amp",
-         "offset need a per-channel calibration in firmware; this board has no trimmers.",
+         "(1 nF C0G) close the loop at high frequency, so the load does not shift the pitch",
+         "and cable capacitance does not upset the stage (SPICE: 6 % overshoot at 1 nF, 28 % at",
+         "10 nF; SIMULATION.md). R515-R518 (100 k) hold the inputs at 0 V while the DACs are",
+         "unpowered or in their power-on shutdown. Near 0 V the jack follows the DAC only above",
+         "~10 mV (MCP4822 output swing; the MCP6004 reaches ~0.2 mV into a grounded load):",
+         "up to ~17 cents sharp at note 24 with the op-amp offset. DAC gain/offset errors (about",
+         "+-2 % FSR) and op-amp offset need a per-channel calibration in firmware; no trimmers.",
          "R511-R514 limit a short to GND to ~5 mA; external voltages are not clamped.",
          "J501-J504: rear 3.5 mm TS jacks (PJ398SM type) to a synth's pitch CV input.")
 

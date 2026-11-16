@@ -1,0 +1,95 @@
+* models.lib: behavioural models for the benches in run.py (ngspice 46).
+*
+* None of these is a vendor model. Each is built from the datasheet numbers
+* quoted next to it; what a datasheet does not give is a parameter and the
+* benches sweep it. SIMULATION.md says what each model can and cannot show.
+*
+* Copyright (C) 2026 ReBirth contributors. GPL-3.0-or-later.
+
+* ------------------------------------------------------------------ MCP6004
+* One channel of the MCP6004 (Microchip DS21733, MCP6001/2/4), generic
+* rail-to-rail in/out macro-model:
+*   GBW 1 MHz, SR 0.6 V/us, AOL 112 dB typ, VOS +-4.5 mV max (parameter),
+*   input common mode VSS-0.3 .. VDD+0.3 V, input C 6 pF CM / 3 pF diff,
+*   output within 25 mV of a rail at RL = 10 k to VDD/2 (here: 5 mV hard
+*   limit + RO), short-circuit current +-23 mA at 5.5 V.
+* Not in the datasheet, so parameters: FP2, the second pole (PM at G = +1
+* is given as 90 deg typ, so FP2 >> GBW; 4 MHz is pessimistic), and RO, the
+* open-loop output resistance.
+.subckt MCP6004G inp inn out vdd vss params: VOS=0 RO=100 FP2=4e6
+Cinp inp vss 6p
+Cinn inn vss 6p
+Cdif inp inn 3p
+Dip1 inp vdd DESD
+Dip2 vss inp DESD
+Din1 inn vdd DESD
+Din2 vss inn DESD
+Emid mid 0 vol='(V(vdd)+V(vss))/2'
+* transconductance stage, current limited: SR = 0.6 mA / 1 nF = 0.6 V/us
+Bgm mid n1 I='6e-4*tanh((V(inp)-V(inn)+VOS)*6.2832e-3/6e-4)'
+* dominant pole: gm*R1 = 4e5 (112 dB), 2.5 Hz, GBW = gm/(2 pi C1) = 1 MHz
+R1 n1 mid 6.366e7
+C1 n1 mid 1n
+* keep the integrator near the rails in saturation (no long wind-up)
+Ehi chi 0 vol='V(vdd)+0.3'
+Elo clo 0 vol='V(vss)-0.3'
+Dhi n1 chi DCLMP
+Dlo clo n1 DCLMP
+* second pole
+E2 n2a 0 n1 0 1
+R2 n2a n2 1k
+C2 n2 0 {1/(6.2832*1k*FP2)}
+* output: 5 mV from either rail, then RO with a +-23 mA current limit
+Bo n3 0 V='min(max(V(n2), V(vss)+5m), V(vdd)-5m)'
+Bro n3 out I='23m*tanh((V(n3)-V(out))/(RO*23m))'
+Do1 out vdd DESD
+Do2 vss out DESD
+.model DCLMP D(IS=1e-12 N=0.1)
+.model DESD D(IS=1e-15 N=1 RS=5)
+.ends MCP6004G
+
+* ------------------------------------------------------------------ logic buffers
+* Push-pull CMOS output: threshold VTH on the input, edge time TE, output
+* resistance ROUT. Rail = vcc.
+*   74AHCT125 on VBUS: TTL input (VIH 2.0 / VIL 0.8 V, VTH ~1.5 V), VOH >= 3.94 V
+*     at -8 mA and VOL <= 0.36 V at 8 mA with VCC = 4.5 V -> ROUT <= 70 / 45 R.
+*   74LVC1G17 on +3V3: VOL <= 0.55 V at 24 mA, VOH >= 2.3 V at -24 mA (VCC 3 V)
+*     -> ROUT <= 23 R sinking, <= 30 R sourcing.
+.subckt CMOSBUF in out vcc gnd params: VTH=1.5 TE=2n ROUT=40
+Bsw int gnd V='V(vcc,gnd)*(0.5+0.5*tanh((V(in,gnd)-VTH)/0.05))'
+Rte int int2 1
+Cte int2 gnd {TE/2.2}
+Rout int2 out {ROUT}
+.ends CMOSBUF
+
+* ------------------------------------------------------------------ diodes
+* 1N4148W (D401, receiver protection diodes)
+.model D1N4148 D(IS=2.52n RS=0.568 N=1.752 CJO=4p M=0.4 TT=20n BV=100 IBV=100u)
+* opto input LEDs (GaAs IR). VF fitted to the datasheet points:
+*   6N138 (Broadcom/Vishay): VF 1.4 V typ / 1.7 V max at IF = 1.6 mA
+*   H11L1: VF 1.2 V typ / 1.5 V max at IF = 10 mA
+.model LED6N138 D(IS=1.2e-14 N=2.1 RS=1 CJO=30p)
+.model LED6N138MAX D(IS=4.9e-17 N=2.1 RS=1 CJO=30p)
+.model LEDH11L1 D(IS=9.5e-13 N=2.0 RS=1 CJO=30p)
+.model LEDH11L1MAX D(IS=5.8e-15 N=2.0 RS=1 CJO=30p)
+
+* ------------------------------------------------------------------ ferrite bead
+* 1 kOhm at 100 MHz, 0603 (MMZ1608Y102B class): DCR ~0.35 R, inductive below
+* ~30 MHz, resistive at 100 MHz. Only its low-frequency part matters here.
+.subckt FB1K a b
+Rdc a m 0.35
+L1 m b 1.5u
+Rp m b 1k
+.ends FB1K
+
+* ------------------------------------------------------------------ MIDI cable
+* One 5 m section of shielded twisted pair, pins 4 and 5 (loop): 0.5 uH/m loop
+* inductance, 80 pF/m between the wires, 0.17 R/m loop resistance.
+.subckt MIDICAB5M a4 a5 b4 b5
+R4 a4 m4 0.43
+L4 m4 b4 1.25u
+R5 a5 m5 0.43
+L5 m5 b5 1.25u
+C1 a4 a5 200p
+C2 b4 b5 200p
+.ends MIDICAB5M

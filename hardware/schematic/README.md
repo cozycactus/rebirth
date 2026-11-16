@@ -82,12 +82,14 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
    unpowered chain. R201 must stay >= 82 k (limit max 369 mA); if the bench raises the
    firmware budget, recompute R201 from TPS2553 eq. 1-3.
 2. **CV buffers keep the 1 k output resistor inside the loop** (R52x feedback from the
-   jack side, C51x closing the loop at HF): no DC error from the load, stable into cable
-   capacitance, a short to GND draws at most ~5 mA. R515-R518 (100 k) hold the buffer inputs at
-   0 V while the DACs are unpowered or in their power-on shutdown. Accuracy: the MCP6004
-   cannot reach exactly 0 V (~25 mV at light load = up to 30 cents sharp at note 24), and
-   the DAC's gain/offset errors (about +-2 % FSR) need a per-channel calibration in
-   firmware, which does not exist yet.
+   jack side, C51x 1 nF C0G closing the loop at HF): no DC error from the load, damped
+   into cable capacitance (6 % overshoot at 1 nF, 28 % at 10 nF; with 100 pF it rang at
+   34-38 % / 66-68 %, see SIMULATION.md), a short to GND draws at most ~5 mA. R515-R518
+   (100 k) hold the buffer inputs at 0 V while the DACs are unpowered or in their power-on
+   shutdown. Accuracy: near 0 V the jack follows the DAC only above ~10 mV (MCP4822 swing;
+   the MCP6004 itself reaches ~0.2 mV into a grounded load), up to ~17 cents sharp at
+   note 24 with the op-amp offset, and the DAC's gain/offset errors (about +-2 % FSR)
+   need a per-channel calibration in firmware, which does not exist yet.
 3. **Gates are 5 V** (74AHCT125 on VBUS, 1 k series, 100 k pull-downs at the inputs and at
    the jacks). ARCHITECTURE.md only says the GPIOs are 3.3 V logic; see open point 4.
 4. **Encoder RC filters** (10 k pull-up, 10 k series, 10 nF) on A/B; the internal
@@ -177,4 +179,7 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
   MIDI OUT short-circuit current; the fixes and open points above come from that review,
   checked against the datasheets. A reported reversed SK6812 pinout was a documentation
   numbering difference, not a wiring error.
-- Not done: SPICE simulation of the CV buffers and the RC filters, PCB, BOM with MPNs.
+- SPICE simulation of the CV outputs, gates, encoder filters, MIDI OUT/IN and the
+  +5V_LED inrush: `SIMULATION.md` (benches in `sim/`). It changed C511-C514 from 100 pF
+  to 1 nF.
+- Not done: PCB, BOM with MPNs.
