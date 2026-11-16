@@ -1431,16 +1431,78 @@ static void test_kit_stop_queues_releases_before_stop_byte(void) {
     CHECK(fake_midi_count(MIDI_NOTE_OFF | KIT_CHANNEL) == 0);
 }
 
+// sound_kit()'s voices, BD and SD: from decoded message `from` on, each is released
+// exactly once. Returns the index of the later release.
+static unsigned sound_kit_released_once(unsigned from) {
+    unsigned total = decode_midi();
+    unsigned bd = 0, sd = 0, last = 0;
+    for (unsigned i = from; i < total; i++) {
+        if (msg_is(midi_msgs[i], KIT_STATUS, 36, 0)) bd++;
+        else if (msg_is(midi_msgs[i], KIT_STATUS, 38, 0)) sd++;
+        else continue;
+        last = i;
+    }
+    CHECK(bd == 1 && sd == 1);
+    return last;
+}
+
+// The index of the one message with `status` from decoded message `from` on.
+static unsigned only_msg(unsigned from, uint8_t status) {
+    unsigned total = decode_midi();
+    unsigned found = total;
+    for (unsigned i = from; i < total; i++) {
+        if (midi_msgs[i].status != status) continue;
+        CHECK(found == total);
+        found = i;
+    }
+    CHECK(found < total);
+    return found;
+}
+
+// No kit hit (velocity above 0) in decoded messages [from, limit).
+static void no_kit_hit(unsigned from, unsigned limit) {
+    for (unsigned i = from; i < limit; i++) {
+        CHECK(!(midi_msgs[i].status == KIT_STATUS && midi_msgs[i].data2 != 0));
+    }
+}
+
+// Lets a UART that was busy since byte `sent` send everything: the bytes it sends are
+// `expected` (`length` of them; with `exact` false, the first `length`).
+static void busy_wire_sends(unsigned sent, const uint8_t *expected, unsigned length, bool exact) {
+    CHECK(fake_midi_length == sent);        // nothing left while the wire was busy
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(!fake_uart_tx_irq);
+    CHECK(exact ? fake_midi_length == sent + length : fake_midi_length >= sent + length);
+    CHECK(memcmp(fake_midi + sent, expected, length) == 0);
+}
+
+// Order on the wire is not checked here (see the busy-wire variant): every voice is
+// released once, no kit hit follows the Stop, and All Notes Off comes last, after the
+// releases.
 static void test_kit_panic_releases(void) {
     sound_kit();
+    unsigned before = decode_midi();
     sequencer_panic();
-    unsigned count = decode_midi();
-    CHECK(count >= 35);
-    CHECK(msg_is(midi_msgs[count - 35], KIT_STATUS, 36, 0));
-    CHECK(msg_is(midi_msgs[count - 34], KIT_STATUS, 38, 0));
-    CHECK(msg_is(midi_msgs[count - 33], MIDI_STOP, 0, 0));
-    CHECK(msg_is(midi_msgs[count - 32], MIDI_CC, MIDI_CC_ALL_SOUND_OFF, 0));
-    CHECK(count_kit(36, 0) == 1 && count_kit(38, 0) == 1);
+    unsigned last_release = sound_kit_released_once(before);
+    unsigned total = decode_midi();
+    no_kit_hit(only_msg(before, MIDI_STOP), total);
+    CHECK(total >= 32 && last_release < total - 32);
+    for (unsigned ch = 0; ch < 16; ch++) {
+        CHECK(msg_is(midi_msgs[total - 32 + 2 * ch], MIDI_CC | ch, MIDI_CC_ALL_SOUND_OFF, 0));
+        CHECK(msg_is(midi_msgs[total - 31 + 2 * ch], MIDI_CC | ch, MIDI_CC_ALL_NOTES_OFF, 0));
+    }
+}
+
+// A busy wire: the Stop overtakes the releases; the CCs follow them.
+static void test_kit_panic_on_busy_wire(void) {
+    sound_kit();
+    unsigned sent = fake_midi_length;
+    fake_uart_writable = false;
+    sequencer_panic();
+    const uint8_t expected[] = {MIDI_STOP, KIT_STATUS, 36, 0, 38, 0, MIDI_CC, MIDI_CC_ALL_SOUND_OFF, 0};
+    busy_wire_sends(sent, expected, sizeof(expected), false);
+    CHECK(msg_is(last_msg(0), MIDI_CC | 15, MIDI_CC_ALL_NOTES_OFF, 0));
 }
 
 // A panic in the middle of a message cuts it: the drain starts again at a message
@@ -1477,25 +1539,52 @@ static void test_panic_mid_message_resets_the_drain(void) {
     CHECK(msg_is(midi_msgs[count - 1], MIDI_CC | 15, MIDI_CC_ALL_NOTES_OFF, 0));
 }
 
+// Start while playing: every old voice is released once, no kit hit comes between the
+// Stop and the Start, and the new run's hits come after the releases.
 static void test_kit_restart_releases(void) {
     sound_kit();
+    unsigned before = decode_midi();
     transport_start();
-    CHECK(msg_is(last_msg(3), KIT_STATUS, 36, 0));
-    CHECK(msg_is(last_msg(2), KIT_STATUS, 38, 0));
-    CHECK(msg_is(last_msg(1), MIDI_STOP, 0, 0));
-    CHECK(msg_is(last_msg(0), MIDI_START, 0, 0));
     tick();                                 // the new run's first hits
+    unsigned last_release = sound_kit_released_once(before);
+    unsigned stop = only_msg(before, MIDI_STOP);
+    unsigned start = only_msg(before, MIDI_START);
+    CHECK(stop < start);
+    no_kit_hit(stop, start);
+    no_kit_hit(before, last_release);
     CHECK(msg_is(last_msg(1), KIT_STATUS, 36, 80));
     CHECK(msg_is(last_msg(0), KIT_STATUS, 38, 80));
-    CHECK(count_kit(36, 0) == 1 && count_kit(38, 0) == 1);
+}
+
+// A busy wire: Stop, Start and the Clock overtake the releases; the new hits follow them.
+static void test_kit_restart_on_busy_wire(void) {
+    sound_kit();
+    unsigned sent = fake_midi_length;
+    fake_uart_writable = false;
+    transport_start();
+    tick();
+    const uint8_t expected[] = {
+        MIDI_STOP, MIDI_START, MIDI_CLOCK, KIT_STATUS, 36, 0, 38, 0, 36, 80, 38, 80
+    };
+    busy_wire_sends(sent, expected, sizeof(expected), true);
 }
 
 static void test_kit_mode_change_releases(void) {
     sound_kit();
+    unsigned before = decode_midi();
     transport_set_mode(PLAY_MODE_SONG);
-    CHECK(msg_is(last_msg(2), KIT_STATUS, 36, 0));
-    CHECK(msg_is(last_msg(1), KIT_STATUS, 38, 0));
-    CHECK(msg_is(last_msg(0), MIDI_STOP, 0, 0));
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    sound_kit_released_once(before);
+    no_kit_hit(only_msg(before, MIDI_STOP), decode_midi());
+}
+
+static void test_kit_mode_change_on_busy_wire(void) {
+    sound_kit();
+    unsigned sent = fake_midi_length;
+    fake_uart_writable = false;
+    transport_set_mode(PLAY_MODE_SONG);
+    const uint8_t expected[] = {MIDI_STOP, KIT_STATUS, 36, 0, 38, 0};
+    busy_wire_sends(sent, expected, sizeof(expected), true);
 }
 
 static void test_kit_settings_edit_keeps_sounding_note(void) {
@@ -1656,10 +1745,7 @@ static void test_flam_gate_100_every_step(void) {
         }
         CHECK(found == expected);           // eight hits, eight releases
     }
-    CHECK(msg_is(last_msg(3), KIT_STATUS, 36, 0));
-    CHECK(msg_is(last_msg(2), KIT_STATUS, 38, 0));
-    CHECK(msg_is(last_msg(1), KIT_STATUS, 42, 0));
-    CHECK(msg_is(last_msg(0), MIDI_STOP, 0, 0));
+    no_kit_hit(only_msg(0, MIDI_STOP), decode_midi());
 }
 
 static void test_live_mute_cancels_pending_flam(void) {
@@ -1923,7 +2009,7 @@ static void test_kit_launch_every_quant(void) {
 
 // Song entries: the kit plays location 0 (BD), then location 1 (SD), at gate 100; the song
 // stops at its end.
-static void test_kit_song_mode(void) {
+static void start_kit_song(void) {
     make_kit(1, KIT_CHANNEL);
     set_gate(1, 100);
     for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
@@ -1937,6 +2023,10 @@ static void test_kit_song_mode(void) {
     song_set_end_mode(SONG_END_STOP);
     transport_set_mode(PLAY_MODE_SONG);
     transport_start();
+}
+
+static void test_kit_song_mode(void) {
+    start_kit_song();
     run_through_step(15);                   // entry 0, its last step
     CHECK(count_kit(36, 80) == 16 && count_kit(38, 80) == 0);
     unsigned before = msgs();
@@ -1951,10 +2041,25 @@ static void test_kit_song_mode(void) {
     CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
     pulses(PULSES_PER_STEP);                // the end of the song
     CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
-    CHECK(msg_is(last_msg(1), KIT_STATUS, 38, 0));
-    CHECK(msg_is(last_msg(0), MIDI_STOP, 0, 0));
     CHECK(count_kit(36, 0) == 16 && count_kit(38, 0) == 16);
+    // The mode change sent a Stop of its own before the Start.
+    no_kit_hit(only_msg(only_msg(0, MIDI_START), MIDI_STOP), decode_midi());
     CHECK(kit_runtime[1].sounding == 0);
+}
+
+// A busy wire at the end of the song: the Stop (which cancels that pulse's Clock)
+// overtakes the last release.
+static void test_kit_song_end_on_busy_wire(void) {
+    start_kit_song();
+    run_through_step(15);
+    pulses(PULSES_PER_STEP + 15 * PULSES_PER_STEP + PULSES_PER_STEP - 1);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    unsigned sent = fake_midi_length;
+    fake_uart_writable = false;
+    tick();                                 // the end of the song
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    const uint8_t expected[] = {MIDI_STOP, KIT_STATUS, 38, 0};
+    busy_wire_sends(sent, expected, sizeof(expected), true);
 }
 
 // Kit messages: each hit (velocity > 0) of a note has its release; all of them come
@@ -2262,9 +2367,12 @@ int main(void) {
     RUN(test_kit_live_mute_releases_next_pulse);
     RUN(test_kit_stop_queues_releases_before_stop_byte);
     RUN(test_kit_panic_releases);
+    RUN(test_kit_panic_on_busy_wire);
     RUN(test_panic_mid_message_resets_the_drain);
     RUN(test_kit_restart_releases);
+    RUN(test_kit_restart_on_busy_wire);
     RUN(test_kit_mode_change_releases);
+    RUN(test_kit_mode_change_on_busy_wire);
     RUN(test_kit_settings_edit_keeps_sounding_note);
     RUN(test_kit_channel_edit_releases_on_old_channel);
     RUN(test_kit_step_releases_leftover_voices_first);
@@ -2279,6 +2387,7 @@ int main(void) {
     RUN(test_kits_at_wire_rate);
     RUN(test_kit_launch_every_quant);
     RUN(test_kit_song_mode);
+    RUN(test_kit_song_end_on_busy_wire);
     RUN(test_kit_to_synth_during_flam);
     RUN(test_synth_tie_to_kit_releases_note_and_gate);
     RUN(test_synth_slide_to_kit_releases_note_and_gate);
