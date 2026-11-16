@@ -4,6 +4,7 @@
 #include "hardware/sync.h"
 #include "hardware/irq.h"
 #include "sequencer.h"
+#include "kit.h"
 #include <string.h>
 #include <math.h>
 
@@ -617,6 +618,9 @@ void sequencer_init(void) {
     jitter_reset_now();
     clear_runtime_note_state();
     memset(playback_pattern, NO_QUEUED_PATTERN, sizeof(playback_pattern));
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        kit_config_defaults(&g_seq.kit_config[track]);
+    }
     for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
         for (uint8_t track = 0; track < NUM_TRACKS; track++) {
             sequencer_refresh_track_playback(track, pattern);

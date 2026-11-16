@@ -62,7 +62,28 @@ typedef struct {
 typedef enum {
     TRACK_TYPE_SYNTH,       // Melodic — uses note field
     TRACK_TYPE_DRUM,        // Percussive — fixed note per track
+    TRACK_TYPE_KIT,         // 909 drum machine over MIDI — 12 lanes per step
 } track_type_t;
+
+// Kit lanes: 0 AC, 1 BD, 2 SD, 3 LT, 4 MT, 5 HT, 6 RS, 7 CP, 8 CH, 9 OH, 10 CC, 11 RC.
+// Voice v is lane v + 1. A step word holds lane i in bits 2i..2i+1.
+#define KIT_LANES       12
+#define KIT_VOICES      11
+#define KIT_LANE_AC     0
+#define KIT_LANE_BD     1
+#define KIT_LANE_CH     8
+#define KIT_LANE_OH     9
+#define MAX_KIT_TRACKS  2
+#define KIT_FLAM_MIN    1
+#define KIT_FLAM_MAX    12
+
+typedef enum { KIT_OFF = 0, KIT_NOTE = 1, KIT_ACCENT = 2, KIT_FLAM = 3 } kit_value_t;
+
+typedef struct {
+    uint8_t note[KIT_VOICES];          // lane order BD..RC
+    uint8_t vel_normal, vel_accent, vel_max;
+    uint8_t flam_pulses;
+} kit_config_t;
 
 typedef enum {
     OUTPUT_MIDI_ONLY,
@@ -87,6 +108,7 @@ typedef struct {
     uint8_t        track_length[NUM_TRACKS]; // Per-track/section step count: 1-16
     uint8_t        swing;           // 0–99, percentage of swing
     char           name[9];         // 8 chars + null
+    uint32_t       kit_steps[NUM_TRACKS][STEPS_PER_PATTERN]; // Kit step words
 } pattern_t;
 
 // Song mode
@@ -163,6 +185,7 @@ typedef struct {
     pattern_t            patterns[MAX_PATTERNS];
     song_t               song;
     uint8_t              active_pattern[NUM_TRACKS]; // Edited pattern per track/section
+    kit_config_t         kit_config[NUM_TRACKS];     // Kit settings per track
     volatile uint8_t     launch_quant;       // launch_quant_t; not saved
     volatile uint8_t     track_mutes;        // Bitmask: bit N = track N muted for playback
     // Spinlock index for mutex

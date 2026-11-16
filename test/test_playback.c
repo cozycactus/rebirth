@@ -912,6 +912,14 @@ static void test_mute_button_undoes_a_stored_mute(void) {
     CHECK(g_seq.track_mutes == 0);
 }
 
+static void test_sequencer_init_sets_kit_defaults(void) {
+    kit_config_t expect;
+    kit_config_defaults(&expect);
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        CHECK(memcmp(&g_seq.kit_config[t], &expect, sizeof(expect)) == 0);
+    }
+}
+
 int main(void) {
     unsigned tests = 0;
     seq_lock_init();
@@ -969,6 +977,7 @@ int main(void) {
     RUN(test_snapshot_reports_queues_and_mutes);
     RUN(test_track_config_keeps_each_stored_mute);
     RUN(test_mute_button_undoes_a_stored_mute);
+    RUN(test_sequencer_init_sets_kit_defaults);
 #ifdef REBIRTH_THREADED_TEST
     RUN(test_stop_during_pending_gate_commit);
     RUN(test_panic_during_pending_gate_commit);
