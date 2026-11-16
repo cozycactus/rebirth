@@ -169,8 +169,8 @@ The kit's own settings belong to the track, not to the location (A), in a new ar
 | `vel_max` | 1-127 | 127 | an accented note with AC |
 | `flam_pulses` | 1-12 | 3 | time from a flam's first hit to its second, in 96-PPQN pulses (12.9 ms at 145 BPM) |
 
-Every `kit_config` gets these defaults at power-up (`init_defaults()`, before any load) and when an
-old save without kits is loaded. A track switched to KIT uses its already initialized settings.
+Every `kit_config` gets these defaults at power-up (`sequencer_init()`, which runs before any load
+and also sets up every host test) and when an old save without kits is loaded. A track switched to KIT uses its already initialized settings.
 
 The three velocities give the three dynamic levels the 909 has (normal, accent, accent plus total
 accent). Machines with a single accent threshold work with the defaults as long as the threshold
@@ -261,10 +261,13 @@ the kit's Note Ons; SYNTH and DRUM tracks keep sending 0x80 as today.
 on what is queued: after a dense step burst the second hit leaves only when the burst has gone.
 With one kit of six voices the burst is 13 bytes (4 ms) and a 12 ms flam stays a flam.
 
-**Overload rule (A).** A flam's second hit is the only kit message that may be dropped: when the TX
-queue has less free space than the flam message needs, that step's second hits are skipped and a
-counter shown with the jitter stats goes up. Everything else fits the DIN rate at every tempo up to
-300 BPM (see "MIDI load"), so kit traffic never trips the TX-overflow panic.
+**Overload rule (A).** A flam's second hit is the only kit message that may be dropped. The flam
+message is queued only if at least 192 bytes of the TX queue stay free after it; otherwise that
+step's second hits are skipped, the voices stay sounding until their note-off, and a counter shown
+with the jitter stats goes up. 192 bytes cover the most one pulse ever adds in mandatory messages
+(two kits' note-offs and the worst step burst, 168 bytes as stored in the queue with every status
+byte). Everything else fits the DIN rate at every tempo up to 300 BPM (see "MIDI load"), so kit
+traffic never trips the TX-overflow panic.
 
 ### Mutes, stop, panic, launches
 
@@ -287,13 +290,15 @@ counter shown with the jitter stats goes up. Everything else fits the DIN rate a
 
 The TX queue keeps whole messages, each with its status byte. Running status is applied by the
 drain as it writes to the UART (A): a status byte equal to the last one written is skipped, except
-for the first message after the queue has run empty, which always carries its status byte so that
-a receiver that missed a byte resynchronizes. Real-time bytes (Clock, Start, Continue, Stop) do not
-change the running status. Message boundaries are therefore known in the queue without re-parsing
-a compressed stream.
+for the first message after the queue has run empty (the moment its last byte was written), which
+always carries its status byte so that a receiver that missed a byte resynchronizes. Real-time
+bytes (Clock, Start, Continue, Stop) do not change the running status. Message boundaries are
+therefore known in the queue without re-parsing a compressed stream.
 
-`MIDI_BUF_SIZE` grows from 64 to 160 bytes (A): the worst step burst is 82 bytes (below), and the
-margin covers future changes. A host test checks the worst designed burst fits.
+`MIDI_BUF_SIZE` grows from 64 to 160 bytes and the TX queue from 256 to 512 bytes (A): the worst
+step burst is 102 bytes as stored (82 on the wire, below), a pulse with two kits' note-offs as well
+holds 168, and the overload rule keeps a 192-byte reserve. Host tests check the worst designed
+burst fits.
 
 The step burst is built in track order, so the kick and kit on the leftmost columns get the
 earliest bytes; the README says so. Within one step the last Note On leaves after the earlier ones:
@@ -313,13 +318,17 @@ path changes (A):
   a bunch) under the TX lock and runs the drain at once. The UART TX interrupt stays enabled while
   the queue is non-empty **or** a Clock is pending, so a Clock goes out even when no note is
   queued.
-- The drain writes a pending Clock at the next message boundary, before the next queued message,
-  except when that message is a Start or Continue: then the Start or Continue goes first and the
-  Clock right after it, so a receiver never sees a Clock before the Start it belongs to (the
-  existing test expects Start, Clock, Note On).
+- Start, Continue and Stop are real-time bytes too: they wait in a small queue of their own and go
+  out at the next message boundary, ahead of queued note messages, in the order they were sent.
+  After a quick Stop and Start they therefore never sit behind the previous run's note bytes.
+- At a message boundary the drain sends, in this order: a queued Start / Continue / Stop, then a
+  pending Clock, then the next note message. A receiver never sees a Clock before the Start it
+  belongs to (the existing test expects Start, Clock, Note On), and a Clock never waits longer
+  than one message.
 - Stop and Panic clear the pending Clock in the same critical section in which they queue their
   bytes, so no Clock leaves after a Stop. `midi_clear_output_queue()` clears it too, and
-  `midi_wait_output_idle()` (used before a flash save) also waits for it.
+  `midi_wait_output_idle()` (used before a flash save) also waits for it and for the real-time
+  bytes.
 - The UART's hardware FIFO is turned off, so nothing is committed in front of a pending Clock
   beyond the byte being shifted out. The UART interrupt then fires once per byte on Core 0: at most
   3,125 per second, each a few microseconds.
@@ -329,8 +338,8 @@ path changes (A):
   off.
 
 Result: a Clock byte waits at most for the rest of one message (3 bytes, under 1 ms) whatever the
-burst length, which is no worse than today. Start, Continue, Stop and the note messages keep their
-order.
+burst length, which is no worse than today. Note messages keep their order among themselves, and
+Start, Continue and Stop among themselves.
 
 ### MIDI load
 
