@@ -52,14 +52,15 @@ D9nn is chain position nn, which equals firmware logical index nn-1.
 | --- | --- | --- |
 | MCU | Raspberry Pi Pico on headers | as in the design |
 | LED supply switch | TPS2553DBV, R201 = 100 k 1% | see "Decisions" |
-| MIDI OUT buffer | 74LVC1G17 on +3V3 | ARCHITECTURE.md asks for a buffered 3.3 V CA-033 output; 24 mA sink |
+| MIDI OUT driver | 74LVC1G14 inverter + MMBT3904 open collector, 470 R / 10 k base | CA-033 assumes an open-collector driver at 3.3 V; survives cable shorts |
 | MIDI IN opto | H11L1 (3-15 V, Schmitt output, 1.6 mA turn-on) | works from 3.3 V, unlike the 6N138 |
 | DACs | 2 x MCP4822 on +3V3, LDAC tied low | design; outputs update on CS rising edge |
 | CV buffers | MCP6004 (RRIO, 1.8-6 V) on VBUS | 0-2.048 V with headroom, quad = one package |
 | Gate buffer | 74AHCT125 on VBUS | TTL inputs take 3.3 V, outputs give 5 V gates |
 | Key scanner | TCA8418RTW (WQFN-24, footprint QFN-24 4x4 EP 2.5) | design; project symbol `rebirth:TCA8418RTW` |
 | RGB LEDs | SK6812MINI-E | design; reverse-mount part under MX-style keycaps |
-| LED data buffer | 74AHCT1G125 on +5V_LED, OE low, 10 k pull-down, 390 R series | design (330-470 R) |
+| LED data buffer | 74AHCT1G125 on +5V_LED, OE low, 10 k pull-downs before and after, 390 R series | design (330-470 R) |
+| LED rail bulk | C984 470 uF 10 V low-ESR | PWM current peaks; final value from a scope check |
 | Key diodes | 1N4148W (SOD-123) | any small-signal diode |
 | Keys | MX-type switches (footprint SW_Cherry_MX_1.00u_PCB) | assumption; any momentary switch works |
 | Step buttons / LEDs | 6 mm tactile, red 3 mm LEDs with 470 R (~3 mA) | unchanged hardware; values are a choice |
@@ -72,20 +73,23 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
 ## Decisions the design leaves open
 
 1. **U201 current-limited switch for +5V_LED.** The design powers the chain from VBUS
-   with a bulk capacitor and leaves inrush to the bench. 82 x 100 nF + 100 uF is far
+   with a bulk capacitor and leaves inrush to the bench. 82 x 100 nF + 470 uF is far
    above the 10 uF that USB allows at plug-in, and a firmware error at full white
-   would ask for ~5 A. U201 charges the chain at its current limit (234-303 mA with
-   R201 = 100 k), caps the chain current in hardware, and enables only after +3V3 is up
-   (EN = +3V3), which adds to the defined power-up state. The LED data buffer U901 runs
-   from the same switched rail, so it never drives a data pin above an unpowered chain.
-   R201 must stay >= 82 k (limit max 365 mA) to keep the device within 500 mA; if the
-   bench raises the firmware budget, recompute R201 from TPS2553 eq. 1-3.
+   would ask for ~5 A. U201 charges the chain at its current limit (232-306 mA with
+   R201 = 100 k 1 %), caps the chain current in hardware, and switches on with +3V3
+   (EN threshold 0.66-1.1 V: it follows the regulator, not the firmware). The LED data
+   buffer U901 runs from the same switched rail, so it never drives a data pin above an
+   unpowered chain. R201 must stay >= 82 k (limit max 369 mA); if the bench raises the
+   firmware budget, recompute R201 from TPS2553 eq. 1-3.
 2. **CV buffers keep the 1 k output resistor inside the loop** (R52x feedback from the
    jack side, C51x closing the loop at HF): no DC error from the load, stable into cable
-   capacitance, short-proof. The MCP6004 cannot reach exactly 0 V: the lowest notes read
-   ~25 mV high; bench calibration covers it.
-3. **Gates are 5 V** (74AHCT125 on VBUS, 1 k series, 100 k pull-downs). The design only
-   says the GPIOs are 3.3 V logic.
+   capacitance, a short to GND draws at most ~5 mA. R515-R518 (100 k) hold the buffer inputs at
+   0 V while the DACs are unpowered or in their power-on shutdown. Accuracy: the MCP6004
+   cannot reach exactly 0 V (~25 mV at light load = up to 30 cents sharp at note 24), and
+   the DAC's gain/offset errors (about +-2 % FSR) need a per-channel calibration in
+   firmware, which does not exist yet.
+3. **Gates are 5 V** (74AHCT125 on VBUS, 1 k series, 100 k pull-downs at the inputs and at
+   the jacks). ARCHITECTURE.md only says the GPIOs are 3.3 V logic; see open point 4.
 4. **Encoder RC filters** (10 k pull-up, 10 k series, 10 nF) on A/B; the internal
    pull-ups stay on in firmware and do no harm.
 5. **AGND** of the Pico joins GND through R303 (0 R) at one point. The Pico symbol
@@ -94,32 +98,65 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
    check the actual module.
 7. **MIDI ferrite beads** (CA-033 optional) are drawn; fit 0 R links if not wanted.
    MIDI IN pin 2 and both shells are left open.
+8. **MIDI OUT open collector.** CA-033 assumes an open-collector/open-drain driver at
+   3.3 V and warns about the driver's short-circuit current. A push-pull gate would see
+   3.3 V / 10 R into its output with pin 5 shorted to ground. U401 (74LVC1G14) inverts
+   the UART, Q401 (MMBT3904) sinks the loop: pin 5 to GND costs nothing, pins 4-5 shorted
+   pass <= 85 mA through Q401 (200 mA max). Same polarity as before, no firmware change.
+9. **Defined states**: R802 pulls the TCA8418's open-drain INT up (datasheet), R903 holds
+   the first LED's DIN low while U901 is unpowered, C506/C507 add local bulk at U502 and
+   the VBUS buffers.
 
-## Problems found in the design (not changed here)
+## Open points for the owner (design-level, not changed here)
 
-1. **MCP23017 GPA7/GPB7 are output-only.** Microchip changed the MCP23017 datasheet
-   (DS20001952 rev. D, 2022, and later) and a support article: GPA7 and GPB7 must not be
-   used as inputs on the I2C part. The step buttons (unchanged hardware, firmware reads all
-   16 pins of 0x20 as inputs) put steps 8 and 16 on exactly those pins. Old chips mostly
-   work, new ones are not guaranteed. The sheet follows the firmware and carries a warning.
-   Fix options: (a) move buttons 8 and 16 to two pins of 0x21 and LEDs 8 and 16 to
-   0x20's GPA7/GPB7 (no new parts; firmware must read/write the mixed pins), or
-   (b) a PCA9555/TCA9555 for the buttons (all pins bidirectional; new driver). The
-   design's fallback (two more MCP23017 at 0x22/0x23 scanning the matrix) has the same
-   limit.
-2. **SK6812MINI-E pin numbers.** The OPSCO datasheet (rev. 02/04) numbers the pins
-   1 VDD, 2 DOUT, 3 GND, 4 DIN; KiCad's library symbol and footprint use 1 VSS, 2 DIN,
-   3 VDD, 4 DOUT. Symbol and footprint agree with each other and the pad functions match
-   the datasheet drawing geometrically (mirrored for reverse mount), so the schematic is
-   wired by function. Check the footprint against the purchased part at the PCB step.
-3. **DAC gain 2x is not possible on this board.** With the DACs on +3V3 only the default
+1. **MCP23017 GPA7/GPB7 must not be inputs.** The current MCP23017 datasheet
+   (DS20001952 rev. D, 2022, and later) makes them output-only; Microchip's support note,
+   as quoted on EEVblog, says a level change on them during a read can corrupt SDA, so a
+   bouncing button there can upset the whole I2C bus (TCA8418 and the LED expander too).
+   Steps 8 and 16 sit on 0x20's GPA7/GPB7, as the unchanged firmware expects. Options, all
+   with a firmware change: (a) a third MCP23017 at 0x24 for steps 8 and 16 (same driver;
+   its spare pins can also drive U201 EN and TCA8418 RESET, see 3); (b) a PCA9555/TCA9555
+   at 0x20 instead of U701 (16 real I/O, new register map); (c) no new part: buttons 8/16
+   on two bidirectional pins of 0x21 and LEDs 8/16 on 0x20's GPA7/GPB7 (mixed ports in
+   both drivers). The design's matrix fallback (MCP23017 at 0x22/0x23) works only with
+   GPA7/GPB7 as column outputs.
+2. **TCA8418 latency.** TI's datasheet (SCPS215G, 8.6.2.15) scans the keypad every 25 ms
+   and reports a press after 25-40 ms; disabling debounce does not change that. The design
+   asks for <= 15 ms press-to-event. Either accept 25-40 ms (plus firmware debounce), or
+   switch the matrix to the design's fallback scanner (two MCP23017), or lay out both on
+   the board and fit one after a bench test.
+3. **LED rail before enumeration.** EN = +3V3 turns the chain on before any firmware runs;
+   82 x ~1 mA idle plus the Pico exceed the 100 mA an unconfigured USB device may draw.
+   If the design's fallback (minimal USB enumeration asking for 500 mA) is ever needed,
+   EN must be firmware-controlled (an expander output with a pull-down). Enumeration
+   goes through the Pico's own micro-USB (D+/D- are not on its header).
+4. **Gate level.** Gates are 5 V here; confirm that the target synths want 5 V gates
+   (most do), or drop U504 for 3.3 V gates through 1 k.
+5. **DAC gain 2x is not possible on this board.** With the DACs on +3V3 only the default
    1x (0-2.048 V, about two octaves) works. `-DREBIRTH_CV_DAC_GAIN=2` would need the DACs
-   on VBUS and 3.3 V -> 5 V buffers on their SPI lines (ARCHITECTURE.md already says so).
+   on VBUS and 3.3 V -> 5 V buffers on their SPI lines (ARCHITECTURE.md already says so);
+   a firmware `#error` for gain 2 on this board would prevent a wrong build.
+
+## Notes for the PCB step
+
+- **SK6812MINI-E pin numbers** differ between OPSCO documents: the current LCSC datasheet
+  (SK6812MINI-E-012 Rev. B/1, LCSC C5149201) numbers 1 GND, 2 DIN, 3 VDD, 4 DOUT, like
+  KiCad's symbol and footprint; the older OPSCO spec rev. 02/04 numbers 1 VDD, 2 DOUT,
+  3 GND, 4 DIN. The pad functions are the same geometrically. Order the C5149201 part
+  and check the reel's drawing against the footprint before layout.
+- Fix MPNs and datasheets for the OLED module (pin order, 3.3 V, current), the DIN-5
+  sockets (no KiCad footprint) and the jacks (PJ398SM's TN contact stays unconnected).
+- C984 voltage rating is in its value (10 V); keep it, a 6.3 V part is too close to VBUS.
+- Step LEDs are driven high-side by the MCP23017 (VOH = VDD - 0.7 V at 3 mA): expect
+  ~1.5-3 mA each; adjust R701-R716 on the bench.
+- Optional: 10 k pull-ups on DAC_CS1_N/DAC_CS2_N (not drawn: the DACs power up in
+  shutdown and the firmware writes them at start).
 
 ## Verification
 
-- Netlist exported from the root equals the generator's declared nets (303 nets, every
-  pin of every part, 0 differences); `kicad-cli sch erc`: 0 violations.
+- Netlist exported from the root equals the generator's declared nets (306 nets, every
+  pin of every part, 0 differences); `kicad-cli sch erc`: 0 violations (with KiCad's
+  default symbol library table installed; without it ERC reports library warnings only).
 - `readable-schematic` lint: 0 errors. Advisories accepted: `flag_side` on the Pico's
   pin list (labels sit where the symbol's pins are), `sheet_jump` for the SPI labels
   repeated at each DAC and the I2C labels repeated at each expander, `sheet_fill` on the
@@ -132,6 +169,12 @@ sockets have no footprint: KiCad's library has none for a panel DIN-5.
   choice.
 - Pin numbers checked against datasheets for TCA8418 (TI SCPS215G, RTW), TPS2553
   (SLVS841, DBV), SK6812MINI-E (see above) and the CA-033 resistor values; the KiCad
-  library symbols of MCP4822, MCP23017, MCP6004, 74AHCT125, 74AHCT1G125, 74LVC1G17,
-  H11L1 and the Pico match their standard pinouts.
+  library symbols of MCP4822, MCP23017, MCP6004, 74AHCT125, 74AHCT1G125, 74LVC1G14,
+  MMBT3904, H11L1 and the Pico match their standard pinouts.
+- Independent review (2026-11-16) by Codex and Grok, plus DeepSeek's complete answer
+  from a run that ended with an error afterwards; Gemini could not run (API credits).
+  All three found the MCP23017 GPA7/GPB7 problem, two the TCA8418 latency, all three the
+  MIDI OUT short-circuit current; the fixes and open points above come from that review,
+  checked against the datasheets. A reported reversed SK6812 pinout was a documentation
+  numbering difference, not a wiring error.
 - Not done: SPICE simulation of the CV buffers and the RC filters, PCB, BOM with MPNs.

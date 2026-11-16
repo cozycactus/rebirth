@@ -236,15 +236,16 @@ def sheet_power(d):
         fields=((0, -2.286, "center"), (0, 2.794, "center")))
     sh.wire((123.19, 66.04), (125.73, 66.04))
     rail(sh, "+3V3", 125.73, 66.04)
-    note(sh, 139.7, 64.77, "+5V_LED = (4.4, 4.9, 5.25) V", "@ (, 200, 303) mA")
+    note(sh, 139.7, 64.77, "+5V_LED = (4.7, 4.95, 5.25) V", "@ (, 200, 306) mA")
     note(sh, 20.32, 104.14,
          "U201 TPS2553DBV (active-high EN, auto-retry). Why a switch here:",
-         " - inrush: USB allows 10 uF at plug-in; the chain has 82 x 100 nF + 100 uF bulk (C984), so it is charged at the current limit;",
-         " - backstop: a firmware error that lights the whole grid at full white (82 x 60 mA) cannot pull more than 303 mA;",
-         " - power-up: EN = +3V3, so the chain and its buffer get 5 V only after the Pico's 3.3 V is up.",
-         "R201 100 kOhm 1% sets the limit, IOS = (234, 267, 303) mA (TPS2553 eq. 1-3). Firmware budget 200 mA: keep R201 >= 82 kOhm",
-         "(IOS max 365 mA) so that the whole device stays within 500 mA. TP201: low while U201 limits current or is too hot.",
-         "C201 is the only input capacitor on VBUS besides the Pico's own; keep large capacitors behind U201.")
+         " - inrush: USB allows 10 uF at plug-in; the chain has 82 x 100 nF + 470 uF bulk (C984), so it is charged at the current limit;",
+         " - backstop: a firmware error that lights the whole grid at full white (82 x 60 mA) cannot pull more than 306 mA;",
+         " - power-up: EN follows +3V3 (threshold 0.66-1.1 V), so the rail comes up with the Pico's regulator, before the firmware runs.",
+         "R201 100 kOhm 1% sets the limit, IOS = (232, 267, 306) mA with the 1 % tolerance (TPS2553 eq. 1-3). Firmware budget 200 mA;",
+         "keep R201 >= 82 kOhm (IOS max 369 mA). The 5 V budget below is an estimate until the OLED is chosen and the board measured.",
+         "TP201: low while U201 limits current or is too hot. Keep large capacitors behind U201: C201 is the only one on VBUS.",
+         "+5V_LED min 4.7 V is VBUS min minus the switch (~30 mV at 200 mA); it falls lower only while U201 limits current.")
     sh.heading("Rails and budget", (20.32, 139.7))
     note(sh, 20.32, 146.05,
          "VBUS    5 V from USB, Pico pin 40. Loads: U201 (LED chain), U503 MCP6004, U504 74AHCT125, Pico VSYS (through its own diode).",
@@ -253,7 +254,9 @@ def sheet_power(d):
          "+5V_LED switched VBUS for the RGB chain only (sheet 9).",
          "GND     one ground. On the board, return the LED-chain current to the Pico's GND pins on its own path,",
          "        apart from the DAC/op-amp ground of sheet 5 (CV noise check in HARDWARE_STATUS.md).",
-         "Budget at 5 V: RGB chain <= 200 mA (firmware) / 303 mA (U201), Pico + 3.3 V loads ~80 mA, gates <= 20 mA => < 500 mA.")
+         "Budget at 5 V (estimate): RGB chain <= 200 mA (firmware) / 306 mA (U201), Pico + 3.3 V loads 100-130 mA through the",
+         "buck-boost, gates <= 20 mA => about 450 mA worst case. Idle: 82 x ~1 mA for the chain plus the Pico, above the 100 mA",
+         "an unconfigured USB device may draw; most laptop ports allow it (design: bench on two laptops).")
     return sh
 
 
@@ -353,49 +356,58 @@ def sheet_mcu(d):
 def sheet_midi(d):
     sh = d.sheet("MIDI", "midi.kicad_sch", "MIDI OUT (3.3 V, CA-033) and MIDI IN (reserved)", "A4", 4)
     sh.heading("MIDI OUT: 5 mA current loop at 3.3 V (MIDI CA-033)", (20.32, 30.48))
-    y = 60.96
+    y = 68.58     # TX, inverter and base drive
+    yj = 58.42    # loop: collector -> RC -> pin 5
     sh.hlabel("MIDI_TX", (30.48, y), "input", "left")
-    sh.wire((30.48, y), (58.42, y))
+    sh.wire((30.48, y), (60.96, y))
     pull_up(sh, "R401", "10k", 45.72, y, "+3V3", "MIDI_TX")
-    place(sh, "74xGxx:74LVC1G17", "U401", "74LVC1G17", 71.12, y, fp=FP_SOT235,
-          conn={"2": "MIDI_TX", "4": "MIDI_TXB", "5": "+3V3", "3": "GND", "1": None},
-          ref_at=(2.54, -8.89, "left"), val_at=(2.54, -6.35, "left"))
-    sh.wire((66.04, 50.8), (66.04, 48.26))
-    rail(sh, "+3V3", 66.04, 48.26)
-    sh.wire((66.04, 71.12), (66.04, 73.66))
-    gnd(sh, 66.04, 73.66)
-    decap(sh, "C401", "100n", 91.44, 43.18, "+3V3")
-    sh.wire((81.28, y), (91.44, y))
-    res(sh, "R402", "10R", 95.25, y, {"1": "MIDI_TXB", "2": "MIDI_OUT_5"}, horiz=True)
-    sh.wire((99.06, y), (106.68, y))
-    place(sh, "Device:FerriteBead_Small", "FB401", "1k@100MHz", 109.22, y, rot=90, fp=FP_FB,
+    place(sh, "74xGxx:74LVC1G14", "U401", "74LVC1G14", 76.2, y, fp=FP_SOT235,
+          conn={"2": "MIDI_TX", "4": "MIDI_TX_N", "5": "+3V3", "3": "GND", "1": None},
+          ref_at=(2.54, -8.89, "left"), val_at=(2.54, 8.89, "left"))
+    sh.wire((71.12, y - 10.16), (71.12, y - 12.7))
+    rail(sh, "+3V3", 71.12, y - 12.7)
+    sh.wire((71.12, y + 10.16), (71.12, y + 12.7))
+    gnd(sh, 71.12, y + 12.7)
+    decap(sh, "C401", "100n", 83.82, 45.72, "+3V3")
+    sh.wire((88.9, y), (92.71, y))
+    res(sh, "R406", "470", 96.52, y, {"1": "MIDI_TX_N", "2": "MIDI_BASE"}, horiz=True)
+    sh.wire((100.33, y), (106.68, y))
+    pull_down(sh, "R407", "10k", 104.14, y, "MIDI_BASE", fields=LEFT)
+    place(sh, "Transistor_BJT:MMBT3904", "Q401", "MMBT3904", 111.76, y, fp="Package_TO_SOT_SMD:SOT-23",
+          conn={"1": "MIDI_BASE", "2": "GND", "3": "MIDI_SINK"},
+          ref_at=(5.08, -1.27, "left"), val_at=(5.08, 1.27, "left"))
+    sh.wire((114.3, y + 5.08), (114.3, y + 7.62))
+    gnd(sh, 114.3, y + 7.62)
+    sh.wire((114.3, y - 5.08), (114.3, yj), (118.11, yj))
+    res(sh, "R402", "10R 0.25W", 121.92, yj, {"1": "MIDI_SINK", "2": "MIDI_OUT_5"}, horiz=True, fp="Resistor_SMD:R_1206_3216Metric")
+    sh.wire((125.73, yj), (132.08, yj))
+    place(sh, "Device:FerriteBead_Small", "FB401", "1k@100MHz", 134.62, yj, rot=90, fp=FP_FB,
           conn={"1": "MIDI_OUT_5", "2": "MIDI_OUT_5F"}, ref_at=(0, -3.175, "center"), val_at=(0, 3.81, "center"))
-    sh.wire((111.76, y), (121.92, y))
-    place(sh, "Connector:DIN-5_180degree", "J401", "MIDI OUT", 129.54, 58.42, rot=180,
+    sh.wire((137.16, yj), (147.32, yj))
+    place(sh, "Connector:DIN-5_180degree", "J401", "MIDI OUT", 154.94, yj - 2.54, rot=180,
           conn={"5": "MIDI_OUT_5F", "4": "MIDI_OUT_4F", "2": "GND", "1": None, "3": None},
           ref_at=(-5.08, -8.89, "left"), val_at=(5.08, 7.62, "left"))
-    sh.nc((121.92, 58.42))
-    sh.nc((137.16, 58.42))
-    sh.wire((129.54, 66.04), (129.54, 68.58))
-    gnd(sh, 129.54, 68.58)
-    sh.wire((137.16, y), (142.24, y), (142.24, 58.42))
-    place(sh, "Device:FerriteBead_Small", "FB402", "1k@100MHz", 142.24, 55.88, fp=FP_FB,
+    sh.nc((147.32, yj - 2.54))
+    sh.nc((162.56, yj - 2.54))
+    sh.wire((154.94, yj + 5.08), (154.94, yj + 7.62))
+    gnd(sh, 154.94, yj + 7.62)
+    sh.wire((162.56, yj), (167.64, yj), (167.64, yj - 2.54))
+    place(sh, "Device:FerriteBead_Small", "FB402", "1k@100MHz", 167.64, yj - 5.08, fp=FP_FB,
           conn={"1": "MIDI_OUT_4", "2": "MIDI_OUT_4F"}, ref_at=(2.54, -1.27, "left"), val_at=(2.54, 1.27, "left"))
-    sh.wire((142.24, 53.34), (142.24, 49.53))
-    res(sh, "R403", "33R 0.5W", 142.24, 45.72, {"1": "+3V3", "2": "MIDI_OUT_4"}, fp=FP_R1210)
-    sh.wire((142.24, 41.91), (142.24, 39.37))
-    rail(sh, "+3V3", 142.24, 39.37)
-    sh.label("MIDI_TXB", (83.82, y))
-    note(sh, 160.02, 50.8,
+    sh.wire((167.64, yj - 7.62), (167.64, yj - 11.43))
+    res(sh, "R403", "33R 0.5W", 167.64, yj - 15.24, {"1": "+3V3", "2": "MIDI_OUT_4"}, fp=FP_R1210)
+    sh.wire((167.64, yj - 19.05), (167.64, yj - 21.59))
+    rail(sh, "+3V3", 167.64, yj - 21.59)
+    note(sh, 180.34, 35.56,
          "J401 MIDI OUT, rear panel: DIN-5 180 deg female.",
          "Pin 4 = +3.3 V through RA = R403 33 R 0.5 W,",
-         "pin 5 = data through RC = R402 10 R (CA-033, 3.3 V).",
-         "Pin 2 to GND (transmitter side only); pins 1/3 and",
-         "the shell are not connected.")
-    note(sh, 20.32, 81.28,
-         "U401 buffers GPIO 0 (UART0 TX, 31250 baud 8N1) and sinks the loop current: about 7 mA into a 6N138 input",
-         "(3.3 V - 1.4 V - 0.1 V) / (33 + 10 + 220) R. Logical 0 = current on. R401 keeps the line idle (no current)",
-         "until the UART runs. FB401/FB402: optional RF filter beads (1 kOhm at 100 MHz, e.g. MMZ1608Y102BT); fit 0 R links if unused.")
+         "pin 5 = data through RC = R402 10 R 0.25 W",
+         "(CA-033, 3.3 V). Pin 2 to GND (transmitter side",
+         "only); pins 1/3 and the shell are not connected.")
+    note(sh, 20.32, 86.36,
+         "Open collector as CA-033 assumes at 3.3 V: U401 inverts GPIO 0 (UART0 TX), Q401 sinks ~7 mA.",
+         "TX high/idle = Q401 off. R401 idles the line before the UART runs, R407 keeps Q401 off unpowered.",
+         "Pin 5 to GND: no driver current; 4-5 shorted: <= 85 mA in Q401 (200 mA max). FB401/402 optional.")
 
     sh.heading("MIDI IN: opto-isolated receiver (reserved in firmware)", (20.32, 99.06))
     yi = 114.3
@@ -473,7 +485,9 @@ def cv_stage(sh, unit, Xo, Yo, n, dac_net, refs):
     place(sh, "Amplifier_Operational:MCP6004", "U503", "MCP6004", Xo, Yo, unit=unit, fp=FP_SO14,
           conn={pins[0]: dac_net, pins[1]: inv, pins[2]: out},
           ref_at=(2.54, -7.62, "left"), val_at=(2.54, -5.08, "left"))
-    rcf, rrs, rrf = refs
+    rcf, rrs, rrf, rpd = refs
+    # pull-down on the + input: defined 0 V while the DAC is unpowered or in shutdown
+    pull_down(sh, rpd, "100k", Xo - 20.32, Yo - 2.54, dac_net)
     sh.wire((Xo - 7.62, Yo + 2.54), (Xo - 10.16, Yo + 2.54), (Xo - 10.16, Yo + 15.24), (Xo + 1.27, Yo + 15.24))
     sh.wire((Xo - 10.16, Yo + 7.62), (Xo - 3.81, Yo + 7.62))
     cap(sh, rcf, "100p", Xo, Yo + 7.62, {"1": inv, "2": out}, horiz=True,
@@ -501,34 +515,38 @@ def jack_out(sh, ref, label, x, y, net):
 def sheet_cv(d):
     sh = d.sheet("CV_Gate", "cv_gate.kicad_sch", "CV 1-4 and gate 1-4 outputs", "A3", 5)
     sh.heading("CV outputs: two MCP4822 (internal 2.048 V reference, gain 1x) and unity buffers", (20.32, 30.48))
-    note(sh, 172.72, 33.02,
+    note(sh, 180.34, 33.02,
          "CV = (0, , 2.048) V, 1 V/oct, MIDI note 24 = 0 V, note 36 = 1 V, note 48 = 2 V; higher notes saturate (ARCHITECTURE.md, CV Circuit).",
          "The DACs run from +3V3, so only the default gain 1x is possible: -DREBIRTH_CV_DAC_GAIN=2 (0-4.096 V) would need the DACs on",
          "VBUS and 3.3 V -> 5 V buffers on DAC_SCK/DAC_MOSI/DAC_CSx_N. The buffers already run from VBUS and have the headroom.")
     dac_block(sh, "U501", 76.2, 63.5, "DAC_CS1_N", ("CV1_DAC", "CV2_DAC"), ("C501", "C503"))
-    dac_block(sh, "U502", 76.2, 127.0, "DAC_CS2_N", ("CV3_DAC", "CV4_DAC"), ("C502",))
-    Xo = 114.3
+    dac_block(sh, "U502", 76.2, 127.0, "DAC_CS2_N", ("CV3_DAC", "CV4_DAC"), ("C502", "C506"))
+    Xo = 121.92
+    xin = Xo - 7.62
     rows = [(1, 63.5, "CV1_DAC", 1), (2, 91.44, "CV2_DAC", 2), (3, 127.0, "CV3_DAC", 3), (4, 154.94, "CV4_DAC", 4)]
     for unit, Yo, net, n in rows:
-        cv_stage(sh, unit, Xo, Yo, n, net, ("C5%d" % (10 + n), "R5%d" % (10 + n), "R5%d" % (20 + n)))
+        cv_stage(sh, unit, Xo, Yo, n, net,
+                 ("C5%d" % (10 + n), "R5%d" % (10 + n), "R5%d" % (20 + n), "R5%d" % (14 + n)))
     # DAC outputs to the buffers
-    sh.wire((88.9, 60.96), (106.68, 60.96))
-    sh.wire((88.9, 68.58), (96.52, 68.58), (96.52, 88.9), (106.68, 88.9))
-    sh.wire((88.9, 124.46), (106.68, 124.46))
-    sh.wire((88.9, 132.08), (96.52, 132.08), (96.52, 152.4), (106.68, 152.4))
-    sh.label("CV1_DAC", (91.44, 60.96))
-    sh.label("CV2_DAC", (97.79, 88.9))
-    sh.label("CV3_DAC", (91.44, 124.46))
-    sh.label("CV4_DAC", (97.79, 152.4))
-    note(sh, 172.72, 50.8,
-         "U503 MCP6004 (rail-to-rail, VBUS): unity gain at DC. R511-R514 (1 k)",
-         "sit inside the loop: R521-R524 (10 k) take the feedback from the jack",
-         "side, C511-C514 (100 pF) close the loop at high frequency, so cable capacitance and",
-         "a short cannot upset the stage and the load does not shift the pitch.",
-         "Near 0 V the output stays ~25 mV above ground (MCP6004 swing):",
-         "notes below 24 + 1 cent read slightly sharp; calibrate on the bench.",
-         "J501-J504: rear 3.5 mm TS jacks (PJ398SM type) to a synth's",
-         "pitch CV input (1 V/oct).")
+    sh.wire((88.9, 60.96), (xin, 60.96))
+    sh.wire((88.9, 68.58), (96.52, 68.58), (96.52, 88.9), (xin, 88.9))
+    sh.wire((88.9, 124.46), (xin, 124.46))
+    sh.wire((88.9, 132.08), (96.52, 132.08), (96.52, 152.4), (xin, 152.4))
+    sh.label("CV1_DAC", (90.17, 60.96))
+    sh.label("CV2_DAC", (104.14, 88.9))
+    sh.label("CV3_DAC", (90.17, 124.46))
+    sh.label("CV4_DAC", (104.14, 152.4))
+    note(sh, 180.34, 50.8,
+         "U503 MCP6004 (rail-to-rail, VBUS): unity gain at DC. R511-R514 (1 k) sit inside",
+         "the loop: R521-R524 (10 k) take the feedback from the jack side, C511-C514",
+         "(100 pF) close the loop at high frequency, so the load does not shift the pitch",
+         "and cable capacitance does not upset the stage. R515-R518 (100 k) hold the inputs",
+         "at 0 V while the DACs are unpowered or in their power-on shutdown.",
+         "The output cannot reach 0 V exactly (MCP6004 swing, ~25 mV at light load = up to",
+         "30 cents sharp at note 24). DAC gain/offset errors (about +-2 % FSR) and op-amp",
+         "offset need a per-channel calibration in firmware; this board has no trimmers.",
+         "R511-R514 limit a short to GND to ~5 mA; external voltages are not clamped.",
+         "J501-J504: rear 3.5 mm TS jacks (PJ398SM type) to a synth's pitch CV input.")
 
     sh.heading("Gate outputs: 3.3 V GPIO -> 5 V gates", (20.32, 181.61))
     xb = 76.2
@@ -552,14 +570,20 @@ def sheet_cv(d):
         gnd(sh, xb, y + 8.89)
         sh.wire((83.82, y), (90.17, y))
         res(sh, "R5%d" % (40 + n), "1k", 93.98, y, {"1": out, "2": jack}, horiz=True)
-        sh.wire((97.79, y), (144.78, y))
+        jx = Xo + 35.56
+        sh.wire((97.79, y), (jx - 5.08, y))
         sh.label(jack, (101.6, y))
-        jack_out(sh, "J%d" % (504 + n), "GATE %d" % n, 149.86, y, jack)
-    note(sh, 172.72, 193.04,
+        res(sh, "R5%d" % (50 + n), "100k", 127.0, y + 5.08, {"1": jack, "2": "GND"})
+        sh.wire((127.0, y), (127.0, y + 1.27))
+        sh.wire((127.0, y + 8.89), (127.0, y + 11.43))
+        gnd(sh, 127.0, y + 11.43)
+        jack_out(sh, "J%d" % (504 + n), "GATE %d" % n, jx, y, jack)
+    note(sh, 180.34, 193.04,
          "U504 74AHCT125 on VBUS: TTL-level inputs accept the 3.3 V GPIO (VIH 2.0 V),",
          "outputs swing to VBUS, so a gate is (0, 5, 5.25) V. R531-R534 hold the",
-         "inputs low until the firmware drives GPIO 14-17. R541-R544 (1 k) protect",
-         "the outputs against shorts and patching into another output.",
+         "inputs low until the firmware drives GPIO 14-17; R551-R554 hold the jacks low",
+         "with the device unplugged. R541-R544 (1 k) limit a short to GND to ~5 mA;",
+         "external voltages are not clamped.",
          "J505-J508: rear 3.5 mm TS jacks to a synth's gate / trigger input.",
          "Use one active source track per CV/gate pair (ARCHITECTURE.md).")
     # supply units
@@ -578,6 +602,10 @@ def sheet_cv(d):
     sh.wire((287.02, 137.16), (287.02, 139.7))
     gnd(sh, 287.02, 139.7)
     decap(sh, "C505", "100n", 299.72, 124.46, "VBUS")
+    decap(sh, "C507", "10u", 312.42, 124.46, "VBUS", fp=FP_C0805)
+    note(sh, 241.3, 147.32,
+         "C507: local bulk for the buffers on VBUS, which also feeds",
+         "the LED rail; place it between U503 and U504.")
     return sh
 
 
@@ -765,8 +793,9 @@ def sheet_steps(d):
          "as one 16-bit word, bit n = STEP n+1 (GPA0-7 = steps 1-8, GPB0-7 = steps 9-16). U701 INTA/INTB unused (polled).",
          "SW701-SW716: 6x6 mm tactile, pressed = low.",
          "",
-         "WARNING: the current MCP23017 datasheet (DS20001952 rev. D and later) makes GPA7 and GPB7 output-only.",
-         "Steps 8 and 16 sit on those pins as the firmware expects; they may misread on new chips. See README.")
+         "WARNING: the current MCP23017 datasheet (DS20001952 rev. D and later) makes GPA7 and GPB7 output-only;",
+         "a level change on them during a read can corrupt SDA for the whole bus. Steps 8 and 16 sit on those pins",
+         "as the firmware expects. Open point 1 in README: to be moved before the PCB.")
     note(sh, 215.9, 180.34,
          "U702: all 16 pins outputs, bit n high = STEP n+1 lit (GPA0-7 = 1-8, GPB0-7 = 9-16).",
          "D701-D716: red 3 mm LEDs, 470 R: about 3 mA each from 3.3 V, 48 mA with all lit.",
@@ -780,7 +809,7 @@ def sheet_keys(d):
     sh = d.sheet("Key_matrix", "key_matrix.kicad_sch", "Key matrix: 64 pads, 8 SCENE, 8 MUTE on a TCA8418", "A3", 8)
     sh.heading("Key matrix: TCA8418 (0x34) scans 8 rows x 10 columns = 80 keys", (20.32, 27.94))
     Xi, Yi = 66.04, 215.9
-    conn = {"20": "TCA_RESET_N", "24": None, "23": "I2C_SCL", "22": "I2C_SDA", "21": "+3V3", "19": "GND",
+    conn = {"20": "TCA_RESET_N", "24": "TCA_INT_N", "23": "I2C_SCL", "22": "I2C_SDA", "21": "+3V3", "19": "GND",
             "25": "GND"}
     for r in range(8):
         conn[str(8 - r)] = "ROW%d" % r
@@ -794,7 +823,9 @@ def sheet_keys(d):
         px, py = sh.pin("U801", pin)
         sh.wire((px, py), (px - 10.16, py))
         sh.hlabel(net, (px - 10.16, py), shape, "left")
-    sh.nc(sh.pin("U801", "24"))
+    ix, iy = sh.pin("U801", "24")
+    sh.wire((ix, iy), (35.56, iy))
+    pull_up(sh, "R802", "10k", 35.56, iy, "+3V3", "TCA_INT_N", fields=LEFT)
     rx, ry = sh.pin("U801", "20")
     sh.wire((rx, ry), (rx - 5.08, ry), (rx - 5.08, ry - 3.81))
     res(sh, "R801", "10k", rx - 5.08, ry - 7.62, {"1": "+3V3", "2": "TCA_RESET_N"}, fields=LEFT)
@@ -804,7 +835,7 @@ def sheet_keys(d):
     sh.wire((vx, vy), (vx, vy - 2.54))
     rail(sh, "+3V3", vx, vy - 2.54)
     decap(sh, "C801", "100n", 76.2, 172.72, "+3V3")
-    decap(sh, "C802", "1u", 30.48, 172.72, "+3V3")
+    decap(sh, "C802", "1u", 22.86, 172.72, "+3V3")
     for pin in ("19", "25"):
         px, py = sh.pin("U801", pin)
         sh.wire((px, py), (px, py + 2.54))
@@ -845,7 +876,9 @@ def sheet_keys(d):
          "row -> switch -> diode anode -> cathode -> column, so a held key can never feed a row back through another column: no ghost presses.",
          "Key event code k = 10 x row + column + 1 (1..80) = the last two digits of SW8kk and D8kk. Firmware table (row, col):",
          "col 0-7 = pad (track col+1, slot row+1), col 8 = SCENE row+1, col 9 = MUTE track row+1. Chip debounce off, firmware 5-10 ms.",
-         "Keys: MX-type switches under the pads (assumed; any momentary switch works). Diodes: 1N4148W. INT not used (polled), left open.")
+         "Latency: the datasheet (8.6.2.15) scans the keypad every 25 ms and reports a press after 25-40 ms, with debounce disabled",
+         "too; the design asks for <= 15 ms. Open point, see README. Keys: MX-type switches (assumed). Diodes: 1N4148W.",
+         "INT is not read by the firmware (polled); R802 pulls the open-drain output up as the datasheet asks.")
     return sh
 
 
@@ -887,14 +920,18 @@ def sheet_rgb(d):
     res(sh, "R902", "390", X + 20.32, Y1, {"1": "LED_DIN_5V", "2": "CHAIN_IN"}, horiz=True)
     x0 = 104.14
     sh.wire((X + 24.13, Y1), (x0 - 7.62, Y1))
-    decap(sh, "C984", "100u", 81.28, Y1 + 25.4, "+5V_LED", fp=FP_CP, polar=True)
+    pull_down(sh, "R903", "10k", 88.9, Y1, "CHAIN_IN", fields=LEFT)
+    decap(sh, "C984", "470u 10V", 81.28, Y1 + 25.4, "+5V_LED", fp="Capacitor_SMD:CP_Elec_8x10", polar=True)
     note(sh, 20.32, Y1 + 38.1,
          "U901 74AHCT1G125 on +5V_LED: TTL input takes the",
          "3.3 V GPIO, output swings to the LEDs' own 5 V",
          "(SK6812 needs VIH 0.7 x VDD = 3.5 V). OE tied low.",
-         "R901 holds the chain input low until the PIO runs.",
-         "R902 390 R at the first LED damps the line.",
-         "C984 100 uF 10 V: bulk at the chain input.")
+         "R901 holds the buffer input low until the PIO runs,",
+         "R903 holds the first DIN low while U901 is still",
+         "unpowered. R902 390 R at the first LED damps the line.",
+         "C984 470 uF 10 V low-ESR: bulk at the chain input",
+         "for the PWM current peaks; final value from a scope",
+         "check of +5V_LED (keep >= 4.5 V for U901).")
     # LED rows
     per_row = 16
     pitch = 27.94
