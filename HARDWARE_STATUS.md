@@ -57,9 +57,12 @@ retried every 100 ms); without the LED chain GPIO 27 drives nothing.
   without ghosts, keys or PLAY held through a resync, keys released during a
   stall, a tap lost during an outage, a chip reset after the scan's check that
   would settle a tap, a chatter or the end of a suppression, and press-to-event
-  within 15 ms in a host loop model (14.44 ms worst; the model counts wire
-  bytes only, with no START/STOP or SDK call overhead, and is not a device
-  measurement). Storage tests cover the input resync after save and load.
+  in a host loop model that counts wire bytes only (no START/STOP or SDK call
+  overhead; not a device measurement): within 15 ms for one key (11.69 ms
+  worst), a ten-key chord (12.86 ms) and 50 presses a second held 60 ms
+  (11.77 ms); under sustained traffic far beyond playing (a press every
+  0.37-2 ms) up to 15.59 ms, bounded at 25 ms with no press lost. Storage
+  tests cover the input resync after save and load.
 - DAC command tests cover the 2.048 V reference, both gains and octave scaling.
 
 ## Needs Bench Verification
@@ -77,9 +80,10 @@ retried every 100 ms); without the LED chain GPIO 27 drives nothing.
 
 ### Session panel
 
-- Press-to-event latency (target 15 ms; estimated 7-10 ms typical, 14.3 ms
-  worst for a key alone, more while many keys change at once) for pads, SCENE
-  and MUTE, and the frame pass and the scan period on the device.
+- Press-to-event latency (target 15 ms; estimated 7-10 ms typical, 14.2 ms
+  worst for a key alone; sustained traffic of hundreds of key changes a second
+  can pass 15 ms) for pads, SCENE and MUTE, and the frame pass and the scan
+  period on the device.
 - Several keys held at once: no ghost presses. Each SCENE and MUTE key held:
   no other key reports.
 - Row rise time after a column is released (scope on a row with a key held in

@@ -31,12 +31,13 @@ void panel_input_init(void);
 // between agreeing; a change that does not last until then is lost, as is one
 // that starts and ends while its column is not sampled (bus down, scanner
 // being reconfigured). A sample that would settle a key (report its change or
-// end its suppression) is followed by the check in its own pass and counts
-// only if the check passes, so a chip that resets never supplies one: a pass
-// makes at most 8 transfers (the column, then the check), a configuration
-// attempt 6. Any I2C error, or a check that finds a chip changed
-// (reset), cancels every pending change and configures both chips again (a
-// pass of its own) before the next sample; reported states stay, so a key
+// end its suppression) is followed in its own pass by a read of the reset
+// canaries and counts only if they hold, so a chip that resets never supplies
+// one: a pass makes at most 6 transfers for columns 0-7 and 8 for columns 8-9
+// (the column, then the canaries), a configuration attempt 6. Any I2C error,
+// or a check that finds a chip changed (reset), cancels every pending change
+// and configures both chips again (a pass of its own) before the next sample;
+// reported states stay, so a key
 // held through it is not reported again. A configuration attempt fails when
 // the configuration or the check after it fails; the next attempt then waits
 // PANEL_RETRY_MS, with no key event meanwhile (PLAY keeps working).

@@ -22,7 +22,9 @@ the board of PR #10 (branch `session-panel-pcb`, `hardware/schematic/README.md`,
   COL 0-7 = track 1-8, COL 8 = SCENE of that row, COL 9 = MUTE (track = row + 1).
 - Press-to-event within 15 ms for pads, SCENE and MUTE, with the Core 0 loop as it is and a
   working bus (a failing transfer costs up to its 2 ms timeout; a flash save/load or a
-  panic ends in a resync).
+  panic ends in a resync). *Changed after the final review:* a playing requirement (one
+  key, chords, fast playing); sustained traffic far beyond playing can pass it (see
+  "Timing and bus budget").
 - Keep what the current driver guarantees: debounce, no event from a stall or a panic
   (resync), chip health readback, retries paced at 100 ms, every I2C transfer bounded
   (2000 us) with its exact byte count checked, PLAY on GPIO 28 untouched.
@@ -71,6 +73,7 @@ U802, IPOL on U701 and U703.
 bool key_scan_init(void);                          // configure both chips, selection unknown
 bool key_scan_check(bool *intact);                 // read the configuration back
 bool key_scan_column(uint8_t col, uint8_t *down);  // select col, read the rows
+bool key_scan_verify(uint8_t col, bool *intact);   // the canaries after a sample of col
 ```
 
 - `key_scan_init` writes U801 IODIR (canary), IPOL 00/00, GPPU, OLAT FF/FF, then U802
@@ -80,6 +83,12 @@ bool key_scan_column(uint8_t col, uint8_t *down);  // select col, read the rows
 - `key_scan_check` reads U801 0x00-0x03 (IODIR and IPOL) and U802 0x00-0x01 (IODIR). False
   on an I2C error; otherwise `*intact` tells whether all six bytes hold the values above.
   IPOL is in the check because a non-zero IPOL inverts every row (all keys pressed).
+- `key_scan_verify(col)` (*added after the final review*, for the settle proof) reads only
+  the canaries a reset clears, after the sample of `col`: U801 IODIR (pointer write and 2
+  bytes) for COL0-7, and U802 IODIR as well for COL8/9. A U802 reset only floats COL8/COL9,
+  which cannot pull a row low while a U801 column is sampled. IPOL corruption, which no
+  reset causes, stays with `key_scan_check`. False on an I2C error (or, with no transfer, a
+  col past COL9); it never touches the column selection.
 - `key_scan_column(col)`: deselect first, then select, so at most one column is low when
   the rows are read:
   - col 0-7: if U802 may have a column low (col 8/9 selected, or the selection unknown),
@@ -116,11 +125,12 @@ A scan is 11 steps: step 0 is `key_scan_check`, steps 1-10 are columns 0-9. Each
 is free-running: the loop is the clock. A pass never blocks for a whole scan (2-3 ms), so
 `encoder_poll`, which decodes quadrature by polling in the same loop, keeps its rate.
 
-*Changed after the final review:* a column step whose sample would settle a key runs
-`key_scan_check` again right after the row read, in the same pass (the settle proof, under
-"Chip health"). A pass therefore makes at most 8 transfers: 4 for the column, 4 for the
-check. Every other step makes at most 4, a configuration attempt 6. The next scan still
-starts with its own check.
+*Changed after the final review:* a column step whose sample would settle a key reads the
+reset canaries right after the row read, in the same pass (`key_scan_verify`; the settle
+proof, under "Chip health"). Such a pass makes at most 6 transfers for COL0-7 (4 for the
+column, 2 for U801 IODIR) and 8 for COL8/9 (4, and 4 for both chips' IODIR). Every other
+step makes at most 4, a configuration attempt 6. The next scan still starts with the full
+`key_scan_check`.
 
 ### Debounce at sample time
 
@@ -175,13 +185,17 @@ tap completed meanwhile is lost (as today).
   key could be let go the same way and then press while still held. So the column step
   finds out first whether its sample would settle any of the column's 8 keys (report a
   change, or end a suppression), by running `see` and `settle` on copies. If it would,
-  `key_scan_check` runs right after the row read, in the same pass, with the canaries read
-  after the data. Only if that check passes is the sample applied; if it fails or reads a
-  chip changed, the scanner is lost and nothing of the sample is applied. A sample that
-  settles nothing is applied as before, and the next scan's check still bounds a bogus first
-  sight. So every event, and every end of a suppression, rests on at least two samples, both
-  proved good by a check read after them. The cost is the check (4 transfers, 0.27 ms) in
-  the passes that settle a key.
+  `key_scan_verify` reads the canaries right after the row read, in the same pass: U801's
+  IODIR, and U802's too for COL8/9 (a U802 reset only floats COL8/COL9, which cannot pull a
+  row low while a U801 column is sampled). Only if they hold is the sample applied; if the
+  read fails or a canary has changed, the scanner is lost and nothing of the sample is
+  applied. IPOL is not read there: no reset changes it to a wrong value (a reset clears the
+  canary too), and the full check that starts every scan covers a stray write. A sample
+  that settles nothing is applied as before, and the next scan's check still bounds a bogus
+  first sight. So every event, and every end of a suppression, rests on at least two
+  samples, both proved good by canaries read after them. The cost is 2 transfers (0.11 ms)
+  for COL0-7, 4 (0.23 ms) for COL8/9, in the passes that settle a key. (A first version ran
+  the whole `key_scan_check`, 0.27 ms, there; it stretched the scans more under load.)
 - Residual risk, not handled: after a reset GPA7/GPB7 are inputs until the next
   configuration, and a level change on them during a read may corrupt SDA (datasheet rev.
   D). The window is at most one scan (step row: one 20 ms sample). A corrupted read either
@@ -261,10 +275,11 @@ The 16-bit step word and `step_buttons_t` stay; bit n = step n+1.
   (68 + 113) + U802 release before column 0 (68) = about 2.41 ms of wire time in 36 SDK
   calls, 107 wire bytes. With call overhead and the rest of each pass (encoders, UI, cached
   LED mask, about 30 us) a scan takes S = 2.7-3 ms. Each column whose sample settles a key
-  adds the check after it (12 wire bytes, 0.27 ms), so a scan in which every column settles
-  a key (a chord across all ten columns, or its release) is about 2.7 ms longer.
-- **Per pass:** one scan step, 0.2-0.3 ms of I2C; a pass that settles a key adds the check,
-  at most 8 transfers and about 0.5 ms in all. Today every pass spends about 0.3 ms
+  adds the canaries after it (5 wire bytes, 0.11 ms, for COL0-7; 10, 0.23 ms, for COL8/9),
+  so a scan in which every column settles a key (a chord across all ten columns, or its
+  release) is about 1.35 ms longer.
+- **Per pass:** one scan step, 0.2-0.3 ms of I2C; a pass that settles a key adds its
+  canaries: at most 6 transfers for COL0-7 and 8 for COL8/9, about 0.5 ms at most. Today every pass spends about 0.3 ms
   (TCA8418 count and INT_STAT reads, U701 ports). Every 20 ms the step-row sample adds about
   0.5 ms (two chips x two 2-byte reads); every 33 ms the frame pass (OLED 1 KB at 10 MHz
   = 0.82 ms, render, LED frame and its DMA start, the transport snapshot) adds an
@@ -273,19 +288,30 @@ The 16-bit step word and `step_buttons_t` stay; bit n = step n+1.
   row needs about 2.5 %, the step LEDs less. Core 0 is the only bus user.
 - **Press-to-event:** at most one scan until the key's column is sampled, then the first
   sample at least 5 ms later: <= S + 5 ms + S, plus at most one frame pass and one step-row
-  sample inside that window, plus the check in the settling pass: about 3 + 5 + 3 + 2.5 +
-  0.5 + 0.3 = 14.3 ms worst for a key changing alone, 7-10 ms typical. Every other key that
-  settles in those scans adds its check to them, so many keys changing at once stretch the
-  scans (toward 5.4 ms when all ten columns settle in every scan); changes sustained in most
-  columns on every scan, far beyond any playing rate, could pass 15 ms.
+  sample inside that window, plus the canaries in the settling pass: about 3 + 5 + 3 + 2.5
+  + 0.5 + 0.2 = 14.2 ms worst for a key changing alone, 7-10 ms typical.
   `now_ms` is whole milliseconds; flooring both stamps can only make a settle earlier. With
   the old 8 ms debounce the worst case would pass 15 ms; hence 5 ms, the low end of the
-  spec's 5-10 ms (the knob if the bench finds the frame pass longer). A host test runs the
-  loop with a wire-time clock over all phases of the 20 ms and 33 ms tasks and checks
-  <= 15 ms. It presses a key every 0.37 ms, column after column, in stretches of 80 presses,
-  and releases each at its event (a key change about every 0.19 ms): worst 14.44 ms, 11.44
-  ms before the settle proof. That clock counts wire bytes only, with no START/STOP or SDK call overhead: the
-  host loop model, not a device measurement, and it does not replace the bench.
+  spec's 5-10 ms (the knob if the bench finds the frame pass longer).
+- **Playing, measured in the host loop model** (*changed after the final review*). A host
+  test runs the loop with a wire-time clock (+30 us per pass, a 2.5 ms frame every 33 ms, a
+  0.5 ms step-row sample every 20 ms) and checks <= 15 ms on playing:
+  - one key alone, in every column, at every phase of the 660 ms period of both tasks in
+    0.37 ms steps (18000 presses): worst 11.69 ms;
+  - a ten-key chord, one key per column, at the same phases: worst 12.86 ms;
+  - a playing stream of 50 presses a second (beyond a fast two-handed roll), each held
+    60 ms, for 10 s: worst 11.77 ms.
+  The clock counts wire bytes only, with no START/STOP or SDK call overhead: these are host
+  model figures, not device measurements, and the bench item stays.
+- **Heavy traffic can pass 15 ms.** A settle costs bus time (its canaries), so keys changing
+  together slow each other down. Under a scan just under 5 ms long a key needs a third scan
+  after it is first seen. Sustained traffic far beyond playing does this: in the model,
+  presses every 0.37-2 ms, each held 30 ms (thousands of key changes a second), reach
+  15.59 ms, and first pass 15 ms at a press every 0.85 ms (about 2,350 changes a second).
+  The device's call overhead, which the model leaves out, lowers that threshold, so
+  sustained traffic of hundreds of key changes a second can push press-to-event past 15 ms.
+  No held press is lost: the stress test checks that each press held 30 ms gets exactly
+  one down, within 25 ms.
 
 ## Tests
 
@@ -327,7 +353,13 @@ review: a U801 reset after the scan's check never settles a tap seen once (rows 
 low), a held key's one-sample chatter (rows floating high, or a reset inside the ROW7 read)
 or the end of a held key's suppression after a resync, and the next pass is the
 configuration; the fault sweep adds a reset with rows floating high and keys that change
-between two samples inside its window; a settling pass makes at most 8 transfers.
+between two samples inside its window; a settling pass makes at most 6 transfers for
+COL0-7 and 8 for COL8/9. Press-to-event: one key, a ten-key chord and a 50 presses/s
+stream within 15 ms; a stress test (a press every 0.37-2 ms) within 25 ms with no press
+lost. `test_key_scan.c`: `key_scan_verify` reads 2 transfers for COL0-7 and 4 for COL8/9,
+finds a U801 reset for every column and a U802 reset for COL8/9, a reset inside its read
+and one during init, fails on any failed or short transfer, ignores IPOL, keeps the
+selection, and refuses a column past COL9.
 
 `test_expanders.c`: both step chips configured with the values above, IPOL first; steps
 8/16 come from 0x24 and U701 bits 7/15 are ignored; a reset U703, before or inside its read,
@@ -369,7 +401,10 @@ steps 8 and 16 on U703.
    every sample, no long press from an untrusted chip (changed after review from GPPU read
    before the data).
 6. The settle proof (after the final review, found by three reviewers): a column sample
-   that would settle a key is followed by `key_scan_check` in its own pass and applied only
-   if the check passes; up to 8 transfers in such a pass, the scan-start check kept.
+   that would settle a key is followed in its own pass by a read of the reset canaries
+   (`key_scan_verify`: U801 IODIR, and U802 IODIR for COL8/9) and applied only if they
+   hold; up to 6 transfers in such a pass for COL0-7 and 8 for COL8/9, the full scan-start
+   check kept. The 15 ms press-to-event requirement is tested on playing (one key, a chord,
+   a 50/s stream); heavy traffic is only bounded (25 ms in the model).
 7. Step row long press only in a pass that took a good sample of the key's chip (after the
    final review): up to one sample late, never on a sample taken before the release.
