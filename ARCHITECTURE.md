@@ -79,9 +79,12 @@ lane order.
   On. The note-off countdown is `gate_pulses`, or
   `min(PULSES_PER_STEP, gate_pulses + flam_pulses)` on a step with a flam. Note
   Off of a kit voice is Note On with velocity 0, so a kit's messages share one
-  status byte; SYNTH and DRUM tracks still send 0x80. The ISR keeps the note and
-  channel each sounding voice was sent on, so a settings edit cannot strand a
-  note.
+  status byte; SYNTH and DRUM tracks still send 0x80. One release channel per
+  kit track: every voice is released at the latest at the next step boundary,
+  before that step's hits, so all sounding voices come from one step and share
+  the channel stored at that step; each keeps the note it was sent on. A
+  settings edit therefore cannot strand a note (host builds check the invariant
+  before a channel is stored).
 - **Kind change.** When a row of another kind is installed (type change, load),
   the ISR first releases what the old kind left sounding. Stop, Panic, Start
   while playing and a play-mode change queue a release of every sounding kit

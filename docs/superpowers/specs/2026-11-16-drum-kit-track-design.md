@@ -205,9 +205,11 @@ stored mute does not hide the clip on the grid (`test_clip_mask_ignores_stored_m
 
 ### Runtime state per kit track
 
-The ISR keeps, per track that plays a kit: the sounding mask (11 bits) with the note and channel
-each sounding voice was sent on (so a later settings edit cannot strand a note), the note-off
-countdown, the flam mask, the flam countdown and the flam velocity (one per step, as AC is per
+The ISR keeps, per track that plays a kit: the sounding mask (11 bits) with the note each sounding
+voice was sent on and one release channel. Every voice is released at the latest at the next step
+boundary, before that step's hits, so all sounding voices come from one step and share the channel
+stored at that step; a later settings edit therefore cannot strand a note (host builds check this
+invariant before a channel is stored). Then the note-off countdown, the flam mask, the flam countdown and the flam velocity (one per step, as AC is per
 step). That is under 30 bytes per track.
 
 ### Order of work in one pulse

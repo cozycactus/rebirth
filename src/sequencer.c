@@ -8,6 +8,21 @@
 #include <string.h>
 #include <math.h>
 
+// Host builds check playback invariants; on the target the check compiles away (no
+// flash call from the ISR path that runs from RAM).
+#if defined(__arm__)
+#define PLAYBACK_INVARIANT(condition) ((void)0)
+#else
+#include <stdio.h>
+#include <stdlib.h>
+#define PLAYBACK_INVARIANT(condition) do { \
+    if (!(condition)) { \
+        fprintf(stderr, "%s:%d: invariant %s\n", __FILE__, __LINE__, #condition); \
+        abort(); \
+    } \
+} while (0)
+#endif
+
 // ─── Internal state ─────────────────────────────────────────────
 
 static uint32_t timer_alarm_num;
@@ -71,15 +86,17 @@ static active_note_state_t active_note_state[NUM_TRACKS];
 // Note durations share one countdown for MIDI and CV/Gate on each track.
 static uint8_t note_off_countdown[NUM_TRACKS];
 
-// What a track playing a kit row has sounding. Every voice is released at the latest
-// at the next step boundary, before that step's hits, so the sounding voices all come
-// from one step and share its channel; each keeps the note it was sent on. A flam's
-// second hits come before that release and use the same notes and channel.
+// What a track playing a kit row has sounding. One release channel per kit track:
+// every voice is released at the latest at the next step boundary, before that step's
+// hits, so all sounding voices come from one step and share the channel stored at that
+// step (play_kit_step checks it before it stores a channel). Each voice keeps the note
+// it was sent on. A flam's second hits come before that release and use the same notes
+// and channel.
 typedef struct {
     uint16_t sounding;               // bit v: voice v
     uint16_t flam;                   // voices whose second hit is due; within sounding
     uint8_t  note[KIT_VOICES];
-    uint8_t  channel;
+    uint8_t  channel;                // of every sounding voice: the step's channel
     uint8_t  countdown;              // pulses to the release; 0 = none due
     uint8_t  flam_countdown;         // pulses to the second hits; 0 = none due
     uint8_t  flam_velocity;          // one level above the step's note level
@@ -380,9 +397,9 @@ static void commit_step(void) {
 // ─── Kit tracks ─────────────────────────────────────────────────
 // MIDI only: a kit never touches CV or gates. Its Note Off is Note On velocity 0.
 
-// Writes a release for every voice the kit on `track` has sounding into `out`, on the
-// note and channel each was sent on; the voices stop sounding and a pending flam is
-// cancelled. Returns the byte count. In RAM: the timer ISR calls it on every release.
+// Writes a release for every voice the kit on `track` has sounding into `out`, each on
+// the note it was sent on and all on the one channel stored at their step; the voices
+// stop sounding and a pending flam is cancelled. Returns the byte count. In RAM: the timer ISR calls it on every release.
 static uint8_t __not_in_flash_func(kit_take_release)(uint8_t track, uint8_t *out) {
     kit_runtime_t *k = &kit_runtime[track];
     uint8_t length = 0;
@@ -432,6 +449,9 @@ static void play_kit_step(uint8_t track, const prepared_track_pattern_t *row, ui
     uint32_t word = row->kit.lanes[step];
     if (!(word & 0x00FFFFFCu)) return;  // no voice lane set
     kit_runtime_t *k = &kit_runtime[track];
+    // One release channel: no voice of an earlier step may still sound on another.
+    PLAYBACK_INVARIANT(k->sounding == 0 || k->channel == row->kit.channel);
+    k->channel = row->kit.channel;
     uint8_t accent = (word & 3u) != 0;  // lane 0: AC
     uint16_t flam = 0;
     for (uint8_t i = 0; i < KIT_VOICES; i++) {
@@ -445,7 +465,6 @@ static void play_kit_step(uint8_t track, const prepared_track_pattern_t *row, ui
         k->sounding |= (uint16_t)(1u << v);
         if (value == KIT_FLAM) flam |= (uint16_t)(1u << v);
     }
-    k->channel = row->kit.channel;
     k->countdown = row->kit.gate_pulses;
     if (flam) {
         unsigned off = (unsigned)row->kit.gate_pulses + row->kit.flam_pulses;
