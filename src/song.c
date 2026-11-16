@@ -1,5 +1,6 @@
 #include <string.h>
 #include "sequencer.h"
+#include "kit.h"
 
 // ─── Pattern access helpers ─────────────────────────────────────
 
@@ -195,8 +196,28 @@ static void refresh_track_rows(uint8_t track) {
     }
 }
 
-void seq_set_track_config(uint8_t track, const track_config_t *config) {
-    if (track >= NUM_TRACKS || !config) return;
+uint8_t seq_kit_tracks(void) {
+    uint8_t mask = 0;
+    // One location per lock section, as below.
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        uint32_t lock_state = seq_lock();
+        mask |= kit_track_mask(&g_seq.patterns[p], 1);
+        seq_unlock(lock_state);
+    }
+    return mask;
+}
+
+bool seq_set_track_config(uint8_t track, const track_config_t *config) {
+    if (track >= NUM_TRACKS || !config) return false;
+    if (config->type == TRACK_TYPE_KIT) {
+        // At most MAX_KIT_TRACKS kits play at once, in Song mode and mixed launches too.
+        uint8_t kits = seq_kit_tracks();
+        if (!(kits & (1u << track))) {
+            uint8_t count = 0;
+            for (; kits; kits &= (uint8_t)(kits - 1u)) count++;
+            if (count >= MAX_KIT_TRACKS) return false;
+        }
+    }
     // One location per lock section keeps Core 0's interrupts-off windows short;
     // Core 1 reads routing only from the prepared rows refreshed below.
     for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
@@ -207,6 +228,17 @@ void seq_set_track_config(uint8_t track, const track_config_t *config) {
         g_seq.patterns[p].tracks[track].muted = muted;
         seq_unlock(lock_state);
     }
+    refresh_track_rows(track);
+    return true;
+}
+
+void seq_set_kit_config(uint8_t track, const kit_config_t *config) {
+    if (track >= NUM_TRACKS || !config) return;
+    kit_config_t clamped = *config;
+    kit_config_clamp(&clamped);
+    uint32_t lock_state = seq_lock();
+    g_seq.kit_config[track] = clamped;
+    seq_unlock(lock_state);
     refresh_track_rows(track);
 }
 

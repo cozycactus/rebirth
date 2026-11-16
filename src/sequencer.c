@@ -265,38 +265,7 @@ static bool fill_prepared_track(prepared_track_pattern_t *dst,
     return has_clip;
 }
 
-static void load_prepared_track(uint8_t track) {
-    uint32_t lock_state = seq_lock();
-    uint8_t pattern = g_seq.transport.current_pattern[track];
-    if (pattern >= MAX_PATTERNS) pattern = 0;
-    if (playback_pattern[track] != pattern ||
-        playback_revision[track] != prepared_revision[pattern][track]) {
-        prepared_playback.track[track] = prepared_patterns[pattern][track];
-        playback_revision[track] = prepared_revision[pattern][track];
-        playback_pattern[track] = pattern;
-    }
-    seq_unlock(lock_state);
-}
-
-// Applies the queued pattern; returns true when the playing location changed.
-static bool apply_track_queue_if_ready(uint8_t track) {
-    transport_t *t = (transport_t *)&g_seq.transport;
-    if (t->queued_pattern[track] == NO_QUEUED_PATTERN) return false;
-
-    bool changed = false;
-    uint32_t lock_state = seq_lock();
-    uint8_t queued = t->queued_pattern[track];
-    if (queued != NO_QUEUED_PATTERN) {
-        changed = t->current_pattern[track] != queued;
-        t->current_pattern[track] = queued;
-        t->queued_pattern[track] = NO_QUEUED_PATTERN;
-    }
-    seq_unlock(lock_state);
-    load_prepared_track(track);
-    return changed;
-}
-
-// Immediate note-off (used by transport_stop)
+// Immediate note-off: live mutes, note-off countdowns and a kind change.
 static void send_note_off_if_active(uint8_t track) {
     if (!note_is_on[track]) return;
 
@@ -458,7 +427,7 @@ static void kit_release_all(void) {
 // arms its second hit, one level up, `flam_pulses` later; the step's note-off then
 // waits for the second hit's gate, up to the step boundary.
 static void play_kit_step(uint8_t track, const prepared_track_pattern_t *row, uint8_t step) {
-    kit_release(track);              // only after a kind change; the countdown ends by now
+    kit_release(track);              // leftovers only: the countdown ends by now
     uint32_t word = row->kit.lanes[step];
     if (!(word & 0x00FFFFFCu)) return;  // no voice lane set
     kit_runtime_t *k = &kit_runtime[track];
@@ -513,6 +482,51 @@ static void kit_play_flam(uint8_t track) {
     if (length && !midi_try_send_bytes_reserve(message, length, KIT_FLAM_RESERVE)) {
         jitter_stats.flam_drops++;
     }
+}
+
+// ─── Installing prepared rows ───────────────────────────────────
+
+// Installs the row of the track's playing location when it changed. A row of the other
+// kind first releases what the old kind left sounding, in sends of their own before the
+// new row plays: the event note on its stored route (a tie or slide note has no
+// countdown), or every kit voice with a pending flam cancelled. Called with the playback
+// lock held, or by transport_start() stopped with that state cleared: nothing to release.
+static void load_prepared_track(uint8_t track) {
+    uint8_t old_kind = prepared_playback.track[track].kind;
+    uint32_t lock_state = seq_lock();
+    uint8_t pattern = g_seq.transport.current_pattern[track];
+    if (pattern >= MAX_PATTERNS) pattern = 0;
+    if (playback_pattern[track] != pattern ||
+        playback_revision[track] != prepared_revision[pattern][track]) {
+        prepared_playback.track[track] = prepared_patterns[pattern][track];
+        playback_revision[track] = prepared_revision[pattern][track];
+        playback_pattern[track] = pattern;
+    }
+    seq_unlock(lock_state);
+    if (prepared_playback.track[track].kind == old_kind) return;
+    if (old_kind == PREPARED_KIT) {
+        kit_release(track);
+    } else {
+        send_note_off_if_active(track);
+    }
+}
+
+// Applies the queued pattern; returns true when the playing location changed.
+static bool apply_track_queue_if_ready(uint8_t track) {
+    transport_t *t = (transport_t *)&g_seq.transport;
+    if (t->queued_pattern[track] == NO_QUEUED_PATTERN) return false;
+
+    bool changed = false;
+    uint32_t lock_state = seq_lock();
+    uint8_t queued = t->queued_pattern[track];
+    if (queued != NO_QUEUED_PATTERN) {
+        changed = t->current_pattern[track] != queued;
+        t->current_pattern[track] = queued;
+        t->queued_pattern[track] = NO_QUEUED_PATTERN;
+    }
+    seq_unlock(lock_state);
+    load_prepared_track(track);
+    return changed;
 }
 
 static void clear_runtime_note_state(void) {

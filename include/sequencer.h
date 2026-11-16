@@ -289,9 +289,17 @@ uint64_t sequencer_clip_mask(uint8_t bank);
 // Track mutes (bitmask, instant)
 void seq_set_track_mute(uint8_t track, bool muted);
 // Copies a track's routing into all 32 locations, each keeping its own stored
-// `muted`, then refreshes that track's prepared rows. Takes seq_lock: call with
-// none held.
-void seq_set_track_config(uint8_t track, const track_config_t *config);
+// `muted`, then refreshes that track's prepared rows. Returns false, nothing
+// changed, when `config` makes a third track a kit: its type is KIT, the track is
+// a kit in no location and MAX_KIT_TRACKS other tracks are. Takes seq_lock: call
+// with none held.
+bool seq_set_track_config(uint8_t track, const track_config_t *config);
+// Stores the track's kit settings, clamped to their ranges, then refreshes that
+// track's prepared rows. Takes seq_lock: call with none held.
+void seq_set_kit_config(uint8_t track, const kit_config_t *config);
+// Bit t set when track t is a kit in any location. Takes seq_lock: call with none
+// held.
+uint8_t seq_kit_tracks(void);
 // The MUTE button. A track that is muted (live, or stored at the location it
 // plays) becomes audible: the live bit and the stored mute of every location
 // are cleared and its prepared rows refreshed. An audible track gets the live

@@ -1750,6 +1750,301 @@ static void test_kits_at_wire_rate(void) {
     CHECK(play_load(&one_kit) == 0);
 }
 
+// ─── Kit launches, Song mode and type changes ───────────────────
+
+// Under every quantization: A1 plays BD on every step at gate 100, A2 (SD on every step) is
+// queued at step 5 and joins in the phase test_launch_phase_matrix expects for length 16.
+static void test_kit_launch_every_quant(void) {
+    static const launch_quant_t quants[] = {
+        LAUNCH_QUANT_TRACK_LOOP, LAUNCH_QUANT_BAR, LAUNCH_QUANT_BEAT, LAUNCH_QUANT_STEP
+    };
+    static const uint8_t due[] = {16, 16, 8, 6};
+    static const uint8_t phase[] = {0, 0, 8, 6};
+    for (unsigned q = 0; q < 4; q++) {
+        reset();
+        make_kit(1, KIT_CHANNEL);
+        set_gate(1, 100);
+        for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
+            set_kit(0, 1, step, KIT_LANE_BD, KIT_NOTE);
+            set_kit(1, 1, step, KIT_LANE_SD, KIT_NOTE);
+        }
+        transport_set_launch_quant(quants[q]);
+        transport_start();
+        run_through_step(5);
+        CHECK(transport_queue_track_pattern(1, 1));
+        run_through_step(due[q] - 1u);
+        CHECK(g_seq.transport.current_pattern[1] == 0);
+        CHECK(count_kit(38, 80) == 0);
+        unsigned before = msgs();
+        run_through_step(due[q]);           // the launch point
+        CHECK(g_seq.transport.current_pattern[1] == 1);
+        CHECK(g_seq.transport.current_track_step[1] == phase[q]);
+        CHECK(msgs() == before + 2);
+        CHECK(msg_is(msg[before], KIT_STATUS, 0x24, 0x00));
+        CHECK(msg_is(msg[before + 1], KIT_STATUS, 0x26, 80));
+        CHECK(count_kit(36, 80) == due[q]);
+        CHECK(count_kit(36, 0) == due[q]);
+    }
+}
+
+// Song entries: the kit plays location 0 (BD), then location 1 (SD), at gate 100; the song
+// stops at its end.
+static void test_kit_song_mode(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
+        set_kit(0, 1, step, KIT_LANE_BD, KIT_NOTE);
+        set_kit(1, 1, step, KIT_LANE_SD, KIT_NOTE);
+    }
+    uint8_t entry[NUM_TRACKS] = {0};
+    CHECK(song_append_patterns(entry, 1));
+    entry[1] = 1;
+    CHECK(song_append_patterns(entry, 1));
+    song_set_end_mode(SONG_END_STOP);
+    transport_set_mode(PLAY_MODE_SONG);
+    transport_start();
+    run_through_step(15);                   // entry 0, its last step
+    CHECK(count_kit(36, 80) == 16 && count_kit(38, 80) == 0);
+    unsigned before = msgs();
+    pulses(PULSES_PER_STEP);                // entry 1, its first step
+    CHECK(g_seq.transport.song_position == 1);
+    CHECK(g_seq.transport.current_pattern[1] == 1);
+    CHECK(msgs() == before + 2);
+    CHECK(msg_is(msg[before], KIT_STATUS, 36, 0));
+    CHECK(msg_is(msg[before + 1], KIT_STATUS, 38, 80));
+    pulses(15 * PULSES_PER_STEP);           // entry 1, its last step
+    CHECK(count_kit(36, 80) == 16 && count_kit(38, 80) == 16);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    pulses(PULSES_PER_STEP);                // the end of the song
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    CHECK(msg_is(last_msg(1), KIT_STATUS, 38, 0));
+    CHECK(msg_is(last_msg(0), MIDI_STOP, 0, 0));
+    CHECK(count_kit(36, 0) == 16 && count_kit(38, 0) == 16);
+    CHECK(kit_runtime[1].sounding == 0);
+}
+
+// Kit messages: each hit (velocity > 0) of a note has its release; all of them come
+// before message `limit`. Returns the hits.
+static unsigned kit_paired_before(unsigned limit) {
+    unsigned total = msgs();
+    unsigned hits[128] = {0};
+    unsigned releases[128] = {0};
+    unsigned count = 0;
+    for (unsigned i = 0; i < total; i++) {
+        if (msg[i].status != KIT_STATUS) continue;
+        CHECK(i < limit);
+        if (msg[i].data2) hits[msg[i].data1]++; else releases[msg[i].data1]++;
+        count += msg[i].data2 != 0;
+    }
+    for (unsigned note = 0; note < 128; note++) CHECK(hits[note] == releases[note]);
+    return count;
+}
+
+// Index of the first message with `status`; the message count when there is none.
+static unsigned first_msg(uint8_t status) {
+    unsigned total = msgs();
+    for (unsigned i = 0; i < total; i++) {
+        if (msg[i].status == status) return i;
+    }
+    return total;
+}
+
+// Review focus: track 1 switched from a kit to SYNTH (channel 2) while BD's flam is pending.
+static void test_kit_to_synth_during_flam(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    set_flam(1, 12);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_FLAM);
+    set_note(0, 1, 1, 60, 0);               // the step_t data the SYNTH row plays
+    transport_start();
+    tick();                                 // pulse 0: the first hit, the flam armed
+    CHECK(kit_runtime[1].flam_countdown == 12);
+    track_config_t synth = g_seq.patterns[0].tracks[1];
+    synth.type = TRACK_TYPE_SYNTH;
+    synth.midi_channel = 2;
+    CHECK(seq_set_track_config(1, &synth));
+    pulses(3 * PULSES_PER_STEP);            // through step 3
+    unsigned first_synth = first_msg(MIDI_NOTE_ON | 2);
+    CHECK(first_synth < msgs());
+    CHECK(msg_is(msg[first_synth], MIDI_NOTE_ON | 2, 60, 100));
+    CHECK(kit_paired_before(first_synth) == 2);   // the first hit and the second
+    CHECK(kit_runtime[1].sounding == 0);
+    CHECK(count_kit(36, 110) == 1);
+}
+
+// Review focus: a SYNTH note with a tie or slide (no countdown) on MIDI channel 0 and CV 0;
+// the track switched to a kit on channel 9 releases it at the next step boundary on its
+// stored route, before the kit's first hit.
+static void synth_connected_note_to_kit(uint8_t flag) {
+    g_seq.patterns[0].tracks[0].output_mode = OUTPUT_BOTH;
+    g_seq.patterns[0].tracks[0].cv_channel = 0;
+    set_note(0, 0, 0, 60, flag);
+    set_kit(0, 0, 1, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();                                 // pulse 0: the synth note, gate high
+    CHECK(note_is_on[0] && note_off_countdown[0] == 0);
+    CHECK(fake_gates == 1);
+    track_config_t kit = g_seq.patterns[0].tracks[0];
+    kit.type = TRACK_TYPE_KIT;
+    kit.midi_channel = KIT_CHANNEL;
+    CHECK(seq_set_track_config(0, &kit));
+    pulses(PULSES_PER_STEP - 1);            // through pulse 23: the note holds
+    CHECK(fake_gates == 1);
+    CHECK(msgs() == 1);
+    tick();                                 // pulse 24: step 1
+    CHECK(msgs() == 3);
+    CHECK(msg_is(msg[1], MIDI_NOTE_OFF, 60, 0));
+    CHECK(msg_is(msg[2], KIT_STATUS, 36, 80));
+    CHECK(fake_gates == 0);
+    CHECK(!note_is_on[0]);
+    pulses(2 * PPQN);
+    CHECK(fake_gates == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
+    CHECK(count_note_on(0, 60) == 1);
+}
+
+static void test_synth_tie_to_kit_releases_note_and_gate(void) {
+    synth_connected_note_to_kit(STEP_FLAG_TIE);
+}
+
+static void test_synth_slide_to_kit_releases_note_and_gate(void) {
+    synth_connected_note_to_kit(STEP_FLAG_SLIDE);
+}
+
+// Track 1, a kit sounding BD and SD at gate 100, switched to DRUM (note 40 on channel 2).
+static void test_kit_to_drum_releases_voices(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_NOTE);
+    set_kit(0, 1, 0, KIT_LANE_SD, KIT_NOTE);
+    set_note(0, 1, 1, 60, 0);
+    transport_start();
+    tick();
+    CHECK(msgs() == 2);
+    track_config_t drum = g_seq.patterns[0].tracks[1];
+    drum.type = TRACK_TYPE_DRUM;
+    drum.drum_note = 40;
+    drum.midi_channel = 2;
+    drum.output_mode = OUTPUT_MIDI_ONLY;
+    CHECK(seq_set_track_config(1, &drum));
+    pulses(PULSES_PER_STEP - 1);
+    CHECK(msgs() == 2);
+    tick();                                 // pulse 24: step 1
+    CHECK(msgs() == 5);
+    CHECK(msg_is(msg[2], KIT_STATUS, 36, 0));
+    CHECK(msg_is(msg[3], KIT_STATUS, 38, 0));
+    CHECK(msg_is(msg[4], MIDI_NOTE_ON | 2, 40, 100));
+    pulses(2 * PPQN);
+    CHECK(kit_paired_before(first_msg(MIDI_NOTE_ON | 2)) == 2);
+    CHECK(kit_runtime[1].sounding == 0);
+}
+
+// Kit voices still sounding when an event row is installed are released before the row's
+// first note. The test clears their countdown, which otherwise ends by the boundary.
+static void test_kind_change_releases_kit_voices_left_sounding(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_kit(0, 1, 0, KIT_LANE_BD, KIT_NOTE);
+    set_kit(0, 1, 0, KIT_LANE_CH, KIT_NOTE);
+    set_note(0, 1, 1, 60, 0);
+    transport_start();
+    tick();
+    kit_runtime[1].countdown = 0;           // no release due
+    track_config_t synth = g_seq.patterns[0].tracks[1];
+    synth.type = TRACK_TYPE_SYNTH;
+    synth.midi_channel = 2;
+    CHECK(seq_set_track_config(1, &synth));
+    pulses(PULSES_PER_STEP - 1);
+    CHECK(msgs() == 2);
+    tick();                                 // pulse 24: step 1
+    CHECK(msgs() == 5);
+    CHECK(msg_is(msg[2], KIT_STATUS, 36, 0));
+    CHECK(msg_is(msg[3], KIT_STATUS, 42, 0));
+    CHECK(msg_is(msg[4], MIDI_NOTE_ON | 2, 60, 100));
+    CHECK(kit_runtime[1].sounding == 0);
+}
+
+// Track 1, a DRUM note (40 on channel 1, CV 1) at gate 100, switched to a kit on channel 9.
+static void test_drum_to_kit_releases_note(void) {
+    track_config_t drum = g_seq.patterns[0].tracks[1];
+    drum.type = TRACK_TYPE_DRUM;
+    drum.drum_note = 40;
+    drum.midi_channel = 1;
+    drum.output_mode = OUTPUT_BOTH;
+    drum.cv_channel = 1;
+    drum.gate_length_pct = 100;
+    CHECK(seq_set_track_config(1, &drum));
+    set_note(0, 1, 0, 60, 0);
+    set_kit(0, 1, 1, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();                                 // pulse 0: the drum note, gate high
+    CHECK(msgs() == 1 && msg_is(msg[0], MIDI_NOTE_ON | 1, 40, 100));
+    CHECK(fake_gates == 1u << 1);
+    track_config_t kit = drum;
+    kit.type = TRACK_TYPE_KIT;
+    kit.midi_channel = KIT_CHANNEL;
+    CHECK(seq_set_track_config(1, &kit));
+    pulses(PULSES_PER_STEP - 1);
+    CHECK(fake_gates == 1u << 1);
+    tick();                                 // pulse 24: step 1
+    CHECK(msgs() == 3);
+    CHECK(msg_is(msg[1], MIDI_NOTE_OFF | 1, 40, 0));
+    CHECK(msg_is(msg[2], KIT_STATUS, 36, 80));
+    CHECK(fake_gates == 0);
+    CHECK(!note_is_on[1]);
+    pulses(2 * PPQN);
+    CHECK(fake_gates == 0);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF | 1) == 1);
+}
+
+static void test_type_change_keeps_both_step_arrays(void) {
+    static const track_type_t types[] = {TRACK_TYPE_KIT, TRACK_TYPE_SYNTH, TRACK_TYPE_KIT};
+    pattern_t *p = &g_seq.patterns[0];
+    pattern_set_step(p, 1, 3, 64, 90, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
+    p->kit_steps[1][5] = kit_set(0, KIT_LANE_SD, KIT_FLAM);
+    step_t steps[STEPS_PER_PATTERN];
+    uint32_t words[STEPS_PER_PATTERN];
+    memcpy(steps, p->steps[1], sizeof(steps));
+    memcpy(words, p->kit_steps[1], sizeof(words));
+    track_config_t cfg = p->tracks[1];
+    for (unsigned i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        cfg.type = types[i];
+        CHECK(seq_set_track_config(1, &cfg));
+        CHECK(p->tracks[1].type == types[i]);
+    }
+    CHECK(memcmp(steps, p->steps[1], sizeof(steps)) == 0);
+    CHECK(memcmp(words, p->kit_steps[1], sizeof(words)) == 0);
+}
+
+static void test_kit_config_clamps_and_refreshes(void) {
+    make_kit(1, KIT_CHANNEL);
+    for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) set_kit(0, 1, step, KIT_LANE_BD, KIT_NOTE);
+    transport_start();
+    tick();                                 // pulse 0: BD on note 36
+    kit_config_t cfg = g_seq.kit_config[1];
+    cfg.note[0] = 200;
+    cfg.flam_pulses = 0;
+    cfg.vel_normal = 0;
+    cfg.vel_accent = 0;
+    cfg.vel_max = 0;
+    seq_set_kit_config(1, &cfg);
+    CHECK(g_seq.kit_config[1].note[0] == 127);
+    CHECK(g_seq.kit_config[1].flam_pulses == 1);
+    CHECK(g_seq.kit_config[1].vel_normal == 1);
+    CHECK(g_seq.kit_config[1].vel_accent == 1);
+    CHECK(g_seq.kit_config[1].vel_max == 1);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
+        CHECK(prepared_patterns[p][1].kit.note[0] == 127);
+        CHECK(prepared_patterns[p][1].kit.flam_pulses == 1);
+    }
+    next_step();                            // pulse 24: the next hit
+    CHECK(msg_is(last_msg(0), KIT_STATUS, 127, 1));
+    CHECK(count_kit(36, 0) == 1);           // the sounding voice ended on its own note
+    cfg.flam_pulses = 13;
+    seq_set_kit_config(1, &cfg);
+    CHECK(g_seq.kit_config[1].flam_pulses == 12);
+    CHECK(prepared_patterns[5][1].kit.flam_pulses == 12);
+}
+
 int main(void) {
     unsigned tests = 0;
     seq_lock_init();
@@ -1845,6 +2140,16 @@ int main(void) {
     RUN(test_edit_during_flam_keeps_second_hit);
     RUN(test_flam_overload_drops_second_hits);
     RUN(test_kits_at_wire_rate);
+    RUN(test_kit_launch_every_quant);
+    RUN(test_kit_song_mode);
+    RUN(test_kit_to_synth_during_flam);
+    RUN(test_synth_tie_to_kit_releases_note_and_gate);
+    RUN(test_synth_slide_to_kit_releases_note_and_gate);
+    RUN(test_kit_to_drum_releases_voices);
+    RUN(test_kind_change_releases_kit_voices_left_sounding);
+    RUN(test_drum_to_kit_releases_note);
+    RUN(test_type_change_keeps_both_step_arrays);
+    RUN(test_kit_config_clamps_and_refreshes);
 #ifdef REBIRTH_THREADED_TEST
     RUN(test_stop_during_pending_gate_commit);
     RUN(test_panic_during_pending_gate_commit);
