@@ -121,6 +121,25 @@ static void test_failed_led_write_is_retried(void) {
     CHECK(timeouts_seen_bad == 0);
 }
 
+static void test_late_expander_is_configured_before_decoding(void) {
+    reset();
+    fail_writes = true;
+    mcp23017_init();                          // chip absent at power-up
+    step_buttons_t *b = mcp23017_get_buttons();
+    press(1u << 5);
+    sleep_ms(30);
+    mcp23017_poll();
+    CHECK(b->held == 0 && b->pressed == 0);  // nothing decoded while unconfigured
+    fail_writes = false;
+    sleep_ms(30);
+    mcp23017_poll();                          // configures, then decodes
+    CHECK(regs[0][0x00] == 0xFF && regs[0][0x01] == 0xFF);
+    CHECK(regs[0][0x0C] == 0xFF && regs[0][0x0D] == 0xFF);
+    CHECK(regs[0][0x02] == 0xFF && regs[0][0x03] == 0xFF);
+    CHECK(b->held == (1u << 5) && b->pressed == (1u << 5));
+    CHECK(timeouts_seen_bad == 0);
+}
+
 static void test_i2c_pins_have_no_internal_pulls(void) {
     reset();
     mcp23017_init();
@@ -132,6 +151,7 @@ static void test_i2c_pins_have_no_internal_pulls(void) {
 int main(void) {
     RUN(test_failed_port_read_keeps_buttons);
     RUN(test_failed_led_write_is_retried);
+    RUN(test_late_expander_is_configured_before_decoding);
     RUN(test_i2c_pins_have_no_internal_pulls);
     return 0;
 }

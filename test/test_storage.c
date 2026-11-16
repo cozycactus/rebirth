@@ -19,6 +19,14 @@ static void test_save_resyncs_panel_input(void) {
     CHECK(!flash_storage_save());
     transport_stop();
     CHECK(resync_calls == 1);
+    // A save that reached the lockout resyncs even if it fails validation.
+    resync_calls = 0;
+    fake_flash_programs = 0;
+    fake_flash_program_limit = 2;
+    CHECK(!flash_storage_save());
+    fake_flash_program_limit = UINT32_MAX;
+    CHECK(resync_calls == 1);
+    CHECK(flash_storage_save());
 }
 
 static void test_load_resyncs_panel_input(void) {

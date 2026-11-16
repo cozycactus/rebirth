@@ -176,10 +176,10 @@ bool flash_storage_save(void) {
 
     restore_interrupts(ints);
     multicore_lockout_end_blocking();
-    if (!flash_storage_is_valid()) return false;
-    // Keys held through the stall must not fire afterwards.
+    // Keys held through the stall must not fire afterwards, whether or not
+    // the new save validates.
     panel_input_resync();
-    return true;
+    return flash_storage_is_valid();
 #else
     return false;
 #endif

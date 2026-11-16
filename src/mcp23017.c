@@ -45,6 +45,14 @@ static bool mcp_read_ports(uint16_t *raw) {
 
 // ─── Initialization ────────────────────────────────────────────
 
+static bool configured;     // false until all config writes were accepted
+
+static bool mcp_configure(void) {
+    return mcp_write_reg(REG_IODIRA, 0xFF) && mcp_write_reg(REG_IODIRB, 0xFF)   // inputs
+        && mcp_write_reg(REG_GPPUA, 0xFF) && mcp_write_reg(REG_GPPUB, 0xFF)     // pull-ups
+        && mcp_write_reg(REG_IPOLA, 0xFF) && mcp_write_reg(REG_IPOLB, 0xFF);    // pressed = 1
+}
+
 void mcp23017_init(void) {
     // Initialize I2C0
     i2c_init(MCP_I2C, MCP23017_I2C_FREQ);
@@ -54,26 +62,23 @@ void mcp23017_init(void) {
     gpio_disable_pulls(MCP23017_SDA_PIN);
     gpio_disable_pulls(MCP23017_SCL_PIN);
 
-    // Configure all 16 pins as inputs
-    mcp_write_reg(REG_IODIRA, 0xFF);
-    mcp_write_reg(REG_IODIRB, 0xFF);
-
-    // Enable internal pull-ups on all pins
-    mcp_write_reg(REG_GPPUA, 0xFF);
-    mcp_write_reg(REG_GPPUB, 0xFF);
-
-    // Enable input polarity inversion (buttons pull low → read as 1)
-    mcp_write_reg(REG_IPOLA, 0xFF);
-    mcp_write_reg(REG_IPOLB, 0xFF);
-
     // Zero internal state
     memset(&buttons, 0, sizeof(buttons));
+
+    // If the chip does not answer now, poll retries the configuration.
+    configured = mcp_configure();
 }
 
 // ─── Polling ───────────────────────────────────────────────────
 
 void mcp23017_poll(void) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    // Never decode the ports before the chip is configured (IPOL, pull-ups).
+    if (!configured) {
+        configured = mcp_configure();
+        if (!configured) return;
+    }
 
     // Read both ports (already inverted via IPOL: pressed = 1). A failed
     // read keeps the last accepted state: no phantom releases or presses.
