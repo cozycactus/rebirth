@@ -115,6 +115,9 @@ _Static_assert(sizeof(store_header_t) == FLASH_PAGE,
 // ─── API ───────────────────────────────────────────────────────
 
 #ifndef MOCK_HARDWARE
+// The save's copy of the patterns, padded to whole flash pages.
+static uint8_t pattern_buf[PAT_SIZE];
+
 // Panel keys, step buttons and encoder buttons held or changed during the
 // stall must not fire afterwards.
 static void resync_inputs(void) {
@@ -248,7 +251,6 @@ bool flash_storage_save(void) {
 
     // Build padded pattern, song and kit buffers. Flash programming length
     // must be page-aligned, so never read beyond the object being serialized.
-    static uint8_t pattern_buf[PAT_SIZE];
     memset(pattern_buf, 0xFF, sizeof(pattern_buf));
 
     static uint8_t song_buf[SONG_SIZE];
@@ -257,8 +259,17 @@ bool flash_storage_save(void) {
     static uint8_t kit_buf[KIT_SIZE];
     memset(kit_buf, 0xFF, sizeof(kit_buf));
 
+    // seq_lock() keeps Core 0's interrupts off, the UART TX interrupt with them:
+    // send what is still queued (the Stop and its releases) first, then copy one
+    // location per lock section. Stopped, nothing else writes this data meanwhile.
+    midi_wait_output_idle();
+    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
+        uint32_t lock_state = seq_lock();
+        memcpy(pattern_buf + pattern * sizeof(pattern_t), &g_seq.patterns[pattern],
+               sizeof(pattern_t));
+        seq_unlock(lock_state);
+    }
     uint32_t lock_state = seq_lock();
-    memcpy(pattern_buf, g_seq.patterns, PAT_BYTES);
     memcpy(song_buf, &g_seq.song, SONG_BYTES);
     memcpy(kit_buf, g_seq.kit_config, KIT_BYTES);
     seq_unlock(lock_state);
@@ -305,19 +316,29 @@ bool flash_storage_load(void) {
 
     const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
     const store_header_t *h = (const store_header_t *)base;
-    uint32_t lock_state = seq_lock();
-    if (h->version == VERSION) {
-        memcpy(g_seq.patterns, base + PAT_OFFSET,  sizeof(g_seq.patterns));
-        memcpy(&g_seq.song,    base + SONG_OFFSET, sizeof(g_seq.song));
-        memcpy(g_seq.kit_config, base + KIT_OFFSET, sizeof(g_seq.kit_config));
-    } else {
-        // Legacy save: every record becomes the start of a zeroed pattern_t
-        // (no kit steps) and every track gets default kit settings.
-        for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
+    bool v6 = h->version == VERSION;
+    // As in the save: MIDI idle first, then one location per lock section.
+    midi_wait_output_idle();
+    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
+        uint32_t lock_state = seq_lock();
+        if (v6) {
+            memcpy(&g_seq.patterns[pattern], base + PAT_OFFSET + pattern * sizeof(pattern_t),
+                   sizeof(pattern_t));
+        } else {
+            // Legacy save: every record becomes the start of a zeroed pattern_t
+            // (no kit steps).
             memset(&g_seq.patterns[pattern], 0, sizeof(pattern_t));
             memcpy(&g_seq.patterns[pattern],
                    base + PAT_OFFSET + pattern * sizeof(pattern_v5_t), sizeof(pattern_v5_t));
         }
+        seq_unlock(lock_state);
+    }
+    uint32_t lock_state = seq_lock();
+    if (v6) {
+        memcpy(&g_seq.song, base + SONG_OFFSET, sizeof(g_seq.song));
+        memcpy(g_seq.kit_config, base + KIT_OFFSET, sizeof(g_seq.kit_config));
+    } else {
+        // Legacy save: every track gets default kit settings.
         memcpy(&g_seq.song, base + V5_SONG_OFFSET, sizeof(g_seq.song));
         for (uint8_t track = 0; track < NUM_TRACKS; track++) {
             kit_config_defaults(&g_seq.kit_config[track]);

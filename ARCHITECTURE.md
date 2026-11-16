@@ -206,6 +206,10 @@ KIT in at most two tracks across all locations, kit step bits 24-31 zero, AC 0 o
 1, and kit settings in range. The patterns payload is 31,104 bytes and the save
 builds each payload in a static RAM copy buffer padded to whole pages, so
 `.data` + `.bss` is about 110.5 KiB (see [HARDWARE_STATUS.md](HARDWARE_STATUS.md)).
+The save and the load first wait for MIDI output to go idle, then copy the
+patterns one location per `seq_lock()` section (then the song and the kit
+settings in one more), so Core 0's interrupts are never off for the whole
+31 KB copy.
 
 This is one save region. Power loss during erase/program may lose the previous
 save; an incomplete new save is rejected. Preserving the old save across power

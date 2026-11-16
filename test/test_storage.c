@@ -257,6 +257,92 @@ static void test_v6_rejections(void) {
     set_kit_tracks(1, 4);
 }
 
+// ─── Short lock sections ───────────────────────────────────────
+// seq_lock() keeps Core 0's interrupts off, the UART TX interrupt with them. The save
+// and the load copy one pattern per section, and only once MIDI output is idle. Every
+// spin lock taken marks a section boundary here: between two, at most one of the
+// MAX_PATTERNS records watched may change.
+
+static uint8_t *watched;
+static uint8_t watched_before[PAT_BYTES];
+static bool watch_started;
+static unsigned most_changed;               // most records changed between two locks
+static unsigned seq_sections_midi_pending;  // seq_lock sections entered with MIDI pending
+
+static void watch_lock(spin_lock_t *lock) {
+    fake_uart_writable = true;              // the wire frees up while the caller waits
+    if (lock == spin_lock_instance(g_seq.spinlock_num) && fake_uart_tx_irq) {
+        seq_sections_midi_pending++;
+    }
+    if (watch_started) {
+        unsigned changed = 0;
+        for (unsigned p = 0; p < MAX_PATTERNS; p++) {
+            changed += memcmp(watched + p * sizeof(pattern_t),
+                              watched_before + p * sizeof(pattern_t), sizeof(pattern_t)) != 0;
+        }
+        if (changed > most_changed) most_changed = changed;
+    }
+    memcpy(watched_before, watched, PAT_BYTES);
+    watch_started = true;
+}
+
+// Watches `records`, with a Note On still queued behind a busy wire.
+static void watch(void *records) {
+    watched = records;
+    watch_started = false;
+    most_changed = 0;
+    seq_sections_midi_pending = 0;
+    fake_before_lock = NULL;
+    fake_uart_writable = false;
+    midi_send_note_on(0, 60, 100);
+    CHECK(fake_uart_tx_irq);
+    fake_before_lock = watch_lock;
+}
+
+// Changes every location in RAM, so a load overwrites each.
+static void change_every_location(void) {
+    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
+        g_seq.patterns[pattern].swing = 77;
+        g_seq.patterns[pattern].kit_steps[7][15] = 0x55;
+    }
+}
+
+static void test_copies_one_pattern_per_lock_section(void) {
+    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
+        pattern_init(&g_seq.patterns[pattern], pattern);
+        pattern_set_step(&g_seq.patterns[pattern], 0, pattern % 16, 40 + pattern, 90,
+                         STEP_FLAG_ACTIVE);
+    }
+    song_clear();
+    CHECK(song_append(3, 2));
+
+    watch(pattern_buf);
+    CHECK(flash_storage_save());
+    CHECK(most_changed == 1);
+    CHECK(seq_sections_midi_pending == 0);
+    ram_take();
+
+    change_every_location();
+    watch(g_seq.patterns);
+    CHECK(flash_storage_load());
+    CHECK(most_changed == 1);
+    CHECK(seq_sections_midi_pending == 0);
+    CHECK(ram_unchanged());
+
+    write_legacy_image(V5_VERSION);
+    change_every_location();
+    watch(g_seq.patterns);
+    CHECK(flash_storage_load());
+    CHECK(most_changed == 1);
+    CHECK(seq_sections_midi_pending == 0);
+    CHECK(memcmp(&g_seq.song, &snap.song, sizeof(song_t)) == 0);
+    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
+        CHECK(memcmp(&g_seq.patterns[pattern], &snap.patterns[pattern], sizeof(pattern_v5_t)) == 0);
+        CHECK(g_seq.patterns[pattern].kit_steps[7][15] == 0);
+    }
+    fake_before_lock = NULL;
+}
+
 // Core 1's timer ISR clears a MIDI overflow with a panic even while stopped.
 // Here that happens after the save's first drain, before Core 1 is parked.
 static void core1_panics_before_lockout(void) {
@@ -327,8 +413,9 @@ int main(void) {
     test_v6_round_trip();
     test_legacy_images();
     test_v6_rejections();
+    test_copies_one_pattern_per_lock_section();
     puts("PASS storage round-trip, playback guard, checksum, legacy validation, "
          "interrupted save, late MIDI before erase, resync after save and load, "
-         "v6 kits, v4/v5 migration, v6 rejections");
+         "v6 kits, v4/v5 migration, v6 rejections, one pattern per lock section");
     return 0;
 }

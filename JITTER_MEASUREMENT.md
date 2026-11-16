@@ -134,7 +134,10 @@ location):
 | `midi_send_*()`, `midi_output_overflowed()`, `midi_clear_output_queue()` | TX | one message or one batch copied in, then the drain as above |
 
 `flash_storage_load()` refuses while playing; the flash save and
-`midi_wait_output_idle()` run only when stopped.
+`midi_wait_output_idle()` run only when stopped. Stopped, the save and the load
+wait for MIDI output to go idle and then copy one location per `seq_lock()`
+section (972 bytes; the song and the kit settings, about 2.4 KB, in one more),
+never the 31 KB of patterns in one section.
 
 Song list edits are the exception: `memmove` copies byte by byte (7-9 cycles a
 byte in the firmware's newlib), so an insert, remove or move near the start of a
