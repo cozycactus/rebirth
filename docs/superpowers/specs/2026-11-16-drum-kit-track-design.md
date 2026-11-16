@@ -426,7 +426,8 @@ never opens on a kit track.
 
 Shows the step number and the values of all 12 lanes at that step. TRACK rotation (by detents)
 moves the lane cursor, starting on the focused lane; VALUE rotation sets that lane's value (off /
-note / accent / flam; AC off / on), with the CH/OH rule applied. Step buttons select another step
+note / accent / flam; AC off / on), with the CH/OH rule applied. VALUE moves by the detent count:
+one step per click, clamped, with no acceleration (multi-model review). Step buttons select another step
 within the length; the old step editor's gestures (active toggle by long press, slide and tie) do
 not exist here. VALUE press returns to the screen it was opened from.
 

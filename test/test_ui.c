@@ -1131,7 +1131,7 @@ static void test_long_press_on_kit_lane_opens_kit_editor(void) {
     release_step(5);
     CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_OFF);       // the long press sets nothing
 
-    // VALUE: one step per event, whatever its size, clamped at flam and off.
+    // VALUE: one step per click, not accelerated, clamped at flam and off.
     delta_scale = 4;                                    // the editor reads detents
     const uint8_t expected[3] = {KIT_NOTE, KIT_ACCENT, KIT_FLAM};
     for (unsigned i = 0; i < 3; i++) {
@@ -1142,19 +1142,17 @@ static void test_long_press_on_kit_lane_opens_kit_editor(void) {
     turn_value(1);
     CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_FLAM);
     turn_value(-8);
-    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_ACCENT);
-    turn_value(-1);
-    turn_value(-1);
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_OFF);
     turn_value(-1);
     CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_OFF);
     CHECK(!cell_has_clip(1, 0));
 
-    // A TRACK detent is one lane; from off, a large VALUE turn is one step.
+    // A TRACK detent is one lane; from off, eight clicks reach flam and stop there.
     turn_track(1);
     CHECK(ui.kit_cursor == LANE_LT);
     delta_scale = 1;
     turn_value(8);
-    CHECK(lane_at(0, 1, LANE_LT, 5) == KIT_NOTE);
+    CHECK(lane_at(0, 1, LANE_LT, 5) == KIT_FLAM);
     CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_OFF);
 
     // The cursor is clamped to AC..RC; AC is off or on.
@@ -1182,7 +1180,7 @@ static void test_long_press_on_kit_lane_opens_kit_editor(void) {
     tap_step(12);
     CHECK(ui.edit_step == 2);
     turn_value(2);
-    CHECK(lane_at(0, 1, KIT_LANE_CH, 2) == KIT_NOTE);
+    CHECK(lane_at(0, 1, KIT_LANE_CH, 2) == KIT_ACCENT);
     press_step(3);
     long_step(3);                                       // no step_t gestures here
     release_step(3);
@@ -1506,6 +1504,40 @@ static void test_kit_editor_value_click_is_one_step(void) {
     CHECK(lane_at(0, 1, LANE_LT, 5) == KIT_NOTE);
 }
 
+// VALUE moves by the detent count, one value step per click, clamped (off..flam; AC
+// off/on), with no acceleration; the CH/OH rule holds.
+static void test_kit_editor_value_moves_by_detents(void) {
+    make_kit(1);
+    focus_lane(1, 0, LANE_SD);
+    press_step(5);
+    long_step(5);
+    release_step(5);
+    CHECK(ui.mode == UI_KIT_STEP_EDIT && ui.kit_cursor == LANE_SD);
+    delta_scale = 8;                                    // a fast turn: no acceleration
+    turn_value(2);                                      // two clicks in one pass
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_ACCENT);
+    turn_value(5);
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_FLAM);       // clamped at flam
+    turn_value(-2);
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_NOTE);
+    turn_value(-5);
+    CHECK(lane_at(0, 1, LANE_SD, 5) == KIT_OFF);        // clamped at off
+    turn_track(KIT_LANE_AC - LANE_SD);
+    CHECK(ui.kit_cursor == KIT_LANE_AC);
+    turn_value(3);
+    CHECK(lane_at(0, 1, KIT_LANE_AC, 5) == 1);          // AC: off or on
+    turn_value(-2);
+    CHECK(lane_at(0, 1, KIT_LANE_AC, 5) == 0);
+    turn_track(KIT_LANE_OH);
+    turn_value(1);
+    CHECK(lane_at(0, 1, KIT_LANE_OH, 5) == KIT_NOTE);
+    turn_track(-1);                                     // CH
+    turn_value(2);
+    CHECK(lane_at(0, 1, KIT_LANE_CH, 5) == KIT_ACCENT);
+    CHECK(lane_at(0, 1, KIT_LANE_OH, 5) == KIT_OFF);
+    CHECK(cell_has_clip(1, 0));                         // refreshed for playback
+}
+
 static void test_track_config_type_click_is_one_type(void) {
     open_track_config(2);                               // a SYNTH track, no kits
     turn_edges(1, 2);                                   // half a click: no change
@@ -1794,6 +1826,7 @@ int main(int argc, char **argv) {
     RUN(test_render_kit_config);
     RUN(test_pattern_select_shows_flam_drops);
     RUN(test_kit_editor_value_click_is_one_step);
+    RUN(test_kit_editor_value_moves_by_detents);
     RUN(test_track_config_type_click_is_one_type);
     RUN(test_track_config_rows_move_by_clicks);
     RUN(test_slow_click_moves_tempo_and_patterns_by_one);

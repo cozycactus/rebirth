@@ -439,8 +439,8 @@ static void handle_kit_step_edit(encoder_turn_t e1, encoder_turn_t e2,
                                           KIT_LANES - 1);
     }
 
-    // VALUE rotate: one value step per event in its direction, whatever its
-    // size (off/note/accent/flam; AC off/on), with the CH/OH rule.
+    // VALUE rotate: one value step per click, clamped (off/note/accent/flam;
+    // AC off/on), never accelerated; one kit_edit, with the CH/OH rule.
     if (e2.detents != 0) {
         bool changed = false;
         uint8_t lane = ui.kit_cursor;
@@ -448,8 +448,7 @@ static void handle_kit_step_edit(encoder_turn_t e1, encoder_turn_t e2,
         uint32_t lock_state = seq_lock();
         uint32_t *word = &g_seq.patterns[location].kit_steps[track][ui.edit_step];
         uint8_t value = kit_get(*word, lane);
-        uint8_t next = e2.detents > 0 ? (value < top ? value + 1 : value)
-                                      : (value > KIT_OFF ? value - 1 : value);
+        uint8_t next = (uint8_t)clamp_i8((int16_t)value + e2.detents, KIT_OFF, top);
         if (next != value) {
             *word = kit_edit(*word, lane, next);
             changed = true;
