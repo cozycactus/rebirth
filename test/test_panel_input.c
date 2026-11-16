@@ -149,16 +149,16 @@ static void pass_check(void) {
 }
 
 // The next two passes: a column (1-7, after the one before it) whose sample
-// would settle a key, on a chip that reset after the scan's check, then the
-// pass after it. True when the check followed the sample in its own pass and
-// found the reset, so the next pass configured the scanner again.
-static bool settling_sample_is_checked(void) {
+// would settle a key, on a U801 that reset after the scan's check, then the
+// pass after it. True when U801's canary, read after the sample in its own
+// pass, showed the reset, so the next pass configured the scanner again.
+static bool settling_sample_is_proved(void) {
     int txn = fake_matrix_txn;
     pass();
-    bool checked = fake_matrix_txn - txn == 3 + 4;  // the column step, then the check
+    bool proved = fake_matrix_txn - txn == 3 + 2;   // the column step, then U801 IODIR
     txn = fake_matrix_txn;
     pass();
-    return checked && fake_matrix_txn - txn == 6;   // a configuration
+    return proved && fake_matrix_txn - txn == 6;    // a configuration
 }
 
 // ---- Matrix -------------------------------------------------------------------
@@ -263,13 +263,15 @@ static void test_one_column_low_per_read_in_scan_order(void) {
     }
 }
 
-// A pass makes one bus step: a configuration (6 writes, nothing else), the
-// check (4), or a column (3-4), then the check after it when its sample would
-// settle a key (7-8). Keys keep changing, so samples settle.
+// A pass makes one bus step: a configuration (six 3-byte writes, nothing
+// else), the check (4), or a column (3-4), then, when its sample would settle
+// a key, the canaries read after it: U801's (2) for COL0-7, both chips' (4)
+// for COL8/9. Keys keep changing, so samples settle.
 static void test_one_bus_step_per_poll(void) {
     start();
     for (int k = 0; k < KEYS; k += 7) fake_matrix_key[k / COLS][k % COLS] = true;
-    int faults = 0, configurations = 0, checked_samples = 0;
+    int faults = 0, configurations = 0;
+    int proved[2] = { 0, 0 };               // samples of COL0-7, of COL8/9, with their canaries
     for (int i = 0; i < 40 * SCAN_PASSES; i++) {
         if (i % 13 == 0) {
             int k = (i / 13 * 11) % KEYS;
@@ -284,18 +286,22 @@ static void test_one_bus_step_per_poll(void) {
             faults++;
         }
         int txn = fake_matrix_txn;
+        unsigned bytes = fake_matrix_wire_bytes;
         fake_matrix_low_column = -1;
         pass();
         int transfers = fake_matrix_txn - txn;
-        CHECK(transfers <= 4 + 4);          // a column, then the check
-        if (transfers == 6) {               // a configuration, and nothing else in its pass
-            CHECK(fake_matrix_low_column == -1);
+        int col = fake_matrix_low_column;   // -1 when no column was low (a reset chip)
+        CHECK(transfers <= 4 + 4);          // COL8 or COL9, then both canaries
+        if (col >= 0 && col < SCENE_COL) CHECK(transfers <= 4 + 2);    // COL0-7, then U801's
+        if (transfers == 6 && fake_matrix_wire_bytes - bytes == 6 * 4) {
+            CHECK(col == -1);               // a configuration, and nothing else in its pass
             configurations++;
+        } else if (transfers > 4 && col >= 0) {
+            proved[col >= SCENE_COL]++;
         }
-        if (transfers > 6) checked_samples++;
     }
     CHECK(faults > 0 && configurations == faults);
-    CHECK(checked_samples > 0);
+    CHECK(proved[0] > 0 && proved[1] > 0);
 }
 
 // ---- Faults ----------------------------------------------------------------------
@@ -328,9 +334,9 @@ static void test_single_sample_never_settles(void) {
 }
 
 // A chip that resets after the scan's check can still give the sample that
-// would settle a change; the check after that sample must catch it. Four
-// cases on key (2, 5) or (7, 5): column 5 is sampled six passes after the
-// check, and five passes after column 4.
+// would settle a change; the canary read after that sample must catch it.
+// Four cases on key (2, 5) or (7, 5): column 5 is sampled six passes after
+// the check, and five passes after column 4.
 
 // A tap seen closed on one good sample, then U801 resets and its rows float
 // low, so the next sample reads the key closed again: the tap is lost (the
@@ -345,10 +351,10 @@ static void test_reset_after_the_check_never_settles_a_tap(void) {
     pass_check();
     fake_matrix_chip_reset(U801);           // every row reads low: every key closed
     passes(5);                              // columns 0-4: first sights
-    bool checked = settling_sample_is_checked();
+    bool proved = settling_sample_is_proved();
     scans(15);
     CHECK(take(e, 4) == 0);
-    CHECK(checked);
+    CHECK(proved);
     fake_matrix_key[2][5] = true;
     scans(3);
     CHECK(take(e, 4) == 1 && is_key(&e[0], 2, 5, true));
@@ -374,10 +380,10 @@ static void test_reset_after_the_check_never_settles_a_chatter(void) {
     fake_matrix_float_low = false;
     fake_matrix_chip_reset(U801);           // every row reads high: every key open
     passes(5);
-    bool checked = settling_sample_is_checked();
+    bool proved = settling_sample_is_proved();
     scans(15);
     CHECK(take(e, 4) == 0);                 // held throughout: nothing
-    CHECK(checked);
+    CHECK(proved);
     fake_matrix_key[2][5] = false;
     scans(3);
     CHECK(take(e, 4) == 1 && is_key(&e[0], 2, 5, false));
@@ -396,10 +402,10 @@ static void test_reset_inside_the_row_read_never_settles_a_chatter(void) {
     fake_matrix_key[7][5] = true;
     until_sample_of(4);                     // past the check
     fake_matrix_reset_in_read_txn = fake_matrix_txn + 3;    // column 5: select, pointer, read
-    bool checked = settling_sample_is_checked();
+    bool proved = settling_sample_is_proved();
     scans(15);
     CHECK(take(e, 4) == 0);
-    CHECK(checked);
+    CHECK(proved);
     fake_matrix_key[7][5] = false;
     scans(3);
     CHECK(take(e, 4) == 1 && is_key(&e[0], 7, 5, false));
@@ -426,10 +432,10 @@ static void test_reset_after_the_check_never_ends_a_suppression(void) {
     fake_matrix_float_low = false;
     fake_matrix_chip_reset(U801);
     passes(5);
-    bool checked = settling_sample_is_checked();
+    bool proved = settling_sample_is_proved();
     scans(15);
     CHECK(take(e, 4) == 0);                 // held throughout: nothing
-    CHECK(checked);
+    CHECK(proved);
     fake_matrix_key[2][5] = false;          // a real release ends the suppression
     scans(3);
     CHECK(take(e, 4) == 0);
@@ -510,11 +516,11 @@ static void run_window(void) {
 
 static void test_fault_at_every_transfer(void) {
     // The window, fault-free: a configuration, then two scans, each sample of
-    // the second followed by the check.
+    // the second followed by its canaries.
     int window_from = open_window();
     run_window();
     int window = fake_matrix_txn - window_from;
-    CHECK(window >= 6 + 2 * 30 + COLS * 4);
+    CHECK(window >= 6 + 2 * 30 + 8 * 2 + 2 * 4);
 
     for (int kind = 0; kind < FAULT_KINDS; kind++) {
         for (int k = 1; k <= window; k++) {
@@ -1071,30 +1077,185 @@ static uint32_t loop_pass(void) {
 }
 
 #define SWEEP_FROM_US 40000     // the boot suppression is over
-#define SWEEP_STEP_US 370
 #define SWEEP_PERIOD_US 660000  // both grids repeat
-#define SWEEP_CASES (SWEEP_PERIOD_US / SWEEP_STEP_US + 1)
-#define SWEEP_LANES 2
 #define PRESS_TO_EVENT_US 15000
 
-enum { KEY_FREE, KEY_WAITING, KEY_CLOSED, KEY_RELEASING, KEY_DONE };
+// A settle costs bus time (the canaries read after it), so keys changing at
+// the same time slow each other down: the 15 ms requirement is checked on
+// playing, below, and heavy traffic only for a bound (test_press_to_event_
+// under_stress).
 
-// Case i closes key i % KEYS (so column i % 10) at SWEEP_FROM_US + i * 0.37 ms.
-// Keys are independent, so the cases share timelines: lane l takes the blocks
-// of KEYS cases with (i / KEYS) % SWEEP_LANES == l, so a key is reused only
-// every 59 ms and must be idle again by then. A key closes at the first pass
-// boundary at or after its time, which can only make the event later.
+// ---- Playing ------------------------------------------------------------------
+
+// Isolated cases on one timeline: case i presses at SWEEP_FROM_US + i * 33 ms
+// + i * 18.5 us, so within each of the twenty 33 ms stretches of the 660 ms
+// period its phase steps by 0.37 ms, and 1800 cases cover the period. Its keys
+// close at the first pass boundary at or after that time (which can only make
+// an event later) and open at their down events; every event of a case is
+// read before the next case starts.
+#define CASE_US 33000
+#define CASE_STRETCHES (SWEEP_PERIOD_US / CASE_US)
+#define CASE_PHASES 90                      // 90 x 0.37 ms covers a stretch
+#define ISOLATED_CASES (CASE_STRETCHES * CASE_PHASES)
+
+static uint32_t case_press_us(int i) {
+    return SWEEP_FROM_US + (uint32_t)i * CASE_US + (uint32_t)i * 37 / 2;
+}
+
+// Every case: keys_of(i, keys) gives case i's keys and returns how many. Each
+// key gets exactly one down, within PRESS_TO_EVENT_US of the press, then
+// exactly one up; nothing else is reported. Returns the worst press-to-event.
+static uint32_t isolated_cases(int (*keys_of)(int i, int *keys)) {
+    loop_boot();
+    uint32_t worst = 0;
+    for (int i = 0; i < ISOLATED_CASES; i++) {
+        int keys[COLS];
+        bool down[COLS] = { false }, up[COLS] = { false };
+        int n = keys_of(i, keys), ups = 0;
+        uint32_t press_us = case_press_us(i);
+        panel_event_t e;
+        while (timer_hw->timerawl < press_us) {
+            loop_pass();
+            CHECK(!panel_input_next(&e));
+        }
+        for (int j = 0; j < n; j++) fake_matrix_key[keys[j] / COLS][keys[j] % COLS] = true;
+        while (ups < n) {
+            uint32_t read_us = loop_pass();
+            CHECK(timer_hw->timerawl < case_press_us(i + 1));  // over before the next case
+            while (panel_input_next(&e)) {
+                int key = key_of(&e), j = 0;
+                while (j < n && keys[j] != key) j++;
+                CHECK(j < n);
+                if (e.down) {
+                    CHECK(!down[j]);
+                    uint32_t latency = read_us - press_us;
+                    CHECK(latency <= PRESS_TO_EVENT_US);
+                    if (latency > worst) worst = latency;
+                    down[j] = true;
+                    fake_matrix_key[key / COLS][key % COLS] = false;
+                } else {
+                    CHECK(down[j] && !up[j]);
+                    up[j] = true;
+                    ups++;
+                }
+            }
+        }
+    }
+    return worst;
+}
+
+static int single_col;
+
+// One key alone, in column single_col, its row varying.
+static int single_key(int i, int *keys) {
+    keys[0] = (i % ROWS) * COLS + single_col;
+    return 1;
+}
+
+// Ten keys at once, one per column, the rows varying.
+static int chord(int i, int *keys) {
+    for (int col = 0; col < COLS; col++) keys[col] = ((i + col) % ROWS) * COLS + col;
+    return COLS;
+}
+
+#define STREAM_PRESSES 500
+#define STREAM_HOLD_US 60000
+
+// 50 presses a second, beyond a fast two-handed roll: 10-30 ms apart
+// (pseudo-random), each on the next key of a stride through all 80, held
+// 60 ms (up to six at once), for 10 s. Each press gets one down within
+// PRESS_TO_EVENT_US, then one up after its release. Returns the worst.
+static uint32_t playing_stream(void) {
+    enum { IDLE, HELD, DOWN, RELEASED };
+    loop_boot();
+    int state[KEYS] = { IDLE };
+    uint32_t press_us[KEYS], release_us[KEYS];
+    uint32_t next_us = SWEEP_FROM_US, seed = 1, worst = 0;
+    int pressed = 0, done = 0;
+    while (done < STREAM_PRESSES) {
+        uint32_t now = timer_hw->timerawl;
+        CHECK(now < SWEEP_FROM_US + STREAM_PRESSES * 30000u + STREAM_HOLD_US + 100000u);
+        if (pressed < STREAM_PRESSES && now >= next_us) {
+            int k = pressed * 37 % KEYS;
+            CHECK(state[k] == IDLE);
+            fake_matrix_key[k / COLS][k % COLS] = true;
+            state[k] = HELD;
+            press_us[k] = next_us;
+            release_us[k] = next_us + STREAM_HOLD_US;
+            seed = seed * 1103515245u + 12345u;
+            next_us += 10000 + (seed >> 16) % 20001;
+            pressed++;
+        }
+        for (int k = 0; k < KEYS; k++) {
+            if ((state[k] == HELD || state[k] == DOWN) && now >= release_us[k]) {
+                CHECK(state[k] == DOWN);        // its down came first
+                fake_matrix_key[k / COLS][k % COLS] = false;
+                state[k] = RELEASED;
+            }
+        }
+        uint32_t read_us = loop_pass();
+        panel_event_t e;
+        while (panel_input_next(&e)) {
+            int k = key_of(&e);
+            CHECK(k >= 0);
+            if (e.down) {
+                CHECK(state[k] == HELD);
+                uint32_t latency = read_us - press_us[k];
+                CHECK(latency <= PRESS_TO_EVENT_US);
+                if (latency > worst) worst = latency;
+                state[k] = DOWN;
+            } else {
+                CHECK(state[k] == RELEASED);
+                state[k] = IDLE;
+                done++;
+            }
+        }
+    }
+    return worst;
+}
+
 static void test_press_to_event_within_15_ms(void) {
     uint32_t worst = 0;
+    for (single_col = 0; single_col < COLS; single_col++) {
+        uint32_t w = isolated_cases(single_key);
+        if (w > worst) worst = w;
+    }
+    printf("  press-to-event, one key: %d presses, worst %u us\n",
+           COLS * ISOLATED_CASES, (unsigned)worst);
+    printf("  press-to-event, ten-key chord: %d chords, worst %u us\n",
+           ISOLATED_CASES, (unsigned)isolated_cases(chord));
+    printf("  press-to-event, 50 presses/s held 60 ms: %d presses, worst %u us\n",
+           STREAM_PRESSES, (unsigned)playing_stream());
+}
+
+// ---- Stress -------------------------------------------------------------------
+
+#define STRESS_BOUND_US 25000
+#define STRESS_HOLD_US 30000
+#define STRESS_LANES 3
+
+enum { KEY_FREE, KEY_WAITING, KEY_CLOSED, KEY_HELD, KEY_RELEASING, KEY_DONE };
+
+// A press every step_us, sustained: thousands of key changes a second, far
+// beyond playing. Case i closes key i % KEYS (so column i % 10) at
+// SWEEP_FROM_US + i * step_us, over the 660 ms period; it opens at its down
+// event or 30 ms after its press, whichever is later. Lane l takes the blocks
+// of KEYS cases with (i / KEYS) % STRESS_LANES == l, so a key is reused at
+// most every 88.8 ms and must be free again by then. Each press gets exactly
+// one down, within STRESS_BOUND_US, then one up: a press never down would
+// hold its lane past the time limit. Returns the worst press-to-event.
+static uint32_t stress_worst(uint32_t step_us) {
+    int cases = (int)(SWEEP_PERIOD_US / step_us) + 1;
+    uint32_t worst = 0;
     int done = 0;
-    for (int lane = 0; lane < SWEEP_LANES; lane++) {
+    for (int lane = 0; lane < STRESS_LANES; lane++) {
         loop_boot();
         int state[KEYS];
         int block[KEYS];                    // the key's current case is block * KEYS + key
         uint32_t press_us[KEYS];
         for (int k = 0; k < KEYS; k++) {
             state[k] = KEY_FREE;
-            block[k] = lane - SWEEP_LANES;
+            block[k] = lane - STRESS_LANES;
         }
         int busy = KEYS;
         uint32_t last_pass_us = 0;
@@ -1103,20 +1264,24 @@ static void test_press_to_event_within_15_ms(void) {
             CHECK(pass_us < 2 * SWEEP_PERIOD_US);
             for (int k = 0; k < KEYS; k++) {
                 if (state[k] == KEY_FREE) {
-                    block[k] += SWEEP_LANES;
+                    block[k] += STRESS_LANES;
                     int i = block[k] * KEYS + k;
-                    if (i >= SWEEP_CASES) {
+                    if (i >= cases) {
                         state[k] = KEY_DONE;
                         busy--;
                         continue;
                     }
-                    press_us[k] = SWEEP_FROM_US + (uint32_t)i * SWEEP_STEP_US;
+                    press_us[k] = SWEEP_FROM_US + (uint32_t)i * step_us;
                     CHECK(press_us[k] > last_pass_us);     // no earlier boundary missed
                     state[k] = KEY_WAITING;
                 }
                 if (state[k] == KEY_WAITING && pass_us >= press_us[k]) {
                     fake_matrix_key[k / COLS][k % COLS] = true;
                     state[k] = KEY_CLOSED;
+                }
+                if (state[k] == KEY_HELD && pass_us >= press_us[k] + STRESS_HOLD_US) {
+                    fake_matrix_key[k / COLS][k % COLS] = false;
+                    state[k] = KEY_RELEASING;
                 }
             }
             uint32_t read_us = loop_pass();
@@ -1128,10 +1293,9 @@ static void test_press_to_event_within_15_ms(void) {
                 if (e.down) {
                     CHECK(state[k] == KEY_CLOSED);
                     uint32_t latency = read_us - press_us[k];
-                    CHECK(latency <= PRESS_TO_EVENT_US);
+                    CHECK(latency <= STRESS_BOUND_US);
                     if (latency > worst) worst = latency;
-                    fake_matrix_key[k / COLS][k % COLS] = false;
-                    state[k] = KEY_RELEASING;
+                    state[k] = KEY_HELD;
                     done++;
                 } else {
                     CHECK(state[k] == KEY_RELEASING);
@@ -1140,8 +1304,24 @@ static void test_press_to_event_within_15_ms(void) {
             }
         }
     }
-    CHECK(done == SWEEP_CASES);
-    printf("  press-to-event: %d presses, worst %u us\n", done, (unsigned)worst);
+    CHECK(done == cases);
+    return worst;
+}
+
+static void test_press_to_event_under_stress(void) {
+    static const uint32_t steps_us[] = {
+        370, 400, 430, 460, 500, 550, 600, 700, 850, 1000, 1250, 1500, 2000,
+    };
+    uint32_t worst = 0, worst_step_us = 0;
+    for (unsigned s = 0; s < sizeof(steps_us) / sizeof(steps_us[0]); s++) {
+        uint32_t w = stress_worst(steps_us[s]);
+        if (w > worst) {
+            worst = w;
+            worst_step_us = steps_us[s];
+        }
+    }
+    printf("  press-to-event under stress (a press every 0.37-2 ms, held 30 ms): "
+           "worst %u us, with a press every %u us\n", (unsigned)worst, (unsigned)worst_step_us);
 }
 
 static void test_bus_load_is_bounded(void) {
@@ -1196,6 +1376,7 @@ int main(void) {
     RUN(test_full_ring_keeps_changes_pending);
     RUN(test_ring_keeps_order_across_the_wrap);
     RUN(test_press_to_event_within_15_ms);
+    RUN(test_press_to_event_under_stress);
     RUN(test_bus_load_is_bounded);
     return 0;
 }

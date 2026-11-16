@@ -31,4 +31,12 @@ bool key_scan_check(bool *intact);
 // no transfer and the selection unchanged.
 bool key_scan_column(uint8_t col, uint8_t *down);
 
+// Reads back only the canaries a reset clears, after the sample of column col
+// (0-9): U801 IODIR for COL0-7 (pointer write and 2 bytes), and U802 IODIR as
+// well for COL8/9. False on an I2C error, or with no transfer for a col of
+// KEY_SCAN_COLS or more; *intact is then not written. Otherwise *intact tells
+// whether those bytes hold what key_scan_init wrote. IPOL is left to
+// key_scan_check. The column selection is not touched.
+bool key_scan_verify(uint8_t col, bool *intact);
+
 #endif

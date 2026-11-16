@@ -71,6 +71,25 @@ bool key_scan_check(bool *intact) {
     return true;
 }
 
+// Only the canaries a reset clears, read after the sample of col: U801's IODIR
+// (the rows), and U802's too for COL8/9 (it drives them). A U802 reset only
+// floats COL8/COL9, which cannot pull a row low while a U801 column is
+// sampled. IPOL is not read: nothing but a reset or a stray write changes it,
+// and key_scan_check, which starts every scan, covers it. The selection stays.
+bool key_scan_verify(uint8_t col, bool *intact) {
+    if (col >= KEY_SCAN_COLS) return false;     // no transfer
+    uint8_t row[2];     // U801 IODIRA, IODIRB
+    if (!read_regs(KEY_SCAN_ROW_ADDR, REG_IODIRA, row, sizeof(row))) return false;
+    bool held = row[0] == ROWS_A && row[1] == ROWS_B;
+    if (col >= U801_COLS) {
+        uint8_t cols[2];    // U802 IODIRA, IODIRB
+        if (!read_regs(KEY_SCAN_COL_ADDR, REG_IODIRA, cols, sizeof(cols))) return false;
+        held = held && cols[0] == COL_IODIR && cols[1] == COL_IODIR;
+    }
+    *intact = held;
+    return true;
+}
+
 // U801's latch with only col (0-7) low: COL0-6 are GPB1-7, COL7 is GPA7.
 // From a column in OLATB to COL7 both are low for one byte time; no row is
 // read then.

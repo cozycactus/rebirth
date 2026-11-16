@@ -107,8 +107,8 @@ static void forget_play(void) {
 // have left a column low, so nothing is sampled until both chips are
 // configured and checked again. A pending change may rest on a bogus sample
 // and is cancelled, so a bogus first sight never settles; and a settling
-// sample counts only once the check after it has passed (scan_step_once), so
-// every event, and every end of a suppression, rests on at least two good
+// sample counts only once the canaries read after it hold (scan_step_once),
+// so every event, and every end of a suppression, rests on at least two good
 // samples. A reported state stays, since a scanner reads levels and a held key
 // reads as held after the re-init, not as a new press. A suppressed key needs
 // two up samples again.
@@ -158,6 +158,11 @@ static bool scanner_intact(void) {
     return key_scan_check(&intact) && intact;
 }
 
+static bool sample_proved(uint8_t col) {
+    bool intact;
+    return key_scan_verify(col, &intact) && intact;
+}
+
 // The column's eight keys, from its fresh sample (bit r = ROW r down).
 static void sample_column(uint8_t col, uint8_t down, uint32_t now_ms) {
     for (uint8_t row = 0; row < PANEL_ROWS; row++) {
@@ -176,10 +181,13 @@ static void sample_column(uint8_t col, uint8_t down, uint32_t now_ms) {
 // starts every scan, so it runs between any two samples of a column and
 // cancels a bogus first sight before the key's next sample. A chip that resets
 // after that check could still give the sample that settles a change, so such
-// a sample is proved first: the check runs again right after it, in the same
-// pass (the canaries are read after the data), and the sample counts only if
-// the check passes. A pass is then at most 8 transfers: 4 for the column, 4
-// for the check. The next scan still starts with its own check.
+// a sample is proved first: right after it, in the same pass, the canaries a
+// reset clears are read (written first, read after the data) and the sample
+// counts only if they hold. That is U801's IODIR, and U802's for COL8/9: a
+// U802 reset only floats COL8/COL9, which cannot pull a row low while a U801
+// column is sampled. IPOL is left to the full check that starts every scan.
+// A pass is then at most 6 transfers for COL0-7 (4 for the column, 2 for the
+// canary) and 8 for COL8/9 (4 and 4).
 static void scan_step_once(uint32_t now_ms) {
     if (scan_step == CHECK_STEP) {
         if (!scanner_intact()) {
@@ -202,7 +210,7 @@ static void scan_step_once(uint32_t now_ms) {
         lose_scanner(now_ms);
         return;
     }
-    if (column_would_settle(col, down, now_ms) && !scanner_intact()) {
+    if (column_would_settle(col, down, now_ms) && !sample_proved(col)) {
         lose_scanner(now_ms);           // the sample is not applied
         return;
     }
