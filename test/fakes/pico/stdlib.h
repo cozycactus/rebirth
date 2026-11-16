@@ -9,6 +9,7 @@
 #define GPIO_OUT 1
 #define GPIO_FUNC_UART 2
 #define GPIO_FUNC_SPI 3
+#define GPIO_FUNC_I2C 4
 
 void gpio_init(uint8_t pin);
 void gpio_set_dir(uint8_t pin, bool output);
@@ -18,6 +19,8 @@ bool gpio_get(uint8_t pin);
 void gpio_pull_up(uint8_t pin);
 void gpio_disable_pulls(uint8_t pin);
 extern bool fake_gpio_level[32];
+extern bool fake_gpio_pulled_up[32];
+extern bool fake_gpio_pulls_disabled[32];
 void gpio_set_mask(uint32_t mask);
 void gpio_clr_mask(uint32_t mask);
 uint64_t get_absolute_time(void);

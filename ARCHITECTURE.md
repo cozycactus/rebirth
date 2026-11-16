@@ -109,16 +109,36 @@ loss needs a future two-slot/journal design.
 | DIN MIDI TX, reserved RX | 0, 1; UART0, 31,250 baud, 8N1 |
 | SSD1309 OLED | 2 SCK, 3 MOSI, 4 CS, 5 DC, 6 reset; SPI0 |
 | Jitter probe | 7 |
-| MCP23017 buttons / LEDs | 8 SDA, 9 SCL; addresses 0x20 / 0x21 |
+| I2C0 bus | 8 SDA, 9 SCL; 400 kHz; external pull-ups (2.2-4.7 kOhm), internal ones disabled |
+| MCP23017 buttons / LEDs | I2C 0x20 / 0x21 |
+| TCA8418 panel key scanner | I2C 0x34; 8 x 10 matrix, 80 keys; 3.3 V only; no INT line, polled |
 | Two MCP4822 DACs | 10 SCK, 11 MOSI, 12/13 CS; SPI1 |
 | Gates | 14-17; 3.3 V logic |
 | Encoder 1 | 18, 19, switch 20 |
 | Encoder 2 | 21, 22, switch 26 |
 | Tempo LED | 25 |
+| RGB LED chain | 27; 82 x SK6812MINI-E via PIO, level-shifted to 5 V |
+| PLAY button | 28 to GND, internal pull-up, 20 ms debounce |
 
 There are **two** encoders. Firmware uses MCP23017 expanders, not shift-register
 button drivers. The Pico exposes 26 general-purpose GPIOs; this assignment uses
-24, leaving GPIO 27 and 28.
+all of them (GPIO 27 LED data, GPIO 28 PLAY).
+
+Every I2C transaction, initialisation included, uses the SDK timeout API (2000 us)
+and checks the exact byte count, so a missing chip never blocks the UI. A failed
+button read keeps the last accepted state; the step LED mask is cached only after
+a successful write, so a failed write is retried on the next update. Core 1 never
+touches I2C or the LEDs. After a flash save or load, `panel_input_resync()` drops
+queued key events and treats held keys as released, so nothing held through the
+stall fires afterwards.
+
+### Power
+
+The LEDs take 5 V from VBUS, so the device is powered through its USB socket
+only and must stay within 500 mA at 5 V (RGB chain budget 200 mA). The firmware
+has no USB stack and never enumerates, so a host may hold it to 100 mA; this is
+a bench check on real laptops. The frame builder scales the RGB brightness to
+keep the estimated current within the budget.
 
 ### MIDI Circuit
 

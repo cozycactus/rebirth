@@ -34,6 +34,8 @@ static bool uart_drained;
 void fake_hardware_reset(void) {
     memset(&timer, 0, sizeof(timer));
     for (int i = 0; i < 32; i++) fake_gpio_level[i] = true;
+    memset(fake_gpio_pulled_up, 0, sizeof(fake_gpio_pulled_up));
+    memset(fake_gpio_pulls_disabled, 0, sizeof(fake_gpio_pulls_disabled));
     fake_midi_length = 0;
     fake_uart_writable = true;
     fake_uart_tx_irq = false;
@@ -97,8 +99,16 @@ bool fake_gpio_level[32] = {
     true, true, true, true, true, true, true, true, true, true
 };
 bool gpio_get(uint8_t pin) { return fake_gpio_level[pin & 31]; }
-void gpio_pull_up(uint8_t pin) { (void)pin; }
-void gpio_disable_pulls(uint8_t pin) { (void)pin; }
+bool fake_gpio_pulled_up[32];
+bool fake_gpio_pulls_disabled[32];
+void gpio_pull_up(uint8_t pin) {
+    fake_gpio_pulled_up[pin & 31] = true;
+    fake_gpio_pulls_disabled[pin & 31] = false;
+}
+void gpio_disable_pulls(uint8_t pin) {
+    fake_gpio_pulled_up[pin & 31] = false;
+    fake_gpio_pulls_disabled[pin & 31] = true;
+}
 uint64_t get_absolute_time(void) { return timer.timerawl; }
 uint32_t to_ms_since_boot(uint64_t time) { return (uint32_t)(time / 1000); }
 void fake_wait_for_interrupt(void) { abort(); }

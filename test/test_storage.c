@@ -7,6 +7,30 @@
 sequencer_state_t g_seq;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%d: %s\n", __LINE__, #x); exit(1); } } while (0)
 
+static unsigned resync_calls;
+void panel_input_resync(void) { resync_calls++; }
+
+static void test_save_resyncs_panel_input(void) {
+    resync_calls = 0;
+    CHECK(flash_storage_save());
+    CHECK(resync_calls == 1);
+    // A refused save (playing) must not resync.
+    transport_start();
+    CHECK(!flash_storage_save());
+    transport_stop();
+    CHECK(resync_calls == 1);
+}
+
+static void test_load_resyncs_panel_input(void) {
+    resync_calls = 0;
+    CHECK(flash_storage_load());
+    CHECK(resync_calls == 1);
+    fake_flash[STORE_OFFSET + PAT_OFFSET] ^= 1;
+    CHECK(!flash_storage_load());
+    fake_flash[STORE_OFFSET + PAT_OFFSET] ^= 1;
+    CHECK(resync_calls == 1);
+}
+
 // Core 1's timer ISR clears a MIDI overflow with a panic even while stopped.
 // Here that happens after the save's first drain, before Core 1 is parked.
 static void core1_panics_before_lockout(void) {
@@ -72,7 +96,9 @@ int main(void) {
     fake_before_lockout = core1_panics_before_lockout;
     CHECK(flash_storage_save());
     fake_before_lockout = NULL;
+    test_save_resyncs_panel_input();
+    test_load_resyncs_panel_input();
     puts("PASS storage round-trip, playback guard, checksum, legacy validation, "
-         "interrupted save, late MIDI before erase");
+         "interrupted save, late MIDI before erase, resync after save and load");
     return 0;
 }

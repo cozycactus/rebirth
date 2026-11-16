@@ -84,8 +84,13 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-Seven test executables cover pattern/song data, MIDI/gate output at both DAC
-gains, the real timer/transport code, flash storage, and UI/OLED rendering.
+Eleven CTest targets (ten test sources; `test_sync` is built twice, once per DAC
+gain) cover pattern/song data (`test_pattern`, `test_song`), MIDI/gate output at
+both DAC gains (`test_sync`, `test_sync_gain2`), the real timer/transport code
+(`test_playback`), flash storage (`test_storage`), the Session view
+(`test_session`), the LED frame builder (`test_led_frame`), the TCA8418 panel
+input (`test_panel_input`), the MCP23017 button/LED expanders (`test_expanders`)
+and UI/OLED rendering (`test_ui`).
 Unix builds also exercise concurrent Stop/Panic during a pending gate commit.
 
 ## Live Controls
@@ -96,7 +101,7 @@ buttons edit it.
 
 - **Pad:** launches that slot on the track at the next launch point and moves
   the focus there. While stopped the selection is immediate. Pressing a queued
-  pad cancels the queue; pressing the playing pad changes nothing. An empty
+  pad cancels the queue; pressing the playing pad changes nothing except that it cancels a pending queue to another slot of that track. An empty
   slot launches too, which silences the track.
 - **SCENE:** launches the row on every track together; tracks already playing
   it keep playing. Pressed while any track is queued to that row, it cancels
@@ -149,7 +154,16 @@ src/
   midi_out.c        — MIDI UART + buffered output
   cv_gate.c         — MCP4822 DAC + GPIO gate control
   display.c         — OLED drawing layer
+  ssd1309.c         — OLED controller driver
   ui.c              — UI state machine
+  session.c         — Session view: pad/scene launch, focus, quantization
+  led_frame.c       — Pure LED frame builder (light tables, current budget)
+  rgb_leds.c        — 82-LED SK6812 chain on GPIO 27 (PIO)
+  tca8418.c         — TCA8418 key scanner driver (I2C 0x34)
+  panel_input.c     — Panel key debounce, events, resync after flash access
+  mcp23017.c        — Step buttons (MCP23017 0x20)
+  step_leds.c       — Step LEDs (MCP23017 0x21)
+  flash_storage.c   — Save/load of patterns and song
 HARDWARE_STATUS.md  — Build/bench verification status
 JITTER_MEASUREMENT.md — Timing measurement procedure
 test/
@@ -157,8 +171,12 @@ test/
   test_sync.c       — Synchronization layer tests
   test_song.c       — Song mode tests
   test_playback.c   — Timer, transport, note and MIDI queue regression tests
-  test_storage.c    — Save validation and interrupted-write tests
+  test_storage.c    — Save validation, interrupted writes, panel resync
   test_ui.c         — UI events and production OLED rendering
+  test_session.c    — Pad/scene launch, cancel and quantization
+  test_led_frame.c  — LED light tables and current budget
+  test_panel_input.c — TCA8418 decoding, debounce, overflow, resync
+  test_expanders.c  — MCP23017 and step LED I2C error handling
 ```
 
 ## Status

@@ -1,31 +1,5 @@
-#ifndef MOCK_HARDWARE
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
-#else
-#include <stdint.h>
-#include <stdbool.h>
-#include <string.h>
-static uint32_t _mock_ms = 0;
-static uint8_t _mock_regs[256] = {0};
-int i2c_write_blocking(void *i2c, uint8_t addr, const uint8_t *buf, int len, bool nostop) {
-    (void)i2c; (void)addr; (void)nostop;
-    if (len == 2) _mock_regs[buf[0]] = buf[1];
-    return len;
-}
-int i2c_read_blocking(void *i2c, uint8_t addr, uint8_t *buf, int len, bool nostop) {
-    (void)i2c; (void)addr; (void)nostop; (void)len;
-    buf[0] = 0xFF;  // All high (no buttons pressed)
-    return len;
-}
-void i2c_init(void *i2c, uint32_t freq) { (void)i2c; (void)freq; }
-void gpio_set_function(uint8_t pin, int func) { (void)pin; (void)func; }
-void gpio_pull_up(uint8_t pin) { (void)pin; }
-uint32_t to_ms_since_boot(uint64_t t) { (void)t; return _mock_ms; }
-uint64_t get_absolute_time(void) { return 0; }
-#define i2c0 ((void *)0)
-#define GPIO_FUNC_I2C 0
-#endif
-
 #include <string.h>
 #include "mcp23017.h"
 
@@ -48,16 +22,25 @@ static step_buttons_t buttons;
 
 // ─── I2C Helpers ───────────────────────────────────────────────
 
-static void mcp_write_reg(uint8_t reg, uint8_t val) {
+#define MCP_I2C_TIMEOUT_US 2000
+
+// Every transfer is bounded and must move exactly the requested bytes.
+static bool mcp_write_reg(uint8_t reg, uint8_t val) {
     uint8_t buf[2] = { reg, val };
-    i2c_write_blocking(MCP_I2C, MCP23017_ADDR, buf, 2, false);
+    return i2c_write_timeout_us(MCP_I2C, MCP23017_ADDR, buf, 2, false,
+                                MCP_I2C_TIMEOUT_US) == 2;
 }
 
-static uint8_t mcp_read_reg(uint8_t reg) {
-    uint8_t val;
-    i2c_write_blocking(MCP_I2C, MCP23017_ADDR, &reg, 1, true);
-    i2c_read_blocking(MCP_I2C, MCP23017_ADDR, &val, 1, false);
-    return val;
+// Reads GPIOA and GPIOB in one transfer (address pointer auto-increments).
+static bool mcp_read_ports(uint16_t *raw) {
+    uint8_t reg = REG_GPIOA;
+    uint8_t val[2];
+    if (i2c_write_timeout_us(MCP_I2C, MCP23017_ADDR, &reg, 1, true,
+                             MCP_I2C_TIMEOUT_US) != 1) return false;
+    if (i2c_read_timeout_us(MCP_I2C, MCP23017_ADDR, val, 2, false,
+                            MCP_I2C_TIMEOUT_US) != 2) return false;
+    *raw = ((uint16_t)val[1] << 8) | val[0];
+    return true;
 }
 
 // ─── Initialization ────────────────────────────────────────────
@@ -67,8 +50,9 @@ void mcp23017_init(void) {
     i2c_init(MCP_I2C, MCP23017_I2C_FREQ);
     gpio_set_function(MCP23017_SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(MCP23017_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(MCP23017_SDA_PIN);
-    gpio_pull_up(MCP23017_SCL_PIN);
+    // The bus has external pull-ups; the weak internal ones stay off.
+    gpio_disable_pulls(MCP23017_SDA_PIN);
+    gpio_disable_pulls(MCP23017_SCL_PIN);
 
     // Configure all 16 pins as inputs
     mcp_write_reg(REG_IODIRA, 0xFF);
@@ -91,10 +75,10 @@ void mcp23017_init(void) {
 void mcp23017_poll(void) {
     uint32_t now = to_ms_since_boot(get_absolute_time());
 
-    // Read both ports (already inverted via IPOL: pressed = 1)
-    uint8_t port_a = mcp_read_reg(REG_GPIOA);
-    uint8_t port_b = mcp_read_reg(REG_GPIOB);
-    uint16_t raw = ((uint16_t)port_b << 8) | port_a;
+    // Read both ports (already inverted via IPOL: pressed = 1). A failed
+    // read keeps the last accepted state: no phantom releases or presses.
+    uint16_t raw;
+    if (!mcp_read_ports(&raw)) return;
 
     // Debounce: only update if enough time has passed
     if (now - buttons._debounce_ms >= MCP_DEBOUNCE_MS) {
@@ -144,7 +128,6 @@ step_buttons_t *mcp23017_get_buttons(void) {
 }
 
 uint16_t mcp23017_read_raw(void) {
-    uint8_t port_a = mcp_read_reg(REG_GPIOA);
-    uint8_t port_b = mcp_read_reg(REG_GPIOB);
-    return ((uint16_t)port_b << 8) | port_a;
+    uint16_t raw;
+    return mcp_read_ports(&raw) ? raw : buttons._raw;
 }

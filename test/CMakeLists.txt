@@ -119,3 +119,12 @@ add_executable(test_panel_input
 )
 target_include_directories(test_panel_input PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME panel_input_tests COMMAND test_panel_input)
+
+add_executable(test_expanders
+    test_expanders.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/mcp23017.c
+    ${REBIRTH_SRC}/step_leds.c
+)
+target_include_directories(test_expanders PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+add_test(NAME expanders_tests COMMAND test_expanders)

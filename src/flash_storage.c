@@ -8,6 +8,7 @@
 #include <string.h>
 #include "sequencer.h"
 #include "flash_storage.h"
+#include "panel_input.h"
 
 // ─── Flash layout ──────────────────────────────────────────────
 //
@@ -175,7 +176,10 @@ bool flash_storage_save(void) {
 
     restore_interrupts(ints);
     multicore_lockout_end_blocking();
-    return flash_storage_is_valid();
+    if (!flash_storage_is_valid()) return false;
+    // Keys held through the stall must not fire afterwards.
+    panel_input_resync();
+    return true;
 #else
     return false;
 #endif
@@ -196,6 +200,7 @@ bool flash_storage_load(void) {
             sequencer_refresh_track_playback(track, pattern);
         }
     }
+    panel_input_resync();
     return true;
 #else
     return false;
