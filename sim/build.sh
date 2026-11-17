@@ -54,7 +54,7 @@ web() {
     # firmware or the simulator had changes not yet committed.
     COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)
     DIRTY=false
-    [ -n "$(git status --porcelain -- src include sim test/fakes 2>/dev/null)" ] && DIRTY=true
+    [ -n "$(git status --porcelain --untracked-files=no -- src include sim test/fakes 2>/dev/null)" ] && DIRTY=true
     SIM_COMMIT="$COMMIT" SIM_DIRTY="$DIRTY" SIM_FEATURES="$FEATURES" \
     SIM_DATE="$(git log -1 --format=%cI 2>/dev/null)" SIM_SUBJECT="$(git log -1 --format=%s 2>/dev/null)" \
     SIM_EMCC="$(emcc --version | head -1 | sed 's/.*) //; s/ .*//')" node -e '
