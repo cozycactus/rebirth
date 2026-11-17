@@ -15,67 +15,483 @@
 i2c_inst_t fake_i2c0_inst;
 sequencer_state_t g_seq;   // referenced by the shared fake hardware
 
-// Two fake expanders: 0x20 (buttons) and 0x21 (LEDs), 22 registers each.
-static uint8_t regs[2][0x16];
-static uint8_t read_pointer[2];
-static bool fail_writes, fail_reads;
-static unsigned timeouts_seen_bad;       // calls with a timeout other than 2000 us
-static unsigned led_writes;              // 3-byte OLAT writes to 0x21
+// Three fake MCP23017 on I2C0, at their power-on values after reset():
+// 0x20 (U701, steps 1-7 and 9-15), 0x21 (U702, step LEDs) and 0x24 (U703,
+// steps 8 and 16), 22 registers each (BANK = 0). A GPIO read comes from the
+// keys alone: a pin reads low while its key is closed and high otherwise,
+// then IPOL inverts it. High is the harsher case for every other pin: a
+// floating input after a reset, GPA7/GPB7 (whose read-back the datasheet
+// leaves open) and the unused outputs of U703. So a chip that reset reads its
+// idle lines as pressed.
+enum { U701, U702, U703, NUM_CHIPS };
+static const uint8_t chip_address[NUM_CHIPS] = { 0x20, 0x21, 0x24 };
+static uint8_t regs[NUM_CHIPS][0x16];
+static uint8_t read_pointer[NUM_CHIPS];
+static int pointer_pending = -1;            // chip whose pointer write awaits its read
+static uint8_t closed[NUM_CHIPS][2];        // closed keys, per port
+static bool fail_writes, fail_reads;        // every write / every read fails
+static bool absent[NUM_CHIPS];              // every transfer to the chip fails (not fitted)
+static int reset_in_read = -1;              // chip that resets after the first byte of its next GPIO read
+static unsigned i2c_calls;                  // every transfer, failed or not
+static unsigned calls[NUM_CHIPS];           // the same, per chip
+static unsigned ipol_writes[NUM_CHIPS];     // bytes written to IPOLA/IPOLB
+static unsigned led_writes;                 // 3-byte OLAT writes to 0x21
 static unsigned last_write_len;
-static unsigned last_read_len;
-static unsigned i2c_calls;               // every transfer, failed or not
+
+// Register writes and reads since the log was cleared (pointer writes are
+// not logged): chip, first register, data bytes.
+typedef struct { int chip; uint8_t reg; unsigned len; bool read; } txn_t;
+static txn_t txns[32];
+static unsigned txns_logged;
+
+static void log_txn(int chip, uint8_t reg, unsigned len, bool read) {
+    if (txns_logged < sizeof(txns) / sizeof(txns[0])) {
+        txns[txns_logged++] = (txn_t){ chip, reg, len, read };
+    }
+}
 
 static int chip_of(uint8_t addr) {
-    CHECK(addr == MCP23017_ADDR || addr == STEP_LEDS_ADDR);
-    return addr == STEP_LEDS_ADDR;
+    int c = 0;
+    while (c < NUM_CHIPS && chip_address[c] != addr) c++;
+    CHECK(c < NUM_CHIPS);                     // only the three expanders are on this bus
+    return c;
+}
+
+// Power-on values, and a brown-out: IODIR = FF/FF, every other register 0.
+static void chip_reset(int c) {
+    memset(regs[c], 0, sizeof(regs[c]));
+    regs[c][0x00] = regs[c][0x01] = 0xFF;
+}
+
+static uint8_t port_value(int c, int port) {
+    return (uint8_t)(~closed[c][port] ^ regs[c][0x02 + port]);
+}
+
+static uint8_t read_reg(int c, unsigned reg) {
+    CHECK(reg < sizeof(regs[c]));
+    if (reg == 0x12 || reg == 0x13) return port_value(c, (int)reg - 0x12);
+    return regs[c][reg];
 }
 
 unsigned i2c_init(i2c_inst_t *i2c, unsigned baudrate) {
-    (void)i2c; return baudrate;
+    CHECK(i2c == i2c0);
+    return baudrate;
 }
 
 int i2c_write_timeout_us(i2c_inst_t *i2c, uint8_t addr, const uint8_t *src, size_t len,
                          bool nostop, unsigned timeout_us) {
-    (void)i2c; (void)nostop;
+    CHECK(i2c == i2c0);
+    int c = chip_of(addr);
     i2c_calls++;
+    calls[c]++;
     last_write_len = (unsigned)len;
-    if (timeout_us != 2000) timeouts_seen_bad++;
-    if (fail_writes) return PICO_ERROR_TIMEOUT;
-    int chip = chip_of(addr);
+    CHECK(timeout_us == 2000);
     CHECK(len >= 1);
-    read_pointer[chip] = src[0];
+    CHECK(pointer_pending < 0);               // a pointer write is followed by its read
+    CHECK(nostop == (len == 1));              // only a pointer write keeps the bus for its read
     for (size_t i = 1; i < len; i++) {
-        CHECK(src[0] + i - 1 < sizeof(regs[chip]));
-        regs[chip][src[0] + i - 1] = src[i];
+        size_t reg = src[0] + i - 1;
+        CHECK(reg < sizeof(regs[c]));
+        // GPA7/GPB7 of the step chips are output-only: never made inputs.
+        if (c != U702 && reg <= 0x01) CHECK(!(src[i] & 0x80));
+        if (reg == 0x02 || reg == 0x03) ipol_writes[c]++;
     }
-    if (chip == 1 && len == 3 && src[0] == 0x14) led_writes++;
+    if (len > 1) log_txn(c, src[0], (unsigned)len - 1, false);
+    if (fail_writes || absent[c]) return PICO_ERROR_TIMEOUT;
+    read_pointer[c] = src[0];
+    if (len == 1) pointer_pending = c;
+    for (size_t i = 1; i < len; i++) regs[c][src[0] + i - 1] = src[i];
+    if (c == U702 && len == 3 && src[0] == 0x14) led_writes++;
     return (int)len;
 }
 
 int i2c_read_timeout_us(i2c_inst_t *i2c, uint8_t addr, uint8_t *dst, size_t len,
                         bool nostop, unsigned timeout_us) {
-    (void)i2c; (void)nostop;
+    CHECK(i2c == i2c0);
+    int c = chip_of(addr);
     i2c_calls++;
-    last_read_len = (unsigned)len;
-    if (timeout_us != 2000) timeouts_seen_bad++;
-    if (fail_reads) return PICO_ERROR_TIMEOUT;
-    int chip = chip_of(addr);
-    for (size_t i = 0; i < len; i++) dst[i] = regs[chip][read_pointer[chip] + i];
+    calls[c]++;
+    CHECK(timeout_us == 2000);
+    CHECK(pointer_pending == c);              // the read follows its pointer write
+    CHECK(!nostop);
+    pointer_pending = -1;
+    log_txn(c, read_pointer[c], (unsigned)len, true);
+    if (fail_reads || absent[c]) return PICO_ERROR_TIMEOUT;
+    // A chip that resets inside its GPIO read restarts its I2C interface: the
+    // rest of the read comes back as 0xFF, with a full byte count.
+    bool cut = c == reset_in_read && read_pointer[c] == 0x12;
+    for (size_t i = 0; i < len; i++) {
+        if (cut && i == 1) chip_reset(c);
+        dst[i] = (cut && i >= 1) ? 0xFF : read_reg(c, read_pointer[c] + (unsigned)i);
+    }
+    if (cut) reset_in_read = -1;
     return (int)len;
 }
 
 static void reset(void) {
     fake_hardware_reset();
-    memset(regs, 0, sizeof(regs));
+    for (int c = 0; c < NUM_CHIPS; c++) chip_reset(c);
     memset(read_pointer, 0, sizeof(read_pointer));
+    memset(closed, 0, sizeof(closed));
+    memset(absent, 0, sizeof(absent));
+    memset(calls, 0, sizeof(calls));
+    memset(ipol_writes, 0, sizeof(ipol_writes));
+    pointer_pending = reset_in_read = -1;
     fail_writes = fail_reads = false;
-    timeouts_seen_bad = led_writes = i2c_calls = 0;
-    last_write_len = last_read_len = 0;
+    i2c_calls = led_writes = last_write_len = txns_logged = 0;
 }
 
-static void press(uint16_t mask) {          // inverted by IPOL: pressed = 1
-    regs[0][0x12] = (uint8_t)(mask & 0xFF);
-    regs[0][0x13] = (uint8_t)(mask >> 8);
+// The board's pin map (PR #10), kept here apart from the driver: bit n of the
+// step word is step n + 1. U701 GPA0-6 = steps 1-7, GPB0-6 = steps 9-15;
+// U703 GPA0 = step 8, GPA1 = step 16.
+static void press(uint16_t steps) {
+    memset(closed, 0, sizeof(closed));
+    closed[U701][0] = (uint8_t)(steps & 0x7F);
+    closed[U701][1] = (uint8_t)((steps >> 8) & 0x7F);
+    closed[U703][0] = (uint8_t)(((steps >> 7) & 0x01) | ((steps >> 14) & 0x02));
+}
+
+// The step-row configuration for key pins a/b: IPOL, IODIR and GPPU on the
+// keys, every output latch low.
+static bool configured_as(int c, uint8_t a, uint8_t b) {
+    const uint8_t *r = regs[c];
+    return r[0x00] == a && r[0x01] == b && r[0x02] == a && r[0x03] == b
+        && r[0x0C] == a && r[0x0D] == b && r[0x14] == 0x00 && r[0x15] == 0x00;
+}
+
+// Since the log was cleared, chip c was read exactly twice, 2 bytes each,
+// starting at these registers in this order.
+static bool reads_were(int c, uint8_t first, uint8_t second) {
+    uint8_t seen[2];
+    unsigned n = 0;
+    for (unsigned i = 0; i < txns_logged; i++) {
+        if (txns[i].chip != c || !txns[i].read) continue;
+        if (n == 2 || txns[i].len != 2) return false;
+        seen[n++] = txns[i].reg;
+    }
+    return n == 2 && seen[0] == first && seen[1] == second;
+}
+
+static void poll_buttons_for(unsigned ms) {
+    for (unsigned t = 0; t < ms; t += 10) {
+        sleep_ms(10);
+        mcp23017_poll();
+    }
+}
+
+static void poll_each_ms_for(unsigned ms) {
+    for (unsigned t = 0; t < ms; t++) {
+        sleep_ms(1);
+        mcp23017_poll();
+    }
+}
+
+static void test_step_row_configures_both_chips(void) {
+    reset();
+    regs[U701][0x14] = regs[U701][0x15] = 0xFF;   // latches the configuration must clear
+    regs[U703][0x14] = regs[U703][0x15] = 0xFF;
+    mcp23017_init();
+    CHECK(configured_as(U701, 0x7F, 0x7F));
+    CHECK(configured_as(U703, 0x03, 0x00));
+    // Per chip: IPOL (the canary) first, then OLAT, IODIR, GPPU, each a
+    // 3-byte transfer; nothing is read at init.
+    static const uint8_t order[4] = { 0x02, 0x14, 0x00, 0x0C };
+    static const int step_chips[2] = { U701, U703 };
+    for (unsigned s = 0; s < 2; s++) {
+        int c = step_chips[s];
+        unsigned k = 0;
+        for (unsigned i = 0; i < txns_logged; i++) {
+            if (txns[i].chip != c) continue;
+            CHECK(k < 4 && !txns[i].read && txns[i].len == 2 && txns[i].reg == order[k]);
+            k++;
+        }
+        CHECK(k == 4);
+    }
+    CHECK(txns_logged == 8);
+}
+
+static void test_steps_8_and_16_come_from_0x24(void) {
+    reset();
+    mcp23017_init();
+    step_buttons_t *b = mcp23017_get_buttons();
+    poll_buttons_for(50);
+    // GPA7/GPB7 of 0x20 and the unused pins of 0x24 read high, and are ignored.
+    CHECK((port_value(U701, 0) & 0x80) && (port_value(U701, 1) & 0x80));
+    CHECK(port_value(U703, 0) == 0xFC && port_value(U703, 1) == 0xFF);
+    CHECK(b->held == 0 && b->pressed == 0);
+    press(1u << 7);                           // 0x24 GPA0
+    poll_buttons_for(30);
+    CHECK(b->pressed == (1u << 7) && b->held == (1u << 7));
+    b->pressed = 0;
+    press(1u << 15);                          // 0x24 GPA1
+    poll_buttons_for(30);
+    CHECK(b->pressed == (1u << 15) && b->held == (1u << 15));
+    CHECK(b->released == (1u << 7));
+    press((1u << 3) | (1u << 7));             // read_raw reads both chips now,
+    CHECK(mcp23017_read_raw() == ((1u << 3) | (1u << 7)));
+    CHECK(b->held == (1u << 15));             // without touching the state
+    // With U703 silent, U701 is sampled alone: its GPA7/GPB7 still never count.
+    absent[U703] = true;
+    press(0);
+    poll_buttons_for(30);
+    CHECK(b->held == (1u << 15));             // step 16 kept as last accepted
+}
+
+// A U703 that resets before a read reads its idle steps 8 and 16 as pressed;
+// the IPOL read after the ports catches it.
+static void test_reset_0x24_never_presses_8_or_16(void) {
+    reset();
+    mcp23017_init();
+    step_buttons_t *b = mcp23017_get_buttons();
+    poll_buttons_for(50);
+    chip_reset(U703);                         // brown-out: power-on registers
+    CHECK((port_value(U703, 0) & 0x03) == 0x03);
+    for (unsigned ms = 0; ms < 100; ms++) {
+        sleep_ms(1);
+        mcp23017_poll();
+        CHECK(!(b->pressed & 0x8080) && !(b->held & 0x8080) && !(b->long_pressed & 0x8080));
+    }
+    CHECK(configured_as(U703, 0x03, 0x00));
+    press(1u << 15);                          // a real press of step 16 still works
+    poll_buttons_for(30);
+    CHECK(b->pressed == (1u << 15) && b->held == (1u << 15));
+}
+
+// A chip that resets inside its port read gives its first byte, then 0xFF with
+// a full count, and IPOL at 0 after it: the sample is dropped, the chip is
+// configured again and its next good read is the baseline. The key going down
+// across the reset is then held, never pressed, and never long-presses.
+static void test_reset_inside_the_read_never_presses(void) {
+    static const struct { int chip; uint16_t key; uint8_t a, b; } cases[] = {
+        { U703, 1u << 7, 0x03, 0x00 },        // step 8
+        { U701, 1u << 2, 0x7F, 0x7F },        // step 3
+    };
+    for (unsigned k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        reset();
+        mcp23017_init();
+        step_buttons_t *b = mcp23017_get_buttons();
+        poll_buttons_for(50);
+        press(cases[k].key);
+        reset_in_read = cases[k].chip;
+        for (unsigned ms = 0; ms < 100; ms++) {
+            sleep_ms(1);
+            mcp23017_poll();
+            CHECK(b->pressed == 0);
+        }
+        CHECK(reset_in_read < 0);             // the cut read happened
+        CHECK(configured_as(cases[k].chip, cases[k].a, cases[k].b));
+        CHECK(b->held == cases[k].key);
+        poll_buttons_for(600);
+        CHECK(b->pressed == 0 && b->long_pressed == 0);
+        press(0);
+        poll_buttons_for(30);
+        CHECK(b->released == cases[k].key && b->held == 0);
+    }
+}
+
+// An old board without U703: the other 14 steps work, U703 costs one NACKed
+// write per 100 ms, and a resync (which leaves U703's rebaseline pending for
+// good) neither stalls U701 nor makes it read on every pass.
+static void test_missing_0x24_keeps_other_steps(void) {
+    reset();
+    absent[U703] = true;
+    mcp23017_init();                          // tries U703 once, at t = 0
+    step_buttons_t *b = mcp23017_get_buttons();
+    uint32_t last_try = 0;
+    unsigned tries = calls[U703], samples = 0;
+    for (uint32_t ms = 1; ms <= 1000; ms++) {
+        if (ms == 100 || ms == 600) press(0x7F7F);    // steps 1-7, 9-15
+        if (ms == 300 || ms == 800) press(0);
+        sleep_ms(1);
+        unsigned before = calls[U701];
+        if (ms == 500) mcp23017_resync(); else mcp23017_poll();
+        unsigned reads = calls[U701] - before;
+        CHECK(reads == 0 || reads == 4);      // whole samples only
+        samples += reads == 4;
+        if (calls[U703] != tries) {           // one attempt: one NACKed write
+            CHECK(calls[U703] == tries + 1 && ms - last_try >= 100);
+            tries = calls[U703];
+            last_try = ms;
+        }
+        if (ms == 299 || ms == 799) CHECK(b->pressed == 0x7F7F && b->held == 0x7F7F);
+        if (ms == 499 || ms == 999) CHECK(b->released == 0x7F7F && b->held == 0);
+    }
+    CHECK(samples <= 1000 / MCP_DEBOUNCE_MS + 1);
+    CHECK(b->long_pressed == 0);
+}
+
+// Step 3 is released while every transfer to U701 fails: its last accepted
+// state (held) stays, but it must not long-press on it.
+static void test_no_long_press_from_a_failing_chip(void) {
+    reset();
+    mcp23017_init();
+    step_buttons_t *b = mcp23017_get_buttons();
+    poll_buttons_for(50);
+    press(1u << 2);
+    for (unsigned ms = 0; ms < 30 && !(b->pressed & (1u << 2)); ms++) {
+        sleep_ms(1);
+        mcp23017_poll();
+    }
+    CHECK(b->pressed & (1u << 2));            // held from this sample on
+    poll_each_ms_for(450);
+    CHECK(b->long_pressed == 0 && (b->held & (1u << 2)));
+    absent[U701] = true;
+    press(0);
+    for (unsigned ms = 0; ms < 200; ms++) {
+        sleep_ms(1);
+        mcp23017_poll();
+        CHECK(b->long_pressed == 0 && (b->held & (1u << 2)));
+    }
+    absent[U701] = false;                     // the bus is back
+    for (unsigned ms = 0; ms < 150; ms++) {
+        sleep_ms(1);
+        mcp23017_poll();
+        CHECK(b->long_pressed == 0);
+    }
+    CHECK((b->released & (1u << 2)) && !(b->held & (1u << 2)));
+}
+
+static uint32_t now_ms(void) {
+    return to_ms_since_boot(get_absolute_time());
+}
+
+// One pass dt ms after the last; returns the transfers it made to chip c.
+static unsigned pass_after(unsigned dt, int c) {
+    unsigned before = calls[c];
+    sleep_ms(dt);
+    mcp23017_poll();
+    return calls[c] - before;
+}
+
+// Passes every ms up to and including t; no long press meanwhile.
+static void quiet_passes_to(uint32_t t) {
+    while (now_ms() < t) {
+        sleep_ms(1);
+        mcp23017_poll();
+        CHECK(mcp23017_get_buttons()->long_pressed == 0);
+    }
+}
+
+static const struct { uint16_t key; int chip, other; } step_keys[] = {
+    { 1u << 2, U701, U703 },                  // step 3
+    { 1u << 7, U703, U701 },                  // step 8
+    { 1u << 15, U703, U701 },                 // step 16
+};
+#define STEP_KEYS (sizeof(step_keys) / sizeof(step_keys[0]))
+
+// After init at t = 0: the key pressed and sampled at t = 20, then one 2 ms
+// pass, so the 20 ms sample grid runs 41, 61, ..., 501, 521.
+static step_buttons_t *press_then_shift_the_grid(unsigned k) {
+    mcp23017_init();
+    step_buttons_t *b = mcp23017_get_buttons();
+    quiet_passes_to(19);
+    press(step_keys[k].key);
+    CHECK(pass_after(1, step_keys[k].chip) == 4);  // t = 20: ports, then IPOL
+    CHECK(b->pressed == step_keys[k].key && b->held == step_keys[k].key);
+    b->pressed = 0;
+    quiet_passes_to(39);
+    CHECK(pass_after(2, step_keys[k].chip) == 4);  // t = 41
+    return b;
+}
+
+// A step held 499 ms is a short press, wherever the sample grid falls: at
+// t = 520 no sample is due and the last one (t = 501) still has the key down,
+// so a long press there would fire on a key released at t = 519. It waits for
+// a fresh good sample of the key's chip instead, which at t = 521 sees the
+// release. Cases: a healthy bus; the other step chip missing; the key's own
+// chip failing from the release to t = 600 (the release then comes with its
+// next good sample, as for any failed read).
+enum { BUS_HEALTHY, OTHER_CHIP_MISSING, OWN_CHIP_FAILING, BUS_CASES };
+
+static void test_long_press_waits_for_a_fresh_sample(void) {
+    for (unsigned k = 0; k < STEP_KEYS; k++) {
+        for (int bus = 0; bus < BUS_CASES; bus++) {
+            reset();
+            int chip = step_keys[k].chip;
+            uint16_t key = step_keys[k].key;
+            if (bus == OTHER_CHIP_MISSING) absent[step_keys[k].other] = true;
+            step_buttons_t *b = press_then_shift_the_grid(k);
+            quiet_passes_to(518);
+            press(0);
+            if (bus == OWN_CHIP_FAILING) absent[chip] = true;
+            CHECK(pass_after(1, chip) == 0);        // t = 519: released
+            CHECK(pass_after(1, chip) == 0);        // t = 520: no sample due
+            CHECK(b->long_pressed == 0);
+            CHECK(pass_after(1, chip) > 0);         // t = 521: the next sample
+            CHECK(b->long_pressed == 0);
+            if (bus == OWN_CHIP_FAILING) {
+                CHECK(b->released == 0 && b->held == key);
+                quiet_passes_to(599);
+                absent[chip] = false;
+                quiet_passes_to(700);
+            }
+            CHECK(b->released == key && b->held == 0);
+        }
+    }
+}
+
+// A real long hold still long-presses exactly once, in a pass that read the
+// key's chip, at the first sample at or after 500 ms: here t = 521, at most
+// one sample period after t = 520.
+static void test_long_hold_long_presses_once(void) {
+    for (unsigned k = 0; k < STEP_KEYS; k++) {
+        for (int bus = BUS_HEALTHY; bus <= OTHER_CHIP_MISSING; bus++) {
+            reset();
+            if (bus == OTHER_CHIP_MISSING) absent[step_keys[k].other] = true;
+            step_buttons_t *b = press_then_shift_the_grid(k);
+            unsigned fired = 0;
+            uint32_t fired_at = 0;
+            while (now_ms() < 1500) {
+                unsigned transfers = pass_after(1, step_keys[k].chip);
+                if (b->long_pressed == 0) continue;
+                CHECK(b->long_pressed == step_keys[k].key && transfers == 4);
+                fired++;
+                fired_at = now_ms();
+                b->long_pressed = 0;
+            }
+            CHECK(fired == 1);
+            CHECK(fired_at >= 20 + MCP_LONG_PRESS_MS && fired_at <= 20 + MCP_LONG_PRESS_MS + MCP_DEBOUNCE_MS);
+            CHECK(b->held == step_keys[k].key && b->released == 0);
+        }
+    }
+}
+
+static void test_reads_only_when_a_sample_is_due(void) {
+    reset();
+    mcp23017_init();
+    unsigned ipol_before = ipol_writes[U701] + ipol_writes[U703];
+    unsigned total = 0;
+    for (unsigned ms = 0; ms < 1000; ms++) {
+        unsigned before = calls[U701] + calls[U703];
+        sleep_ms(1);
+        mcp23017_poll();
+        unsigned n = calls[U701] + calls[U703] - before;
+        CHECK(n == 0 || n == 8);              // a sample: per chip the ports, then IPOL
+        total += n;
+    }
+    CHECK(total >= 2 * 4 * 49 && total <= 2 * 4 * 51);
+    CHECK(ipol_writes[U701] + ipol_writes[U703] == ipol_before);   // the canary stays
+}
+
+// A chip that takes its configuration but fails the sample after it counts as
+// a failed attempt: with a rebaseline pending (a resync) it is retried every
+// 100 ms, not on every pass.
+static void test_failed_first_sample_is_retried_every_100_ms(void) {
+    reset();
+    mcp23017_init();
+    poll_buttons_for(50);
+    fail_reads = true;                        // writes land, every read fails
+    unsigned before = calls[U701];
+    mcp23017_resync();
+    poll_each_ms_for(999);
+    // The failed read at the resync (pointer write, read), then one attempt
+    // per 100 ms from the next pass: 4 writes, a pointer write, a read.
+    CHECK(calls[U701] - before <= 2 + 6 * 10);
+    fail_reads = false;
+    press(1u << 4);
+    poll_buttons_for(150);
+    CHECK(mcp23017_get_buttons()->held == (1u << 4));
+    CHECK(mcp23017_get_buttons()->pressed == 0);   // the baseline after the resync
 }
 
 static void test_failed_port_read_keeps_buttons(void) {
@@ -84,10 +500,12 @@ static void test_failed_port_read_keeps_buttons(void) {
     step_buttons_t *b = mcp23017_get_buttons();
     press(1u << 3);
     sleep_ms(30);
+    txns_logged = 0;
     mcp23017_poll();
     CHECK(b->held & (1u << 3));
     CHECK(b->pressed & (1u << 3));
-    CHECK(last_read_len == 2);               // both ports in one transfer
+    CHECK(reads_were(U701, 0x12, 0x02));     // both ports in one 2-byte read, then IPOL
+    CHECK(reads_were(U703, 0x12, 0x02));
     b->pressed = 0;
     fail_reads = true;
     press(0);
@@ -101,14 +519,12 @@ static void test_failed_port_read_keeps_buttons(void) {
     mcp23017_poll();                          // the chip recovered: now released
     CHECK(!(b->held & (1u << 3)));
     CHECK(b->released & (1u << 3));
-    CHECK(timeouts_seen_bad == 0);
 }
 
 static void test_failed_led_write_is_retried(void) {
     reset();
     mcp23017_init();
     step_leds_init();
-    CHECK(timeouts_seen_bad == 0);
     led_writes = 0;
     fail_writes = true;
     step_leds_set_mask(0x0005);
@@ -117,31 +533,28 @@ static void test_failed_led_write_is_retried(void) {
     step_leds_set_mask(0x0005);               // same mask is written again
     CHECK(led_writes == 1);
     CHECK(last_write_len == 3);
-    CHECK(regs[1][0x14] == 0x05 && regs[1][0x15] == 0x00);
+    CHECK(regs[U702][0x14] == 0x05 && regs[U702][0x15] == 0x00);
     step_leds_set_mask(0x0005);               // accepted: no new traffic
     CHECK(led_writes == 1);
     step_leds_set_mask(0x0100);
-    CHECK(led_writes == 2 && regs[1][0x14] == 0x00 && regs[1][0x15] == 0x01);
-    CHECK(timeouts_seen_bad == 0);
+    CHECK(led_writes == 2 && regs[U702][0x14] == 0x00 && regs[U702][0x15] == 0x01);
 }
 
 static void test_late_expander_is_configured_before_decoding(void) {
     reset();
     fail_writes = true;
-    mcp23017_init();                          // chip absent at power-up
+    mcp23017_init();                          // chips absent at power-up
     step_buttons_t *b = mcp23017_get_buttons();
-    press(1u << 5);
+    press((1u << 5) | (1u << 15));
     sleep_ms(30);
     mcp23017_poll();
     CHECK(b->held == 0 && b->pressed == 0);  // nothing decoded while unconfigured
     fail_writes = false;
     sleep_ms(100);                            // a failed attempt waits 100 ms
     mcp23017_poll();                          // configures, then decodes
-    CHECK(regs[0][0x00] == 0xFF && regs[0][0x01] == 0xFF);
-    CHECK(regs[0][0x0C] == 0xFF && regs[0][0x0D] == 0xFF);
-    CHECK(regs[0][0x02] == 0xFF && regs[0][0x03] == 0xFF);
-    CHECK(b->held == (1u << 5) && b->pressed == (1u << 5));
-    CHECK(timeouts_seen_bad == 0);
+    CHECK(configured_as(U701, 0x7F, 0x7F));
+    CHECK(configured_as(U703, 0x03, 0x00));
+    CHECK(b->held == ((1u << 5) | (1u << 15)) && b->pressed == ((1u << 5) | (1u << 15)));
 }
 
 static void test_i2c_pins_have_no_internal_pulls(void) {
@@ -149,13 +562,6 @@ static void test_i2c_pins_have_no_internal_pulls(void) {
     mcp23017_init();
     CHECK(fake_gpio_pulls_disabled[8] && fake_gpio_pulls_disabled[9]);
     CHECK(!fake_gpio_pulled_up[8] && !fake_gpio_pulled_up[9]);
-}
-
-static void poll_buttons_for(unsigned ms) {
-    for (unsigned t = 0; t < ms; t += 10) {
-        sleep_ms(10);
-        mcp23017_poll();
-    }
 }
 
 static void test_resync_takes_the_ports_as_baseline(void) {
@@ -167,29 +573,30 @@ static void test_resync_takes_the_ports_as_baseline(void) {
     mcp23017_poll();
     CHECK(b->pressed == (1u << 3));
     b->pressed = 0;
-    press(1u << 5);                           // during a flash stall: 3 up, 5 down
+    press((1u << 5) | (1u << 15));            // during a flash stall: 3 up, 5 and 16 down
     sleep_ms(1000);
     mcp23017_resync();
-    poll_buttons_for(1200);                   // 5 stays held well past a long press
+    poll_buttons_for(1200);                   // they stay held well past a long press
     CHECK(b->pressed == 0 && b->released == 0 && b->long_pressed == 0);
-    CHECK(b->held == (1u << 5));
+    CHECK(b->held == ((1u << 5) | (1u << 15)));
     press(0);
     poll_buttons_for(50);
-    CHECK(b->released == (1u << 5));
+    CHECK(b->released == ((1u << 5) | (1u << 15)));
     CHECK(b->pressed == 0 && b->long_pressed == 0);
 }
 
 static void test_failed_read_reconfigures_the_expander(void) {
     reset();
     mcp23017_init();
-    regs[0][0x0C] = regs[0][0x0D] = 0;        // pull-ups lost (chip reset)
+    poll_buttons_for(30);                     // a good sample proves the configuration
+    regs[U701][0x0C] = regs[U701][0x0D] = 0;  // pull-ups lost (chip reset)
     fail_reads = true;
     sleep_ms(30);
     mcp23017_poll();
     fail_reads = false;
     sleep_ms(30);
     mcp23017_poll();
-    CHECK(regs[0][0x0C] == 0xFF && regs[0][0x0D] == 0xFF);
+    CHECK(configured_as(U701, 0x7F, 0x7F));
 }
 
 static void test_reset_expander_is_reconfigured(void) {
@@ -197,32 +604,31 @@ static void test_reset_expander_is_reconfigured(void) {
     mcp23017_init();
     step_leds_init();
     step_leds_set_mask(0x0005);
-    regs[0][0x02] = regs[0][0x03] = 0;        // buttons: IPOL and pull-ups at defaults
-    regs[0][0x0C] = regs[0][0x0D] = 0;
-    regs[1][0x00] = regs[1][0x01] = 0xFF;     // LEDs: back to inputs, latches cleared
-    regs[1][0x14] = regs[1][0x15] = 0;
+    chip_reset(U701);                         // buttons: back to inputs, IPOL and pull-ups lost
+    chip_reset(U703);
+    chip_reset(U702);                         // LEDs: back to inputs, latches cleared
     for (unsigned t = 0; t < 1200; t += 10) {
         sleep_ms(10);
         mcp23017_poll();
         step_leds_set_mask(0x0005);
     }
-    CHECK(regs[0][0x02] == 0xFF && regs[0][0x03] == 0xFF);
-    CHECK(regs[0][0x0C] == 0xFF && regs[0][0x0D] == 0xFF);
-    CHECK(regs[1][0x00] == 0x00 && regs[1][0x01] == 0x00);
-    CHECK(regs[1][0x14] == 0x05 && regs[1][0x15] == 0x00);
+    CHECK(configured_as(U701, 0x7F, 0x7F));
+    CHECK(configured_as(U703, 0x03, 0x00));
+    CHECK(regs[U702][0x00] == 0x00 && regs[U702][0x01] == 0x00);
+    CHECK(regs[U702][0x14] == 0x05 && regs[U702][0x15] == 0x00);
 }
 
 static void test_failed_led_write_rewrites_the_direction(void) {
     reset();
     mcp23017_init();
     step_leds_init();
-    regs[1][0x00] = regs[1][0x01] = 0xFF;     // the write failed because the chip reset
+    regs[U702][0x00] = regs[U702][0x01] = 0xFF;   // the write failed because the chip reset
     fail_writes = true;
     step_leds_set_mask(0x0006);
     fail_writes = false;
     step_leds_set_mask(0x0006);
-    CHECK(regs[1][0x00] == 0x00 && regs[1][0x01] == 0x00);
-    CHECK(regs[1][0x14] == 0x06);
+    CHECK(regs[U702][0x00] == 0x00 && regs[U702][0x01] == 0x00);
+    CHECK(regs[U702][0x14] == 0x06);
 }
 
 static void test_dead_bus_is_retried_at_most_every_100_ms(void) {
@@ -236,7 +642,11 @@ static void test_dead_bus_is_retried_at_most_every_100_ms(void) {
         mcp23017_poll();
         step_leds_set_mask((uint16_t)ms);
     }
-    CHECK(i2c_calls <= 26);                   // about one attempt per chip per 100 ms
+    // Each step chip: its first sample fails (t = 20, one pointer write) and
+    // arms the retry, then one configuration attempt (one failed write) per
+    // 100 ms, t = 120 ... 920: nine, so 10 transfers in all. The LEDs: the
+    // failed mask write, the failed direction write, then one per 100 ms: 11.
+    CHECK(i2c_calls <= 2 * 10 + 11);
     fail_writes = fail_reads = false;         // the bus comes back
     sleep_ms(100);
     press(1u << 2);
@@ -245,31 +655,29 @@ static void test_dead_bus_is_retried_at_most_every_100_ms(void) {
 }
 
 // A chip that reset but still answers has IPOL and the pull-ups at their
-// defaults, so its idle lines read as pressed. That sample is checked against
-// the configuration and becomes the new baseline, with no press.
+// defaults, so its idle lines read as pressed. IPOL, read back after the
+// ports, shows it: the sample is dropped and the next good read becomes the
+// baseline, with no press.
 static void test_reset_expander_idle_lines_are_not_presses(void) {
     reset();
     mcp23017_init();
     step_buttons_t *b = mcp23017_get_buttons();
     poll_buttons_for(50);
     CHECK(b->held == 0 && b->pressed == 0);
-    regs[0][0x02] = regs[0][0x03] = 0;        // reset: IPOL and pull-ups at defaults
-    regs[0][0x0C] = regs[0][0x0D] = 0;
-    press(0xFFFF);                            // idle lines, no longer inverted
+    chip_reset(U701);
+    CHECK(port_value(U701, 0) == 0xFF && port_value(U701, 1) == 0xFF);
     sleep_ms(30);
     mcp23017_poll();
     CHECK(b->pressed == 0 && b->held == 0 && b->long_pressed == 0);
-    press(0);                                 // reconfigured: idle reads 0 again
-    poll_buttons_for(50);
-    CHECK(regs[0][0x02] == 0xFF && regs[0][0x03] == 0xFF);
-    CHECK(regs[0][0x0C] == 0xFF && regs[0][0x0D] == 0xFF);
+    poll_buttons_for(50);                     // reconfigured: idle reads 0 again
+    CHECK(configured_as(U701, 0x7F, 0x7F));
     CHECK(b->pressed == 0 && b->held == 0 && b->released == 0);
     press(1u << 4);                           // and a real press still works
     poll_buttons_for(30);
     CHECK(b->pressed == (1u << 4) && b->held == (1u << 4));
 }
 
-// A real chord on a configured chip passes the readback.
+// Several keys going down in one sample are an ordinary chord.
 static void test_three_key_chord_is_pressed(void) {
     reset();
     mcp23017_init();
@@ -326,6 +734,16 @@ static void test_encoder_button_held_through_stall_never_fires(void) {
 
 #define RUN(t) do { t(); printf("PASS %s\n", #t); } while (0)
 int main(void) {
+    RUN(test_step_row_configures_both_chips);
+    RUN(test_steps_8_and_16_come_from_0x24);
+    RUN(test_reset_0x24_never_presses_8_or_16);
+    RUN(test_reset_inside_the_read_never_presses);
+    RUN(test_missing_0x24_keeps_other_steps);
+    RUN(test_no_long_press_from_a_failing_chip);
+    RUN(test_long_press_waits_for_a_fresh_sample);
+    RUN(test_long_hold_long_presses_once);
+    RUN(test_reads_only_when_a_sample_is_due);
+    RUN(test_failed_first_sample_is_retried_every_100_ms);
     RUN(test_failed_port_read_keeps_buttons);
     RUN(test_failed_led_write_is_retried);
     RUN(test_late_expander_is_configured_before_decoding);

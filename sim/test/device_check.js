@@ -56,7 +56,9 @@ RebirthCore().then(core => {
     q: [0, 1, 2, 3, 4, 5, 6, 7].map(t => device.queued(t)), mutes: device.inspect().mutes,
     steps: [0, 1, 2, 3].map(l => [0, 2, 3].map(t => { let m = 0; for (let s = 0; s < 16; s++) if (device.stepData(l, t, s).active) m |= 1 << s; return m; })) });
   hands.clear();
-  for (const [addr, name] of [[0x34, 'TCA8418'], [0x20, 'MCP23017 buttons'], [0x21, 'MCP23017 step LEDs']]) {
+  for (const [addr, name] of [[0x22, 'MCP23017 key rows (U801)'], [0x23, 'MCP23017 key columns (U802)'],
+                              [0x20, 'MCP23017 buttons'], [0x24, 'MCP23017 steps 8 and 16 (U703)'],
+                              [0x21, 'MCP23017 step LEDs']]) {
     const before = snapshot();
     device.chipReset(addr);
     run(device.now() + 2500000);
@@ -72,22 +74,25 @@ RebirthCore().then(core => {
   const kick = device.stepData(0, 0, 1).active;
   tap(() => device.step(1, true), () => device.step(1, false));
   check(device.stepData(0, 0, 1).active === !kick, 'step buttons do not work after the resets');
+  const kick8 = device.stepData(0, 0, 7).active;
+  tap(() => device.step(7, true), () => device.step(7, false));    // step 8, on U703
+  check(device.stepData(0, 0, 7).active === !kick8, 'step 8 (U703) does not work after the resets');
   check(device.stepLeds() !== 0, 'step LEDs stay dark after the reset');
   check(device.inspect().fatal === null, 'fatal: ' + device.inspect().fatal);
   console.log('chip resets: state kept, controls and step LEDs back');
 
   // ─── A bus that hangs must not cost the timer its pulses ──────
-  // Every transfer to the key scanner takes its whole 2 ms timeout; core 1 and
+  // Every transfer to the key rows chip takes its whole 2 ms timeout; core 1 and
   // its 96 PPQN timer keep running on the real board.
   {
     const count = () => { let n = 0; for (const e of device.drain()) if (e.type === 'midi' && e.status === 0xF8) n++; return n; };
     count();
     const overruns = device.inspect().overruns;
-    device.i2cFault(0x34, 2);
+    device.i2cFault(0x22, 2);
     const from = device.now();
     device.runUntil(from + 2000000);
     const clocks = count();
-    device.i2cFault(0x34, 0);
+    device.i2cFault(0x22, 0);
     const want = 2000000 / (Math.floor(60000000 / (145 * 96)) * 4);
     check(Math.abs(clocks - want) <= 1, 'hung I2C: ' + clocks + ' clocks in 2 s, want ' + want.toFixed(1));
     check(device.inspect().overruns === overruns, 'hung I2C: timer overruns ' + (device.inspect().overruns - overruns));

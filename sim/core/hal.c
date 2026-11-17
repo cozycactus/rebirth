@@ -432,11 +432,13 @@ void flash_range_program(uint32_t offset, const uint8_t *data, size_t count) {
 uint8_t *sim_flash_store(void) { return fake_flash + (FLASH_BYTES - STORE_BYTES); }
 int sim_flash_store_size(void) { return (int)STORE_BYTES; }
 
-// ─── I2C bus with three chips ───────────────────────────────────
+// ─── I2C bus with five chips ────────────────────────────────────
 
-#define ADDR_BUTTONS 0x20
+#define ADDR_BUTTONS 0x20       // U701: steps 1-7 on GPA0-6, 9-15 on GPB0-6
 #define ADDR_STEP_LEDS 0x21
-#define ADDR_KEYS 0x34
+#define ADDR_KEY_ROWS 0x22      // U801: ROW0-6 on GPA0-6, ROW7 on GPB0, COL0-6 on GPB1-7, COL7 on GPA7
+#define ADDR_KEY_COLS 0x23      // U802: COL8 on GPA0, COL9 on GPA1
+#define ADDR_STEPS_8_16 0x24    // U703: step 8 on GPA0, step 16 on GPA1
 
 i2c_inst_t fake_i2c0_inst;
 static uint8_t i2c_fault[128];
@@ -445,6 +447,7 @@ static uint8_t i2c_fault[128];
 #define MCP_REGS 0x16
 #define MCP_IODIRA 0x00
 #define MCP_IPOLA 0x02
+#define MCP_GPPUA 0x0C
 #define MCP_GPIOA 0x12
 #define MCP_OLATA 0x14
 
@@ -456,6 +459,9 @@ typedef struct {
 
 static mcp_t mcp_buttons;
 static mcp_t mcp_leds;
+static mcp_t mcp_key_rows;
+static mcp_t mcp_key_cols;
+static mcp_t mcp_steps_8_16;
 
 static void mcp_reset(mcp_t *chip) {
     memset(chip->reg, 0, sizeof(chip->reg));
@@ -477,92 +483,49 @@ static void mcp_write(mcp_t *chip, uint8_t reg, uint8_t value) {
     chip->reg[reg] = value;
 }
 
-// TCA8418 key scanner: 8 rows x 10 columns, a 10-event FIFO.
-#define TCA_REGS 0x2F
-#define TCA_CFG 0x01
-#define TCA_INT_STAT 0x02
-#define TCA_KEY_LCK_EC 0x03
-#define TCA_KEY_EVENT_A 0x04
-#define TCA_KP_GPIO1 0x1D
-#define TCA_FIFO 10
-#define TCA_ROWS 8
-#define TCA_COLS 10
+// The 8 x 10 key matrix of the PR #10 board, scanned by U801 and U802: a row
+// reads low when a closed key sits in a column driven low (an output pin with
+// its latch at 0). A row with no such key reads high on its pull-up, or low
+// when the pull-up is off (a chip that reset): the worst case, every key in
+// the column seen down, which the firmware must not take for presses.
+#define KEY_ROWS 8
+#define KEY_COLS 10
 
-typedef struct {
-    uint8_t reg[TCA_REGS];
-    uint8_t pointer;
-    uint8_t fifo[TCA_FIFO];
-    uint8_t count;
-    bool down[TCA_ROWS * TCA_COLS];         // the switch itself
-    bool reported[TCA_ROWS * TCA_COLS];     // what the chip last put in the FIFO
-} tca_t;
+static bool key_down[KEY_ROWS][KEY_COLS];
 
-static tca_t tca;
-
-static void tca_reset(void) {
-    memset(tca.reg, 0, sizeof(tca.reg));
-    tca.pointer = 0;
-    tca.count = 0;
-    memset(tca.reported, 0, sizeof(tca.reported));
+static bool pin_driven_low(const mcp_t *chip, int bit) {
+    int port = bit / 8;
+    uint8_t mask = (uint8_t)(1u << (bit % 8));
+    return !(chip->reg[MCP_IODIRA + port] & mask) && !(chip->reg[MCP_OLATA + port] & mask);
 }
-static bool tca_key_scanned(int row, int col) {
-    bool row_on = tca.reg[TCA_KP_GPIO1] & (1u << row);
-    bool col_on = col < 8 ? (tca.reg[TCA_KP_GPIO1 + 1] & (1u << col))
-                          : (tca.reg[TCA_KP_GPIO1 + 2] & (1u << (col - 8)));
-    return row_on && col_on;
+static bool column_low(int col) {
+    if (col < 7) return pin_driven_low(&mcp_key_rows, 9 + col);    // GPB1-7
+    if (col == 7) return pin_driven_low(&mcp_key_rows, 7);         // GPA7
+    return pin_driven_low(&mcp_key_cols, col - 8);                 // GPA0-1
 }
-static void tca_push(uint8_t event) {
-    if (tca.count == TCA_FIFO) {
-        tca.reg[TCA_INT_STAT] |= 0x08;                  // OVR_FLOW_INT
-        if (!(tca.reg[TCA_CFG] & 0x20)) return;         // OVR_FLOW_M clear: the new event is lost
-        memmove(tca.fifo, tca.fifo + 1, TCA_FIFO - 1);  // set: the oldest is pushed out
-        tca.count--;
+// The levels on U801's row pins (bits 0-6 and 8); its column pins are outputs.
+static uint16_t key_row_pins(void) {
+    uint16_t pins = 0xFFFF;
+    for (int row = 0; row < KEY_ROWS; row++) {
+        int bit = row < 7 ? row : 8;
+        bool low = !(mcp_key_rows.reg[MCP_GPPUA + bit / 8] & (1u << (bit % 8)));
+        for (int col = 0; col < KEY_COLS && !low; col++) low = key_down[row][col] && column_low(col);
+        if (low) pins &= (uint16_t)~(1u << bit);
     }
-    tca.fifo[tca.count++] = event;
-    tca.reg[TCA_INT_STAT] |= 0x01;                      // K_INT
-}
-// A key the chip scans and whose state differs from the last report becomes an event.
-static void tca_scan(void) {
-    for (int row = 0; row < TCA_ROWS; row++) {
-        for (int col = 0; col < TCA_COLS; col++) {
-            int i = row * TCA_COLS + col;
-            if (!tca_key_scanned(row, col) || tca.down[i] == tca.reported[i]) continue;
-            tca.reported[i] = tca.down[i];
-            tca_push((uint8_t)((i + 1) | (tca.down[i] ? 0x80 : 0)));
-        }
-    }
-}
-static uint8_t tca_read(uint8_t reg) {
-    if (reg == TCA_KEY_LCK_EC) return tca.count & 0x0F;
-    if (reg == TCA_KEY_EVENT_A) {
-        if (tca.count == 0) return 0;
-        uint8_t event = tca.fifo[0];
-        memmove(tca.fifo, tca.fifo + 1, TCA_FIFO - 1);
-        tca.count--;
-        return event;
-    }
-    return reg < TCA_REGS ? tca.reg[reg] : 0;
-}
-static void tca_write(uint8_t reg, uint8_t value) {
-    if (reg >= TCA_REGS) return;
-    if (reg == TCA_INT_STAT) {
-        tca.reg[reg] &= (uint8_t)~value;                // write 1 to clear
-        if (tca.count) tca.reg[reg] |= 0x01;            // still events: K_INT stays
-        return;
-    }
-    tca.reg[reg] = value;
-    if (reg >= TCA_KP_GPIO1 && reg <= TCA_KP_GPIO1 + 2) tca_scan();
+    return pins;
 }
 
 void sim_key(int row, int col, int down) {
-    if (row < 0 || row >= TCA_ROWS || col < 0 || col >= TCA_COLS) return;
-    tca.down[row * TCA_COLS + col] = down != 0;
-    tca_scan();
+    if (row < 0 || row >= KEY_ROWS || col < 0 || col >= KEY_COLS) return;
+    key_down[row][col] = down != 0;
 }
 void sim_step_button(int index, int down) {
     if (index < 0 || index > 15) return;
-    if (down) mcp_buttons.pins &= (uint16_t)~(1u << index);     // the switch pulls the pin low
-    else mcp_buttons.pins |= (uint16_t)(1u << index);
+    // Steps 8 and 16 sit on U703; the others on U701, one pin per step.
+    mcp_t *chip = (index == 7 || index == 15) ? &mcp_steps_8_16 : &mcp_buttons;
+    int bit = index == 7 ? 0 : index == 15 ? 1 : index;
+    if (down) chip->pins &= (uint16_t)~(1u << bit);     // the switch pulls the pin low
+    else chip->pins |= (uint16_t)(1u << bit);
 }
 void sim_gpio_in(int pin, int level) { fake_gpio_level[pin & 31] = level != 0; }
 
@@ -621,16 +584,17 @@ uint32_t sim_step_leds(void) {
     return latch & (uint16_t)~dir;      // a pin left as input drives no LED
 }
 void sim_i2c_fault(int addr, int mode) { i2c_fault[addr & 127] = (uint8_t)mode; }
-void sim_chip_reset(int addr) {
-    if (addr == ADDR_BUTTONS) mcp_reset(&mcp_buttons);
-    if (addr == ADDR_STEP_LEDS) mcp_reset(&mcp_leds);
-    if (addr == ADDR_KEYS) tca_reset();
-}
-
 static mcp_t *mcp_at(uint8_t addr) {
     if (addr == ADDR_BUTTONS) return &mcp_buttons;
     if (addr == ADDR_STEP_LEDS) return &mcp_leds;
+    if (addr == ADDR_KEY_ROWS) return &mcp_key_rows;
+    if (addr == ADDR_KEY_COLS) return &mcp_key_cols;
+    if (addr == ADDR_STEPS_8_16) return &mcp_steps_8_16;
     return NULL;
+}
+void sim_chip_reset(int addr) {
+    mcp_t *chip = mcp_at((uint8_t)(addr & 127));
+    if (chip) mcp_reset(chip);
 }
 static int i2c_fail(uint8_t addr, unsigned timeout_us) {
     if (i2c_fault[addr & 127] == SIM_I2C_TIMEOUT) {
@@ -655,14 +619,6 @@ int i2c_write_timeout_us(i2c_inst_t *i2c, uint8_t addr, const uint8_t *src, size
         }
         return (int)len;
     }
-    if (addr == ADDR_KEYS) {
-        tca.pointer = src[0];
-        for (size_t i = 1; i < len; i++) {
-            tca_write(tca.pointer, src[i]);
-            if (tca.reg[TCA_CFG] & 0x80) tca.pointer++;     // AI: auto-increment
-        }
-        return (int)len;
-    }
     return -1;
 }
 
@@ -672,16 +628,10 @@ int i2c_read_timeout_us(i2c_inst_t *i2c, uint8_t addr, uint8_t *dst, size_t len,
     if (i2c_fault[addr & 127] || len == 0) return i2c_fail(addr, timeout_us);
     mcp_t *mcp = mcp_at(addr);
     if (mcp) {
+        if (mcp == &mcp_key_rows) mcp->pins = key_row_pins();
         for (size_t i = 0; i < len; i++) {
             dst[i] = mcp_read(mcp, mcp->pointer);
             mcp->pointer = (uint8_t)((mcp->pointer + 1) % MCP_REGS);
-        }
-        return (int)len;
-    }
-    if (addr == ADDR_KEYS) {
-        for (size_t i = 0; i < len; i++) {
-            dst[i] = tca_read(tca.pointer);
-            if (tca.reg[TCA_CFG] & 0x80) tca.pointer++;
         }
         return (int)len;
     }
@@ -726,9 +676,10 @@ void hal_reset(bool keep_flash) {
     fake_flash_erases = 0;
     fake_flash_programs = 0;
     memset(i2c_fault, 0, sizeof(i2c_fault));
-    mcp_reset(&mcp_buttons);
-    mcp_reset(&mcp_leds);
-    mcp_buttons.pins = 0xFFFF;
-    mcp_leds.pins = 0xFFFF;
-    memset(&tca, 0, sizeof(tca));
+    mcp_t *chips[] = { &mcp_buttons, &mcp_leds, &mcp_key_rows, &mcp_key_cols, &mcp_steps_8_16 };
+    for (size_t i = 0; i < sizeof(chips) / sizeof(chips[0]); i++) {
+        mcp_reset(chips[i]);
+        chips[i]->pins = 0xFFFF;
+    }
+    memset(key_down, 0, sizeof(key_down));
 }

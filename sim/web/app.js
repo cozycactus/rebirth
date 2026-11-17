@@ -1053,8 +1053,8 @@
       if (ctx.state === 'running') { if (rig) rig.allOff(ctx.currentTime); ctx.suspend(); } else ctx.resume();
     });
     $('fault-keys').addEventListener('click', () => {
-      device.chipReset(0x34);
-      say('warn', 'Сканер пэдов TCA8418 сброшен. Прошивка заметит это при проверке раз в секунду и настроит его заново.');
+      device.chipReset(0x22);
+      say('warn', 'Расширитель строк клавиатуры U801 (MCP23017) сброшен. Прошивка найдёт это в начале следующего скана и настроит его заново; повисшие строки не должны стать нажатиями.');
     });
     $('fault-steps').addEventListener('click', () => {
       device.chipReset(0x20);

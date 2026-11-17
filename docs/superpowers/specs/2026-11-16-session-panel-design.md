@@ -59,6 +59,10 @@ any commercial controller.
 - C. 8x4 grid plus 16 steps. Smaller and cheaper, but 32 locations need 8 pages.
 
 **Grid electronics.** Author's call: **TCA8418 + addressable RGB LEDs on PIO.**
+*Changed: the board (PR #10) uses the fallback named under "Input latency", two MCP23017 (0x22, 0x23) scanning
+the diode matrix from Core 0, because the TCA8418 reports a press 25-40 ms late, past the
+15 ms requirement. The TCA8418 paragraphs below are kept as the original decision; see
+`2026-11-16-mcp23017-key-scan-design.md`.*
 - **TCA8418 keypad scanner (I2C) + SK6812 chain on one GPIO via PIO.** One chip scans all
   80 keys with an event FIFO; one free GPIO drives every LED; the bus already exists.
   Needs a 3.3 V -> 5 V data buffer, a defined power-up state and a current budget.
@@ -88,7 +92,8 @@ As in the Blender model (sizes are the model's; exact parts are the builder's):
   19.5 mm pitch, RGB-lit.
 - SCENE column: 8 buttons, one per row, RGB-lit.
 - MUTE row: 8 buttons, one per track, RGB-lit.
-- 16 step buttons with their LEDs: unchanged hardware (MCP23017 0x20 / 0x21).
+- 16 step buttons with their LEDs: MCP23017 0x20 / 0x21. *Changed: steps 8 and 16 are on a
+  third MCP23017 at 0x24, because GPA7/GPB7 are output-only; see `2026-11-16-mcp23017-key-scan-design.md`.*
 - Top strip: OLED (SSD1309 128x64, the 2.42" class), encoder TRACK (enc 1), encoder VALUE
   (enc 2), PLAY (RGB-lit), BEAT (RGB, in the chain).
 - Rear: CV 1-4, GATE 1-4, MIDI IN (reserved), MIDI OUT, USB.
@@ -98,8 +103,8 @@ As in the Blender model (sizes are the model's; exact parts are the builder's):
 
 | Part | Connection |
 | --- | --- |
-| TCA8418 key scanner | I2C0 (GPIO 8/9), address 0x34, shared with MCP23017 0x20/0x21. 3.3 V supply (the part is not 5 V tolerant). No INT line (no GPIO left); polled. |
-| Key matrix | 8 rows x 10 columns = 80 keys, the chip's maximum. Logical map: pads on rows 1-8 x columns 1-8 (row = slot, column = track); SCENE on column 9; MUTE on column 10, one mute per row. One diode per key, oriented for the TCA8418's scan direction, so several held keys never produce ghost presses. |
+| TCA8418 key scanner | *Changed: not on the board.* The keys are scanned by MCP23017 U801 (0x22) and U802 (0x23) on I2C0, from Core 0; steps 8 and 16 are on MCP23017 U703 (0x24). See `2026-11-16-mcp23017-key-scan-design.md`. Original: I2C0 (GPIO 8/9), address 0x34, shared with MCP23017 0x20/0x21. 3.3 V supply (the part is not 5 V tolerant). No INT line (no GPIO left); polled. |
+| Key matrix | *Changed: still 8 x 10 = 80 keys, now scanned by MCP23017 U801 and U802 (no longer a chip's maximum), and each diode is oriented for their scan: row -> switch -> diode -> column, the selected column driven low and the rows, pulled up, read. See `2026-11-16-mcp23017-key-scan-design.md`.* Original: 8 rows x 10 columns = 80 keys, the chip's maximum. Logical map: pads on rows 1-8 x columns 1-8 (row = slot, column = track); SCENE on column 9; MUTE on column 10, one mute per row. One diode per key, oriented for the TCA8418's scan direction, so several held keys never produce ghost presses. |
 | I2C bus | External pull-ups (2.2-4.7 kOhm, sized on the measured bus capacitance) instead of the RP2040's internal ones; 400 kHz. |
 | RGB LEDs | 82 x SK6812MINI-E (RGB, 24-bit variant; 64 pads, 8 scene, 8 mute, PLAY, BEAT) in one chain. Data from GPIO 27 via a PIO state machine, through a 74AHCT1G125 powered from 5 V with OE tied low, a pull-down on its input so the chain sees a steady low until the PIO runs, and a 330-470 Ohm series resistor at the first LED. 100 nF per LED, a bulk capacitor at the chain input, 5 V and ground run as a bus rather than through the LEDs. |
 | Power | The LEDs take 5 V from VBUS, so the device is powered through its USB socket only. See "Power". |
@@ -112,7 +117,9 @@ After this, all 26 header GPIOs are taken; further controls go on I2C.
 Key and LED positions are mapped to grid coordinates by two tables in firmware, so the
 board wiring order is free.
 
-**Input latency.** Requirement: press to event in firmware within 15 ms, for pads, SCENE
+**Input latency.** *Changed: the bench question below is answered by the datasheet: the
+TCA8418 scans every 25 ms and reports a press 25-40 ms late with its debounce on or off, so
+the board uses the fallback. Debounce is 5 ms in firmware; see `2026-11-16-mcp23017-key-scan-design.md`.* Requirement: press to event in firmware within 15 ms, for pads, SCENE
 and MUTE alike. The TCA8418's built-in debounce is long (tens of milliseconds by the
 reviewers' reading of the datasheet; to verify), so it is disabled and the firmware
 debounces for 5-10 ms. If the bench shows the chip cannot meet 15 ms, the fallback is two
@@ -196,7 +203,9 @@ grid shows the song's playback.
 
 **Flash save/load** stalls Core 0 and Core 1. Afterwards the firmware drains the TCA8418
 FIFO, clears its overflow flag and treats every key as released, so nothing pressed during
-the stall becomes a command (A).
+the stall becomes a command (A). *Changed: the scanner has no FIFO. A resync does no I2C and
+takes every key as held until it has been seen up for 5 ms, so nothing pressed during the
+stall becomes a command; see `2026-11-16-mcp23017-key-scan-design.md`.*
 
 ### Launch quantization
 
@@ -279,7 +288,8 @@ event count, then all pending events, then check the overflow flag (enable both 
 bits, as the datasheet's errata requires). On overflow: drain, clear, and treat all keys as
 released. Every I2C transaction has a timeout and a checked result; a failed read is ignored,
 never blocks the UI. Reading the MCP23017 ports as one two-byte transfer halves today's bus
-time.
+time. *Changed: `ui_update` runs one step of the key scan on every pass (a configuration
+check, then columns 0-9), with no event FIFO and no overflow; see `2026-11-16-mcp23017-key-scan-design.md`.*
 
 ### OLED
 
@@ -304,23 +314,25 @@ Host tests (fakes as in `test/fakes`):
 - the LED frame builder (a pure function of the state) for every rule of the light tables,
   their priorities and the current budget;
 - TCA8418 event decoding over a fake I2C, a 10-key burst, overflow and the post-save drain;
-  PLAY debounce; step press-versus-long-press.
+  PLAY debounce; step press-versus-long-press. *Changed: the tests run the MCP23017 scanner
+  over a fake key matrix instead; see `2026-11-16-mcp23017-key-scan-design.md`, "Tests".*
 
 Bench (HARDWARE_STATUS.md): press-to-event latency; several pads held at once without ghost
 presses; LED current with the busiest frame and with a full grid; total USB current and
 inrush, powered from at least two different laptops; power-up with no flash of the LED chain; I2C rise times with the chosen pull-ups;
 CV/Gate noise with LEDs animating; GPIO 7 jitter and wire-level MIDI Clock unchanged while
-scenes launch, the LEDs animate, the TCA8418 is polled and the OLED refreshes.
+scenes launch, the LEDs animate, the key matrix is scanned and the OLED refreshes. *Changed:
+the bench list is in `2026-11-16-mcp23017-key-scan-design.md`, "Bench".*
 
 ## Documentation
 
 README features and "Live Controls", ARCHITECTURE.md (hardware table: GPIO 27, GPIO 28,
-I2C 0x34, pull-ups, power; launch quantization and routing in "Playback Rules"),
+I2C 0x34 (changed: 0x22, 0x23 and 0x24), pull-ups, power; launch quantization and routing in "Playback Rules"),
 HARDWARE_STATUS.md, JITTER_MEASUREMENT.md (new load cases).
 
 ## Left to the builder
 
 Exact pad, key and LED parts; the matrix wiring order and diode orientation per the
-TCA8418 datasheet; PIO program and DMA details; the OLED screen layout within the three
+TCA8418 datasheet (changed: the board's own wiring, PR #10); PIO program and DMA details; the OLED screen layout within the three
 lines above; the PWM codes for `dim` / `half` / `full`; module and function names; how the
 existing performance-view code is retired or reused.

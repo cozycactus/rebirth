@@ -56,7 +56,7 @@ write access on the site repository) and the repository variable
 | Sequencer, UI, MIDI queue, panel input, OLED drawing, LED frames, flash storage, CV/gate (`src/*.c` except the two below) | The firmware itself, compiled to WebAssembly |
 | `src/main.c` | Compiled inside `sim/core/sim_main.c`: its `init_defaults()` and `g_seq` are the real ones; its endless loop is repeated by `core0_pass()` |
 | `src/rgb_leds.c` (PIO + DMA) | `sim/core/sim_rgb_leds.c`: same interface, same refusal of a frame within 3 ms of the last |
-| TCA8418, two MCP23017 | Register models on a virtual I2C bus (`sim/core/hal.c`): key FIFO and overflow, IPOL, directions, output latches, chip reset, bus faults |
+| Five MCP23017: step buttons (0x20, steps 8/16 on 0x24), step LEDs (0x21), the key matrix (0x22 rows, 0x23 SCENE/MUTE columns) | Register models on a virtual I2C bus (`sim/core/hal.c`): IPOL, directions, pull-ups, output latches; a matrix row reads low through a closed key in a column driven low, and low too with its pull-up off (a chip that reset); chip reset, bus faults |
 | UART | A PL011 with its FIFO off: 320 us a byte, TX interrupt when the holding register empties |
 | Timer | One virtual microsecond clock; alarm 0 fires the real `sequencer_timer_isr` |
 | OLED | The 1024 bytes of each `ssd1309_flush()` |

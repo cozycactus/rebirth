@@ -65,8 +65,8 @@ Use a logic analyzer or oscilloscope:
   the whole burst; gate alignment does not prove MIDI alignment.
 - Session panel load case: in pattern select, press step button 13 to reset the
   counters, then return to the Session view (encoder 2 long press) and run the
-  load there: scenes launching every bar, the 82 LEDs animating, the TCA8418
-  polled and the OLED refreshing. Open pattern select again (encoder 2 long
+  load there: scenes launching every bar, the 82 LEDs animating, the key matrix
+  scanned and the OLED refreshing. Open pattern select again (encoder 2 long
   press in the Session view) and read `J`, `P` and `I`. GPIO 7 jitter, the
   ISR duration (`I`, and the GPIO 7 pulse width) and wire-level MIDI Clock
   must match the idle capture. Core 1 never touches I2C or the LEDs, so a

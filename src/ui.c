@@ -641,7 +641,7 @@ static void handle_panel_events(const step_buttons_t *steps) {
     }
 }
 
-// A key whose release the panel layer lost (overflow, chip reset, resync) is
+// A key whose release the panel layer lost (a lost scanner, resync) is
 // released here: a pad it no longer reports down is not held, and a pad that
 // still reads down after the panel layer lost its key state (its generation
 // changed) is not trusted either. That covers a key pressed in this very
@@ -1911,7 +1911,7 @@ void ui_render(void) {
 void ui_init(void) {
     encoder_init();
     mcp23017_init();
-    panel_input_init();     // TCA8418 shares I2C0, set up by mcp23017_init
+    panel_input_init();     // the key-scan MCP23017s share I2C0, set up by mcp23017_init
     step_leds_init();
     rgb_leds_init();        // Sends an all-off frame
 

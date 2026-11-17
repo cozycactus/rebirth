@@ -43,7 +43,7 @@ add_executable(rp2040_sequencer
     src/ssd1309.c
     src/encoder.c
     src/mcp23017.c
-    src/tca8418.c
+    src/key_scan.c
     src/panel_input.c
     src/step_leds.c
     src/flash_storage.c

@@ -18,8 +18,8 @@ void sim_run_until(double t_us);
 double sim_now(void);
 
 // ─── Inputs (levels, applied at the current time) ───────────────
-void sim_key(int row, int col, int down);       // TCA8418 matrix: cols 0-7 pads, 8 SCENE, 9 MUTE
-void sim_step_button(int index, int down);      // MCP23017 0x20, 0..15
+void sim_key(int row, int col, int down);       // U801/U802 matrix: cols 0-7 pads, 8 SCENE, 9 MUTE
+void sim_step_button(int index, int down);      // 0..15: U701 (0x20), steps 8 and 16 on U703 (0x24)
 void sim_gpio_in(int pin, int level);           // PLAY 28; encoders 18,19,20 / 21,22,26
 
 // The same inputs at a time of their own, now or later. They are applied when
