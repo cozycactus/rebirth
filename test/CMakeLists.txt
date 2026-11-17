@@ -151,3 +151,11 @@ add_executable(test_encoder
 )
 target_include_directories(test_encoder PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME encoder_tests COMMAND test_encoder)
+
+add_executable(test_midi_in
+    test_midi_in.c
+    ${REBIRTH_SRC}/midi_in.c
+)
+target_include_directories(test_midi_in PRIVATE ${REBIRTH_INC})
+target_compile_definitions(test_midi_in PRIVATE ${REBIRTH_HOST_DEFS})
+add_test(NAME midi_in_tests COMMAND test_midi_in)
