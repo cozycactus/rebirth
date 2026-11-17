@@ -3891,7 +3891,7 @@ static void test_midi_note_off_leaves_room_for_the_sequencer(void) {
 // may have overflowed and lost a Note Off.
 static void test_midi_input_from_before_the_ui_started_is_dropped(void) {
     uint8_t stream[3 + 61 + 3] = { KEY_ON, 60, 100 };
-    memset(stream + 3, 0xF8, 61);
+    memset(stream + 3, 0xFE, 61);           // Active Sensing: into the ring, ignored there
     stream[64] = KEY_OFF; stream[65] = 60; stream[66] = 0;     // does not fit the ring
     fake_uart_rx_push(stream, sizeof(stream));
     fake_irq_handlers[UART0_IRQ]();
@@ -3941,10 +3941,11 @@ static void test_midi_lost_bytes_are_a_gap(void) {
     step_down(1u << 2);
     MIDI_UPDATE(KEY_ON, 60, 100, 64, 100);
     CHECK(STEP(0, 2).note == 64);
-    // Between two updates more bytes arrive than the ring holds: 62 clock bytes, then a
-    // Note On cut after its note, and the rest of the stream lost.
+    // Between two updates more bytes arrive than the ring holds: 62 Active Sensing
+    // bytes (a Clock would go to the external clock instead), then a Note On cut after
+    // its note, and the rest of the stream lost.
     uint8_t burst[MIDI_IN_RING_SIZE + 8];
-    memset(burst, 0xF8, sizeof(burst));
+    memset(burst, 0xFE, sizeof(burst));
     burst[MIDI_IN_RING_SIZE - 2] = KEY_ON;
     burst[MIDI_IN_RING_SIZE - 1] = 70;
     midi_arrives(burst, sizeof(burst));

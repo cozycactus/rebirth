@@ -58,16 +58,21 @@ void sim_run_until(double t_us) {
     uint64_t target = t_us <= 0 ? 0 : (uint64_t)t_us;
     while (!sim_dbg_fatal()) {
         uint64_t alarm = hal_alarm_due();
+        uint64_t bell = hal_doorbell_due();
         uint64_t uart = hal_uart_irq_due();
         uint64_t input = hal_input_due();
         uint64_t pass = next_pass_us > sim_now_us ? next_pass_us : sim_now_us;
-        uint64_t next = alarm < uart ? alarm : uart;
+        uint64_t next = alarm;
+        if (bell < next) next = bell;
+        if (uart < next) next = uart;
         if (pass < next) next = pass;
         if (input < next) next = input;
         if (next > target) break;
         hal_set_now(next);          // applies the inputs due by then
         if (next == alarm) {
             hal_run_alarm();
+        } else if (next == bell) {
+            hal_run_doorbell();
         } else if (next == uart) {
             hal_run_uart_irq();
         } else if (next == pass) {

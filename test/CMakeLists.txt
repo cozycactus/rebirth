@@ -43,6 +43,7 @@ add_executable(test_song
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/sequencer.c
     ${REBIRTH_SRC}/midi_out.c
+    ${REBIRTH_SRC}/clock_in.c
 )
 target_include_directories(test_song PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 target_compile_definitions(test_song PRIVATE ${REBIRTH_HOST_DEFS})
@@ -56,6 +57,7 @@ add_executable(test_playback
     ${REBIRTH_SRC}/kit.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/midi_out.c
+    ${REBIRTH_SRC}/clock_in.c
 )
 target_include_directories(test_playback PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 target_compile_definitions(test_playback PRIVATE ${REBIRTH_HOST_DEFS})
@@ -83,6 +85,7 @@ add_executable(test_storage
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/midi_out.c
+    ${REBIRTH_SRC}/clock_in.c
 )
 target_include_directories(test_storage PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME storage_tests COMMAND test_storage)
@@ -95,6 +98,7 @@ add_executable(test_ui
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/midi_out.c
+    ${REBIRTH_SRC}/clock_in.c
     ${REBIRTH_SRC}/midi_in.c
     ${REBIRTH_SRC}/flash_storage.c
     ${REBIRTH_SRC}/display.c
@@ -115,6 +119,7 @@ add_executable(test_session
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/midi_out.c
+    ${REBIRTH_SRC}/clock_in.c
 )
 target_include_directories(test_session PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME session_tests COMMAND test_session)

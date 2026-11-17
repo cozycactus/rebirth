@@ -16,6 +16,8 @@ void hal_run_alarm(void);
 uint64_t hal_uart_irq_due(void);    // UINT64_MAX when the TX interrupt is off
 uint64_t hal_input_due(void);       // UINT64_MAX when no input is scheduled
 void hal_run_uart_irq(void);
+uint64_t hal_doorbell_due(void);    // UINT64_MAX unless the forced TIMER_IRQ_1 is pending
+void hal_run_doorbell(void);
 void hal_fatal(const char *message);
 
 void sim_rgb_reset(void);

@@ -118,12 +118,33 @@ void restore_interrupts(uint32_t state) { (void)state; }
 
 // ─── Interrupts and the timer alarm ─────────────────────────────
 
-static void (*irq_handlers[2])(void);
-static bool irq_enabled[2];
+static void (*irq_handlers[FAKE_IRQ_COUNT])(void);
+static bool irq_enabled[FAKE_IRQ_COUNT];
 
-void irq_set_exclusive_handler(int irq, void (*handler)(void)) { irq_handlers[irq & 1] = handler; }
-void irq_set_enabled(int irq, bool enabled) { irq_enabled[irq & 1] = enabled; }
+void irq_set_exclusive_handler(int irq, void (*handler)(void)) {
+    if (irq < 0 || irq >= FAKE_IRQ_COUNT) { hal_fatal("handler for an unmodelled interrupt"); return; }
+    irq_handlers[irq] = handler;
+}
+void irq_set_enabled(int irq, bool enabled) {
+    if (irq < 0 || irq >= FAKE_IRQ_COUNT) { hal_fatal("unmodelled interrupt enabled"); return; }
+    irq_enabled[irq] = enabled;
+}
 void irq_clear(int irq) { (void)irq; }
+
+// Alarm 1 is never armed: its interrupt is the external clock's doorbell, which
+// core 0 raises by setting bit 1 of INTF. It is due at once while that bit is
+// set and enabled; the handler must clear it.
+uint64_t hal_doorbell_due(void) {
+    if (!(timer.intf & timer.inte & 2u) || !irq_handlers[TIMER_IRQ_1] || !irq_enabled[TIMER_IRQ_1]) {
+        return UINT64_MAX;
+    }
+    return sim_now_us;
+}
+
+void hal_run_doorbell(void) {
+    irq_handlers[TIMER_IRQ_1]();
+    if (timer.intf & 2u) hal_fatal("the forced timer interrupt was not cleared");
+}
 
 // The firmware arms alarm 0 by writing the register; the alarm fires when the
 // low 32 bits of the clock reach it. A value that already fired stays quiet
@@ -171,13 +192,21 @@ static void core0_wait_until(uint64_t until) {
     }
     waiting = true;
     for (;;) {
+        // An input is applied at its own time, so a MIDI byte raises the UART
+        // interrupt then, not when the wait ends.
         uint64_t alarm = hal_alarm_due();
+        uint64_t bell = hal_doorbell_due();
         uint64_t uart = hal_uart_irq_due();
-        uint64_t next = alarm < uart ? alarm : uart;
+        uint64_t input = hal_input_due();
+        uint64_t next = alarm;
+        if (bell < next) next = bell;
+        if (uart < next) next = uart;
+        if (input < next) next = input;
         if (next > until) break;
         hal_set_now(next);
         if (next == alarm) hal_run_alarm();
-        else hal_run_uart_irq();
+        else if (next == bell) hal_run_doorbell();
+        else if (next == uart) hal_run_uart_irq();
     }
     waiting = false;
     hal_set_now(until);

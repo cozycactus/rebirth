@@ -260,8 +260,10 @@ static void test_v6_rejections(void) {
 // ─── Short lock sections ───────────────────────────────────────
 // seq_lock() keeps Core 0's interrupts off, the UART TX interrupt with them. The save
 // and the load copy one pattern per section, and only once MIDI output is idle. Every
-// spin lock taken marks a section boundary here: between two, at most one of the
-// MAX_PATTERNS records watched may change.
+// seq_lock taken marks a section boundary here: between two, at most one of the
+// MAX_PATTERNS records watched may change. (The save's own buffer is filled with 0xFF
+// before its first section, after the playback lock that keeps the external clock
+// from starting anything.)
 
 static uint8_t *watched;
 static uint8_t watched_before[PAT_BYTES];
@@ -271,9 +273,8 @@ static unsigned seq_sections_midi_pending;  // seq_lock sections entered with MI
 
 static void watch_lock(spin_lock_t *lock) {
     fake_uart_writable = true;              // the wire frees up while the caller waits
-    if (lock == spin_lock_instance(g_seq.spinlock_num) && fake_uart_tx_irq) {
-        seq_sections_midi_pending++;
-    }
+    if (lock != spin_lock_instance(g_seq.spinlock_num)) return;
+    if (fake_uart_tx_irq) seq_sections_midi_pending++;
     if (watch_started) {
         unsigned changed = 0;
         for (unsigned p = 0; p < MAX_PATTERNS; p++) {
