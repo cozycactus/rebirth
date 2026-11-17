@@ -18,7 +18,8 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
   beat, step, or at the end of the track's loop
 - **Song mode** — chain patterns with repeat counts, loop or stop at end
 - **Pattern queue** — schedule the next pattern during playback
-- **Track mutes** — instant bitmask-based mute/unmute
+- **Track mutes** — MUTE changes at the launch point and flashes white while it
+  waits; hold one MUTE key and press others to change several tracks together
 - **Panic combo** — hold both encoder buttons to stop playback, drop gates, and send MIDI all-notes-off
 - **Grouped gate edges** — two-phase output; DAC and DIN MIDI transfers remain sequential
 - **MIDI output** — DIN-5 UART only, avoiding USB MIDI host scheduling jitter
@@ -131,11 +132,34 @@ buttons edit it.
 - **SCENE:** launches the row on every track together; tracks already playing
   it keep playing. Pressed while any track is queued to that row, it cancels
   all queues.
-- **MUTE:** toggles the track's mute at once. On a track silenced by a mute
-  stored in an older save, it makes the track audible and clears that stored
-  mute in every slot.
+- **MUTE:** toggles the track's mute at the next launch point, the one a pad
+  launch would wait for (under TRACK LOOP the end of the track's loop, or the
+  next bar in Song mode). While stopped, and under NEXT STEP, it acts at once.
+  While the change waits, the MUTE key flashes white, one sixteenth white and
+  one sixteenth its usual light. A second press before the launch point
+  cancels the change; a press after it has landed is a new change. On a track
+  silenced by a mute stored in an older save, MUTE makes the track audible and
+  clears that stored mute in every slot; the track stays silent until the
+  change lands, and stays muted if the change is cancelled.
+- **Mute groups:** hold a MUTE key for half a second, then press other MUTE
+  keys. They do not act: they are collected, and their keys are steady white.
+  When the first key is let go, the collected tracks change together at the
+  next launch point (at once while stopped or under NEXT STEP), each to the
+  opposite of the state it had when it was collected. The first key goes
+  with them if its own change was still waiting when the first other key was
+  collected: that change is taken back then and its key turns steady white.
+  If its change had already landed or acted at once, the first key stays out
+  of the group. Pressing a collected key again takes it out; pressing a key
+  whose change is waiting cancels that change and does not collect it. Under
+  TRACK LOOP in Pattern mode each track changes at its own loop end, so they
+  change together only when their loops end together. A MUTE key pressed less
+  than half a second after the first is an ordinary press, so two fingers
+  together are two presses. Stop keeps the group, and a release after Stop
+  changes it at once. A hold that the panel may have lost (after a panic, a
+  save or load, or a panel error) is dropped and changes nothing, the first
+  key's taken-back change included.
 - **PLAY:** starts and stops the transport; it is the only start/stop. Stop
-  cancels pending queues.
+  cancels pending queues and waiting MUTE changes.
 - **Step buttons 1-16:** a short press toggles the step on release; a long
   press opens the step editor on that step without toggling it. Both act on
   the clip that was focused when the button went down, even if a pad or
@@ -233,9 +257,11 @@ buttons edit it.
 - Hold both encoder buttons for Panic: it stops playback and returns to the
   Session view. Release both before issuing another command; keys held through
   the panic or pressed while it is held do nothing afterwards.
-- In the selector, buttons 1-8 mute on **short release**; holding opens track
-  configuration without muting. Save/load (9/10) require stopped playback;
-  buttons, pads and PLAY held through a save or load do nothing afterwards.
+- In the selector, buttons 1-8 mute on **short release**, at once whatever the
+  launch quantization: a waiting change of that track is cancelled, and the
+  track leaves a mute group. Holding opens track configuration without
+  muting. Save/load (9/10) require stopped playback; buttons, pads, MUTE and
+  PLAY held through a save or load do nothing afterwards.
 - A long press only counts on the screen where the button went down.
 - Pad and scene launches are unavailable in Song mode (`SONG MODE`); a pad
   still moves the focus. In the song editor, button 2 selects Song mode and
