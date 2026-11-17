@@ -144,8 +144,9 @@ jobs:
           if-no-files-found: ignore
 
       # What the publish workflow puts on the public page (publish-simulator.yml).
+      # Packaged on every build, so a branch already shows that it packages;
+      # uploaded on master only.
       - name: Package the page
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: sim/publish.sh package "$RUNNER_TEMP/simulator-site"
 
       - name: Upload the page
