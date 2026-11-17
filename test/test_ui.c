@@ -5047,6 +5047,25 @@ static void test_mute_group_released_after_stop_applies_now(void) {
     CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
 }
 
+// Stop cancels the held key's waiting change before anything joins: the held
+// key stays out of the group, and the release changes the group at once.
+static void test_mute_group_after_stop_cancelled_the_held_change(void) {
+    play_under_bar();
+    mute_down(0);
+    CHECK(g_seq.mute_pending == 0x01);
+    panel(PANEL_PLAY, 0, 0);                // Stop: the waiting change is gone
+    CHECK(g_seq.transport.state != TRANSPORT_PLAYING);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // joins; the held key has nothing to withdraw
+    mute_up(1);
+    CHECK(white_mutes() == 0x02);
+    CHECK(g_seq.track_mutes == 0);
+    mute_up(0);
+    CHECK(g_seq.track_mutes == 0x02 && g_seq.mute_pending == 0);
+    CHECK(white_mutes() == 0);
+}
+
 static void test_mute_lost_hold_drops_group(void) {
     hold_group_of_0_and_1();
     poll_loses_sync = true;
@@ -5424,6 +5443,7 @@ int main(int argc, char **argv) {
     RUN(test_mute_sweep_drops_hold_not_reported_down);
     RUN(test_mute_held_key_pressed_again_drops_the_group);
     RUN(test_mute_group_released_after_stop_applies_now);
+    RUN(test_mute_group_after_stop_cancelled_the_held_change);
     RUN(test_mute_lost_hold_drops_group);
     RUN(test_mute_release_after_lost_generation_in_one_pass);
     RUN(test_mute_join_in_a_pass_that_lost_the_hold);

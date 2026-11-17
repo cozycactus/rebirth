@@ -663,9 +663,14 @@ static void handle_mute_press(uint8_t track) {
     }
     if (transport_cancel_mutes(bit, NULL)) return;  // a waiting change is cancelled only
     if (!ui.mute_group) {
-        // The first key to join brings the held key in, with the target of its
-        // change, if that change still waits; one that landed or acted at once
-        // stays out.
+        // The held key comes in with the target of its change if that change
+        // still waits; one that landed, acted at once or was cancelled (Stop)
+        // stays out. This is tried whenever the group is empty, so again after
+        // every member has left, not only for the first key to join. That is
+        // the same thing: the first try withdraws the held key's change or
+        // finds none, and while the key is held it cannot get a new waiting
+        // change (its own press ends the hold, the selector acts at once), so
+        // a later try finds nothing to withdraw.
         uint8_t held_bit = (uint8_t)(1u << ui.mute_held);
         uint8_t target = 0;
         if (transport_cancel_mutes(held_bit, &target) & held_bit) {

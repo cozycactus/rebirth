@@ -349,10 +349,14 @@ void seq_set_kit_config(uint8_t track, const kit_config_t *config);
 // Bit t set when track t is a kit in any location. Takes seq_lock: call with none
 // held.
 uint8_t seq_kit_tracks(void);
-// The MUTE button. A track that is muted (live, or stored at the location it
-// plays) becomes audible: the live bit and the stored mute of every location
-// are cleared and its prepared rows refreshed. An audible track gets the live
-// mute. Takes seq_lock: call with none held.
+// An immediate mute toggle, what the MUTE key did before its changes waited for
+// the launch point. Nothing in the firmware calls it now: a MUTE press goes
+// through transport_toggle_mutes() and the selector through
+// transport_toggle_mutes_now(). A track that is muted (live, or stored at the
+// location it plays) becomes audible: the live bit and the stored mute of every
+// location are cleared and its prepared rows refreshed. An audible track gets
+// the live mute. A waiting MUTE change is left as it is. Takes seq_lock: call
+// with none held.
 void seq_toggle_track_mute(uint8_t track);
 // The muted tracks, by the rule MUTE uses: bit c set when the live mute is set
 // or the location track c plays has its stored mute. Takes seq_lock: call with

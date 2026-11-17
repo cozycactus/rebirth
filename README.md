@@ -14,8 +14,8 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **Live pattern editing** — step, length, and track-setting edits update playback while running
 - **Session view** — 8×8 pad grid (tracks × slots of the shown bank), SCENE column,
   MUTE row and a PLAY button; the 16 step buttons edit the focused clip
-- **Launch quantization** — pad and scene launches land on the next bar (default),
-  beat, step, or at the end of the track's loop
+- **Launch quantization** — pad and scene launches and MUTE changes land on the
+  next bar (default), beat, step, or at the end of the track's loop
 - **Song mode** — chain patterns with repeat counts, loop or stop at end
 - **Pattern queue** — schedule the next pattern during playback
 - **Track mutes** — MUTE changes at the launch point and flashes white while it
@@ -142,17 +142,21 @@ buttons edit it.
   clears that stored mute in every slot; the track stays silent until the
   change lands, and stays muted if the change is cancelled.
 - **Mute groups:** hold a MUTE key for half a second, then press other MUTE
-  keys. They do not act: they are collected, and their keys are steady white.
+  keys. The first key's own press is an ordinary MUTE press: it changes that
+  key's track, or starts it waiting to change, as any MUTE press does. The
+  other keys do not act: they are collected, and their keys are steady white.
   When the first key is let go, the collected tracks change together at the
-  next launch point (at once while stopped or under NEXT STEP), each to the
-  opposite of the state it had when it was collected. The first key goes
-  with them if its own change was still waiting when the first other key was
-  collected: that change is taken back then and its key turns steady white.
-  If its change had already landed or acted at once, the first key stays out
-  of the group. Pressing a collected key again takes it out; pressing a key
-  whose change is waiting cancels that change and does not collect it. Under
-  TRACK LOOP in Pattern mode each track changes at its own loop end, so they
-  change together only when their loops end together. A MUTE key pressed less
+  next launch point (at once while stopped or under NEXT STEP). Each other
+  key changes its track to the opposite of the state the track had when the
+  key joined. The first key goes with them if its own change was still
+  waiting when the first other key joined: that change is taken back then,
+  its key turns steady white, and it goes with the group to the target fixed
+  at its press. If its change had already landed, acted at once or been
+  cancelled by Stop, the first key stays out of the group. Pressing a
+  collected key again takes it out; pressing a key whose change is waiting
+  cancels that change and does not collect it. Under TRACK LOOP in Pattern
+  mode each track changes at its own loop end, so they change together only
+  when their loops end together. A MUTE key pressed less
   than half a second after the first is an ordinary press, so two fingers
   together are two presses. Stop keeps the group, and a release after Stop
   changes it at once. A hold that the panel may have lost (after a panic, a

@@ -292,6 +292,36 @@ from stalling until the 32-bit counter wraps. It emits no catch-up burst.
 Jitter snapshots are coherent; tempo changes do not count the new period as
 timing noise. See [JITTER_MEASUREMENT.md](JITTER_MEASUREMENT.md).
 
+### MUTE hold and groups
+
+`ui.c` remembers one held MUTE key: its track (`ui.mute_held`, `MUTE_NONE` for
+none), the time the UI handled its press and the panel generation then, and the
+group (`ui.mute_group`) with each member's target (`ui.mute_group_target`, bit set
+= muted). A MUTE press with no key held is an ordinary press
+(`transport_toggle_mutes()`) and becomes the held key. Another key pressed less
+than `PAD_COPY_HOLD_MS` (500 ms) after it, or after the panel generation changed,
+is an ordinary press as well. A later one joins: a member pressed again leaves, a
+key with a waiting change only has it cancelled, and any other key joins with the
+opposite of its state then as its target. While the group is empty a join first
+withdraws the held key's waiting change with `transport_cancel_mutes()`; the held
+key is in the group, with that change's target, only when the call returns its bit.
+The join checks the generation only, not whether the held key is still reported
+down: the panel samples every MUTE key in one column, so a member's press and the
+held key's release can arrive in one pass, and the panel already reports the key up
+while its release waits behind the press; the pass's events are taken in order. The
+held key's release sets the group to its targets in one `transport_set_mutes()`
+call, if the group is not empty and the generation is the one of its press; then no
+key is held. A press of the held key itself means its release was lost: the hold
+and its group are dropped, and the press is an ordinary one that starts a new hold.
+After the pass's events, a held key that `panel_input_mute_down()` no longer
+reports, or whose generation changed (in the pass of its press too), is dropped
+with its group. A panic and a flash save or load drop it where they drop the pad holds; Stop does
+not, so a group let go after Stop changes at once. A drop changes nothing in the
+transport, a withdrawn change included. The selector's buttons 1-8 take their track
+out of the group before `transport_toggle_mutes_now()`, and `led_state_t.mute_group`
+lights the group steady white. All of it runs on Core 0 between transport calls that
+take the locks themselves; nothing runs in the timer interrupt and no lock is added.
+
 ## Storage
 
 The last 128 KiB of the Pico's 2 MiB flash holds patterns and song data.
