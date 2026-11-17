@@ -139,7 +139,7 @@ micro-timing offset (5 bits), so the step is 6 bytes.
   A full pool of 64-step clips costs as much memory as D.
 - C reverses the owner's kit-storage decision.
 - D keeps today's layout, two arrays per location, only longer. RAM after the
-  change is about 190 KB of 256 KiB (see Budget).
+  change is about 197 KB of 256 KiB (see Budget).
 
 **Playback path.** My call: **the timer reads the step it plays directly**, under
 `seq_lock`, at the step boundary. The prepared rows cannot grow: 256 rows of 64
@@ -222,11 +222,12 @@ RAM, from today's 117,504 bytes:
 | patterns 31,104 → 166,272 | +135,168 |
 | `pattern_buf` removed | −31,232 |
 | prepared rows, rows in play, revisions removed | −31,648 |
-| new state: pass counters, bar counter, FILL, page pins, overview, 256-byte save tail | about +600 |
+| new state: pass counters and residues, bar counter, FILL, page pins, overview, 256-byte save tail | about +700 |
+| static scratch `pattern_t` for validating a legacy save | +5,196 |
 | code moved to RAM (step read, condition evaluation) | about +1,500 |
-| **Total** | **about 191,900** |
+| **Total** | **about 197,200** |
 
-That leaves about 68 KB of the 256 KiB main SRAM (less the 2 KiB heap). A
+That leaves about 63 KB of the 256 KiB main SRAM (less the 2 KiB heap). A
 later per-step byte (a CC lock, a gate length) costs 16 KB.
 
 Flash: header 256 + patterns 166,400 (page-rounded) + song 2,560 + kit settings
@@ -267,8 +268,15 @@ as today, computed without a division as `(pct * 24 * 5243) >> 19` (exact for
   `kit_is_cell()`, which live in flash), the condition evaluation and the LST
   distance. Fields are copied one by one, not by struct assignment, which may
   call `memcpy` in flash. `static inline` does not guarantee inlining, so the
-  check is the ELF: in Debug and Release builds the ISR's call graph reaches no
-  flash address and no `__aeabi_uidiv`, `__aeabi_uidivmod` or `__aeabi_idiv*`.
+  check is the ELF. It is relative: the timer on `master` already reaches flash
+  through veneers (`send_note_off_if_active()`, `prepare_note_off()`,
+  `cv_set_note()`, `gate_commit()`, `stop_playback_outputs()`, ...) and calls the
+  SDK's `__wrap___aeabi_uidiv` and `__wrap___aeabi_uidivmod` (in flash) for
+  `pulse_count % PULSES_PER_STEP` and the like. The rule: the new code itself is
+  in RAM and calls neither flash nor a division helper, and the ISR's list of
+  callees in flash and of division helpers grows by none against the baseline
+  taken before the change (`load_prepared_track()` leaves it). Moving the old
+  callees into RAM stays the existing bench item.
 - **Lock hold.** A song edit (up to 2,295 bytes moved) stays the longest live
   `seq_lock` writer; a clip copy becomes 640 bytes, a location load 5,196 bytes
   (transport stopped). The bench check of the ISR time and Clock interval
@@ -358,8 +366,9 @@ One evaluation covers the whole step: for a kit, all 12 lanes, AC included.
   `i % 8`, location `(i / 8) % 32`, pass `i / 256` and step `i % 64`, X = 50
   plays 4,962 times. The
   seed is taken from the timer at Start on the device (so runs differ); host
-  tests set it through a test hook; in the simulator the virtual clock makes it
-  reproducible for a given score.
+  tests set it through a test hook, `sequencer_set_seed()`, and a seed set that
+  way is kept by every later Start until the hook clears it; in the simulator
+  the virtual clock makes it reproducible for a given score.
 - **A:B** reads `pass_mod[B] == A − 1`; 1ST and !1ST read `pass == 0`.
 - **FILL** is one value for all tracks, taken once per step boundary:
   `fill_active = pedal_down || fill_mode == ON || (fill_mode == EVERY_N &&
@@ -461,8 +470,11 @@ dark. LED masks stay 16 bits, relative to the shown page.
 
 ### The pad overview
 
-In the Pattern view and both step editors (my call: the step editors are part of
-editing one clip), while the pad keyboard is not on, the pads show the clip:
+In the Pattern view (the owner's choice) and both step editors (my proposal,
+**pending the owner**: the step editors are part of editing one clip, and there
+a pad press would pick the step; without it the pads keep launching and copying
+in the step editors as today), while the pad keyboard is not on, the pads show
+the clip:
 
 - pad (column `c`, row `r`, row 0 at the top) is step `r * 8 + c`; page `p` is
   rows `2p` and `2p + 1`;
@@ -536,7 +548,8 @@ What changes, against `src/ui.c` at bcf6871:
 |---|---|---|---|---|
 | Pattern view, no hold | VALUE short | nothing | page cycle | free gesture |
 | Pattern view, steps held | VALUE short | nothing (cancels the taps) | velocity ↔ condition | free gesture |
-| Pattern view, step editors | pad (no keyboard) | launch, or copy with a pad held | overview: pin page / pick step; no launch, no copy | **owner-approved change** |
+| Pattern view | pad (no keyboard) | launch, or copy with a pad held | overview: pin page; no launch, no copy | **owner-approved change** |
+| Note and kit step editors | pad (no keyboard) | launch, or copy with a pad held | overview: pick the step; no launch, no copy | **change pending the owner** |
 | Note step editor | tap on the edited step | selects it again | velocity ↔ condition | no-op becomes an action |
 | Kit step editor | TRACK past RC | clamped at RC | COND stop | new stop |
 | Pattern selector | 14, 15, 16 | nothing | halve, double, FILL mode | free buttons |
@@ -618,8 +631,11 @@ Transport stopped, MIDI output idle, as now. Then:
 Load probes the v7 header at the region start. If that is not a valid v7 save,
 it probes the old offset for a v4, v5 or v6 header and migrates:
 
-- each legacy record is read through a frozen type into a static buffer (972
-  bytes; not on the 2 KiB stack);
+- validation runs first over all 32 legacy records, each converted into one
+  static scratch `pattern_t` (5,196 bytes in `.bss`, counted in the budget; a
+  `pattern_t` must never be a local, as the core 0 stack is 2 KiB); only then
+  are the records converted again, straight into `g_seq`, one location per lock
+  section;
 - a location gets its routing, lengths (1-16), swing and name; steps 0-15 of
   each track get note, velocity and flags, with `cond`, `ratchet` and `micro`
   zero; kit words 0-15 are copied (v6) or zero (v4, v5); steps 16-63 are zero;
@@ -710,7 +726,7 @@ editing gestures in both release orders; a torn save at several erase points.
 
 ## Risks and bench items
 
-- **RAM**: about 192 KB of 256 KiB. Confirm with `arm-none-eabi-size` after each
+- **RAM**: about 197 KB of 256 KiB. Confirm with `arm-none-eabi-size` after each
   phase and record it in HARDWARE_STATUS.md.
 - **ISR time and jitter** with direct reads: measure GPIO 7 and the Clock
   interval, as for the kit.

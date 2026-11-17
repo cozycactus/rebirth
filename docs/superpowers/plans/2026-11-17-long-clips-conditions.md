@@ -43,9 +43,12 @@ offsets, gesture map, golden hash values).
 - Condition codes, legacy offsets and hash exactly as the spec; 0 = ALWAYS;
   unknown codes reject a save.
 - The timer's new path (step read, length and kind tests, condition evaluation,
-  LST distance) runs from RAM, copies fields one by one, and calls no
-  `__aeabi_uidiv`, `__aeabi_uidivmod` or `__aeabi_idiv*`. Checked in the ELF
-  (Debug and Release) whenever a task touches that path.
+  LST distance) runs from RAM, copies fields one by one, and itself calls no
+  flash function and no `__aeabi_uidiv*` or `__aeabi_idiv*`. The ISR on
+  `master` already reaches flash through veneers and calls the SDK's division
+  wrappers, so the ELF check is relative: the ISR's callees in flash and its
+  division helpers grow by none against the baseline Task 2 records first
+  (Debug and Release), whenever a task touches that path.
 - No gesture beyond the spec's gesture map.
 - After each task that changes RAM use, record `arm-none-eabi-size -A` of the
   firmware ELF in `HARDWARE_STATUS.md`.
@@ -158,6 +161,14 @@ copied one by one) and `static inline uint8_t gate_pulses_for(uint8_t pct)` =
 `(pct * 24 * 5243) >> 19`. `sequencer_refresh_track_playback(track, location)`
 keeps its signature and now only updates the clip mask bit.
 
+- [ ] Baseline first: from the Debug and Release ELF of the base commit, list
+  every function the ISR calls (`arm-none-eabi-objdump -d`, following veneers)
+  with its address, marking those in flash and the division helpers; record the
+  list in `HARDWARE_STATUS.md`.
+- [ ] Lock audit: list every write to `g_seq.patterns`, `g_seq.kit_config` and
+  `g_seq.song` in `src/` and confirm each is inside a `seq_lock` section (the
+  prepared rows used to hide an unlocked one; the timer now reads the live
+  data). Fix any that is not, with a test where one is reachable while playing.
 - [ ] Tests: `gate_pulses_exact` (equals `pct * 24 / 100` for 10-100);
   `edit_heard_at_next_occurrence` (a note changed at step 3 while step 2 plays
   sounds at step 3 of this pass); `kind_change_releases_first` (SYNTH note held
@@ -167,8 +178,9 @@ keeps its signature and now only updates the clip mask bit.
   The existing playback tests pass unchanged, except ones that inspect prepared
   rows, which move to the public behaviour.
 - [ ] Implement.
-- [ ] Check the ELF (`arm-none-eabi-objdump -d` from the ISR through every new
-  callee: RAM addresses only, no division helpers) in Debug and Release.
+- [ ] Check the ELF in Debug and Release: every new callee at a RAM address and
+  free of division helpers; the ISR's flash callees and division helpers no
+  more than the baseline (`load_prepared_track()` gone from the list).
 - [ ] Run everything; record RAM; commit `perf: timer reads the step it plays; prepared rows removed`.
 
 ### Task 3: save straight from RAM
@@ -191,6 +203,7 @@ using one static `uint8_t page_tail[FLASH_PAGE]` padded with 0xFF.
 
 **Files:** Modify `include/sequencer.h`, `include/flash_storage.h`,
 `src/pattern.c`, `src/flash_storage.c`, `src/kit.c`, `src/ui.c`, `src/main.c`,
+`CMakeLists.txt` (`-Wframe-larger-than=1024` for the firmware),
 `test/fakes/fake_hardware.c` and `test/fakes/hardware/flash.h` (an erase cut),
 `sim/core/hal.c`, `sim/core/sim_main.c`, `sim/core/sim_api.h`,
 `sim/web/device.js`, `sim/test/device_check.js`, `test/test_storage.c`,
@@ -203,7 +216,10 @@ using one static `uint8_t page_tail[FLASH_PAGE]` padded with 0xFF.
 `flash_storage_last_error()` as the spec; `bool flash_storage_layout_ok(void)`
 (target: `__flash_binary_end` below the region; host: true), checked at boot
 (`ui_init()` shows `FLASH LAYOUT`) and before every save. The legacy load path
-now uses Task 1's readers only. `pattern_copy_track()` copies 64 steps of both
+now uses Task 1's readers only, validating all 32 records through one static
+scratch `pattern_t` before writing `g_seq`; no `pattern_t` is ever a local. The
+firmware build gains `-Wframe-larger-than=1024` (`CMakeLists.txt`) to catch
+one. `pattern_copy_track()` copies 64 steps of both
 kinds; `pattern_shift()` and `pattern_shift_track()` rotate within the clip's
 length. In `ui.c` a temporary `UI_LENGTH_MAX 16` keeps the selector at 16 until
 Task 6. `fake_flash_erase_limit` (sectors) cuts an erase in the fakes.
@@ -321,8 +337,11 @@ keyboard" gains the routing order), `README.md`.
 ov_shown_page, ov_playhead; uint64_t ov_active, ov_strong;` (playhead 0xFF =
 none; `ov_strong` = an accent, or a kit accent or flam on the shown lane).
 `led_frame_build()` draws the overview when `overview && !keys`.
-`handle_pad_press()` routes: keyboard, then the overview (Pattern view and step
-editors: no `find_copy_source()`, no `pad_seen`), then launch or copy.
+`handle_pad_press()` routes: keyboard, then the overview (Pattern view, and the
+step editors if the owner approves the spec's pending row: no
+`find_copy_source()`, no `pad_seen`), then launch or copy. **Before starting,
+check the owner's answer on the step editors;** without approval the overview
+is the Pattern view only and the step-editor test below is dropped.
 
 - [ ] Tests (`test_led_frame`): pad (column 1, row 1) is step 10; beyond the
   length off (length 40: rows 5-7 off — Review Focus 4); empty steps dim hue,
@@ -375,8 +394,9 @@ inline ones are not inlined). `sequencer.h`:
 `typedef enum { FILL_OFF, FILL_ON, FILL_EVERY_2, FILL_EVERY_4, FILL_EVERY_8, FILL_EVERY_16, FILL_MODE_COUNT } fill_mode_t;`
 `void seq_set_fill_pedal(bool down); void seq_set_fill_mode(fill_mode_t mode); fill_mode_t seq_get_fill_mode(void);`
 `transport_snapshot_t` gains `bool fill_active`;
-`void sequencer_set_seed(uint32_t seed)` (tests; Start otherwise takes the
-timer).
+`void sequencer_set_seed(uint32_t seed)` and `void sequencer_clear_seed(void)`
+(tests: a seed set this way survives every Start until cleared; otherwise Start
+takes the timer).
 
 - [ ] Tests (`test_condition`): validity of 0x00, 0x01, 0x63, 0x70-0x75, 0x88
   (1:2), 0x89 (2:2), 0xBF (8:8) and invalidity of 0x64, 0x6F, 0x76, 0x80, 0x8A
