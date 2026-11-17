@@ -9,7 +9,7 @@
 | Core 0 UART IRQ | First read every received byte into the input ring, then drain pending MIDI bytes into UART0, one byte per interrupt (hardware FIFO off) |
 
 The playback lock serializes the complete timer handler with Start, Stop,
-Continue, mode changes, selection and Panic. Stop/Panic return after any
+Continue, mode changes, selection, MUTE changes and Panic. Stop/Panic return after any
 in-progress step has finished and its outputs have been cleared. Bytes already
 in the UART hardware still need time to reach the receiving instrument.
 
@@ -17,8 +17,14 @@ Lock order is **playback -> shared state or MIDI**. UI edits take the shared loc
 release it, then refresh playback data. Transport commands and storage operations
 are Core 0 APIs. The timer uses internal stop helpers under the playback lock.
 
+The live mutes `track_mutes` are written under the shared lock: by Core 0, and by
+the timer when it applies a due MUTE change; the timer reads the byte once per
+pulse without it. The two masks of waiting MUTE changes, `mute_pending` and
+`mute_target`, are written only under the playback lock: by Core 0, or by the
+timer, which holds it throughout.
+
 What can delay the timer: Core 0 sections that hold the playback lock, i.e.
-transport commands, pad/scene launches, Panic and the per-frame transport
+transport commands, pad/scene launches, MUTE changes, Panic and the per-frame transport
 snapshot (one short copy per frame, never one per UI pass); shared-lock
 sections the timer waits on; and bus or flash contention from Core 0, such as
 the LED DMA and Core 0 code running from flash through the XIP cache. The
@@ -72,7 +78,9 @@ lane order.
   the same rule.
 - **Pulse order.** Each pulse: 1 MIDI Clock; 2 live mutes (a muted kit releases
   its sounding voices and cancels a pending flam); 3 note-off countdowns;
-  4 flam countdowns (the second hits); 5 on a step boundary, the step. Kit
+  4 flam countdowns (the second hits); 5 on a step boundary, the step. Between 1
+  and 2 comes 0: on a step boundary, the due MUTE changes (Playback Rules), so
+  the live mutes of that pulse include them. Kit
   messages of 2-4 go out through their own send call, never through `midi_buf`,
   which step 5 clears. With the gate at 100 % the countdown ends in step 3 of the
   pulse that begins the next step, before its Note Ons.
@@ -146,6 +154,36 @@ lane order.
   all show a track as muted by this rule (`seq_get_track_mutes()`).
   MUTE on a muted track clears the live bit and the stored mute of every
   location, so it is undone with one press.
+- A MUTE change gives a track a target live mute: `transport_toggle_mutes()`
+  (a press) the opposite of its state by the rule above, `transport_set_mutes()`
+  the bit it is given. It applies at once while the transport is not playing or
+  under `STEP`; `transport_toggle_mutes_now()` cancels and toggles at once in
+  every case. Otherwise it waits (`mute_pending`, its target in `mute_target`;
+  neither is saved) for the next launch point: a global step that is a multiple
+  of 16 (`BAR`) or 4 (`BEAT`), or under `TRACK LOOP` that track's loop end by the
+  queued pads' rule, decided on the same row the pad uses at that boundary
+  (Song mode reads `TRACK LOOP` as the bar, where song entries change). The rule
+  is read at each step boundary, so a quantization change moves a waiting change.
+  A press of a track with a change waiting cancels it (`transport_cancel_mutes()`
+  cancels without a press); a press after the change landed is a new change.
+- A change is decided and published in one critical section (playback lock,
+  then shared state), so the timer never applies a boundary between the decision
+  and the write. The timer applies due changes at the step boundary before the
+  live mutes and the song advance: a newly muted track's notes and kit voices are
+  released in that pulse and its step does not play; a newly unmuted track plays
+  that step.
+- Stored mutes: a change to audible of a track muted by a stored mute sets its
+  live bit in that section (the track is silent already), and the change clears
+  that bit, at once or when it lands. After the section the stored mute of every
+  location is cleared and the track's rows are refreshed
+  (`seq_clear_stored_mutes()`), so from then on the live bit alone mutes it and a
+  cancelled change leaves it live-muted. A launch point that falls inside the
+  refresh can play one step of that track silent.
+- Stop, Start while playing, a play-mode change, Panic (also the timer's on a
+  MIDI overflow) and the end of a song that stops cancel waiting changes, as does
+  a Start that finds an empty song; a change due on the song's last boundary
+  lands before it stops. `transport_clear_queue()` and
+  `transport_clear_track_queue()` are about pads and leave them.
 - Selection while stopped is immediate and survives Start.
 - Stop cancels pending queues and retains the current playing locations.
 - Manual queues are rejected in Song mode. Song entries apply on 16-step bar

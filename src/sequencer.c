@@ -558,6 +558,43 @@ static bool apply_track_queue_if_ready(uint8_t track) {
     return changed;
 }
 
+// At a step boundary with a MUTE change waiting: writes the due targets into the live
+// mutes, before the pulse's live mutes and the song advance, so the rest of the pulse
+// treats them as a mute set just before it. Due is the queued pads' rule; Song mode
+// reads TRACK LOOP as BAR. Under TRACK LOOP the waiting track's row is loaded first and
+// its length decides, as for a queued pad. Returns the tracks whose row it loaded:
+// phase 1 does not load them again, so a row Core 0 publishes in between cannot give
+// the pad another length than the mute had.
+static uint8_t apply_due_mutes(transport_t *t) {
+    uint8_t pending = g_seq.mute_pending;
+    uint8_t quant = g_seq.launch_quant;
+    if (t->mode == PLAY_MODE_SONG && quant == LAUNCH_QUANT_TRACK_LOOP) quant = LAUNCH_QUANT_BAR;
+    uint32_t global_step_count = t->pulse_count / PULSES_PER_STEP;
+    uint8_t due = 0;
+    uint8_t loaded = 0;
+    switch (quant) {
+        case LAUNCH_QUANT_BAR:  if ((global_step_count % 16u) == 0) due = pending; break;
+        case LAUNCH_QUANT_BEAT: if ((global_step_count % 4u) == 0) due = pending; break;
+        case LAUNCH_QUANT_STEP: due = pending; break;
+        default:
+            for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
+                if (!(pending & (1u << tr))) continue;
+                load_prepared_track(tr);
+                loaded |= (uint8_t)(1u << tr);
+                uint8_t track_len = clamp_pattern_steps(prepared_playback.track[tr].length);
+                if (t->track_step_count[tr] >= track_len) due |= (uint8_t)(1u << tr);
+            }
+            break;
+    }
+    if (due) {
+        uint32_t lock_state = seq_lock();
+        g_seq.track_mutes = (uint8_t)((g_seq.track_mutes & ~due) | (g_seq.mute_target & due));
+        seq_unlock(lock_state);
+        g_seq.mute_pending = (uint8_t)(pending & ~due);
+    }
+    return loaded;
+}
+
 static void clear_runtime_note_state(void) {
     pending_gate_on = 0;
     pending_gate_off = 0;
@@ -586,6 +623,8 @@ static void stop_playback_outputs(void) {
     midi_buf_flush();
     cv_gate_all_off();
     clear_runtime_note_state();
+    // Waiting MUTE changes end with the run; every caller holds the playback lock.
+    g_seq.mute_pending = 0;
     midi_send_stop();
 }
 
@@ -694,6 +733,12 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
 
     if ((t->pulse_count % (PPQN / MIDI_PPQN)) == 0) midi_send_clock();
 
+    // Pulse order 0: due MUTE changes. Phase 1 keeps the rows loaded for them.
+    uint8_t loaded_rows = 0;
+    if (g_seq.mute_pending && (t->pulse_count % PULSES_PER_STEP) == 0) {
+        loaded_rows = apply_due_mutes(t);
+    }
+
     // A mute cuts an already sounding note on the next internal pulse. A kit with
     // nothing sounding and no flam pending has nothing to release.
     uint8_t track_mutes = g_seq.track_mutes;
@@ -758,7 +803,7 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
         pending_gate_off = 0;
 
         for (int tr = 0; tr < NUM_TRACKS; tr++) {
-            load_prepared_track((uint8_t)tr);
+            if (!(loaded_rows & (1u << tr))) load_prepared_track((uint8_t)tr);
             prepared = &prepared_playback;
 
             uint8_t track_len = clamp_pattern_steps(prepared->track[tr].length);
@@ -848,6 +893,8 @@ void sequencer_init(void) {
     jitter_expected_period_us = pulse_interval_us;
     jitter_reset_now();
     clear_runtime_note_state();
+    g_seq.mute_pending = 0;
+    g_seq.mute_target = 0;
     memset(playback_pattern, NO_QUEUED_PATTERN, sizeof(playback_pattern));
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         kit_config_defaults(&g_seq.kit_config[track]);
@@ -900,6 +947,7 @@ void transport_start(void) {
         t->current_track_step[track] = 0;
         t->queued_pattern[track] = NO_QUEUED_PATTERN;
     }
+    g_seq.mute_pending = 0;                 // before an empty song's early return
 
     if (t->mode == PLAY_MODE_SONG) {
         t->song_position = 0;
@@ -1075,6 +1123,61 @@ bool transport_launch(uint8_t track_mask, uint8_t pattern_index) {
     return true;
 }
 
+// ─── MUTE changes (called from Core 0) ─────────────────────────
+
+typedef enum { MUTES_TOGGLE, MUTES_SET, MUTES_NOW } mutes_op_t;
+
+// One decision under both locks, published at once, so the timer never applies a
+// boundary between the decision and the write. The stored mutes are cleared after.
+static void change_mutes(uint8_t mask, uint8_t target, mutes_op_t op) {
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t lock_state = seq_lock();
+    uint8_t muted = seq_track_mutes_locked();
+    uint8_t change = mask;
+    if (op == MUTES_TOGGLE) change &= (uint8_t)~g_seq.mute_pending;  // waiting ones are cancelled only
+    g_seq.mute_pending &= (uint8_t)~mask;
+    uint8_t want = (uint8_t)((op == MUTES_SET ? target : (uint8_t)~muted) & change);
+    uint8_t unmute = (uint8_t)(change & ~want);
+    // A track muted only by its stored mute stays silent by its live bit until its
+    // change lands: the stored mutes are cleared below, with no lock held.
+    g_seq.track_mutes |= (uint8_t)(unmute & muted);
+    if (op == MUTES_NOW ||
+        g_seq.transport.state != TRANSPORT_PLAYING ||
+        g_seq.launch_quant == LAUNCH_QUANT_STEP) {
+        g_seq.track_mutes = (uint8_t)((g_seq.track_mutes & ~change) | want);
+    } else {
+        g_seq.mute_target = (uint8_t)((g_seq.mute_target & ~change) | want);
+        g_seq.mute_pending |= change;
+    }
+    seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
+    if (unmute) seq_clear_stored_mutes(unmute);
+}
+
+void transport_toggle_mutes(uint8_t mask) {
+    change_mutes(mask, 0, MUTES_TOGGLE);
+}
+
+void transport_set_mutes(uint8_t mask, uint8_t target) {
+    change_mutes(mask, target, MUTES_SET);
+}
+
+void transport_toggle_mutes_now(uint8_t mask) {
+    change_mutes(mask, 0, MUTES_NOW);
+}
+
+// Not a change_mutes() op: it changes no live bit and clears no stored mute.
+uint8_t transport_cancel_mutes(uint8_t mask, uint8_t *target) {
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t lock_state = seq_lock();
+    uint8_t cancelled = (uint8_t)(g_seq.mute_pending & mask);
+    if (target) *target = (uint8_t)(g_seq.mute_target & cancelled);
+    g_seq.mute_pending &= (uint8_t)~cancelled;
+    seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
+    return cancelled;
+}
+
 // Runs from RAM, as do the lock helpers it calls: it holds the playback lock
 // about 30 times a second, and a cache-cold run from XIP flash could stretch
 // that hold and delay the timer (MIDI Clock, gate edges).
@@ -1087,6 +1190,7 @@ void __not_in_flash_func(sequencer_snapshot)(transport_snapshot_t *out) {
     out->mode = t->mode;
     out->pulse_count = t->pulse_count;
     out->live_mutes = g_seq.track_mutes;
+    out->mute_pending = g_seq.mute_pending;
     out->stored_mutes = 0;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         out->current[track] = t->current_pattern[track];
