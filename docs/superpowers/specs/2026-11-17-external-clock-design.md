@@ -55,7 +55,9 @@ that clock jitters or disappears.
   INT, or AUTO with no clock present. Otherwise a turn shows `TEMPO EXT`.
 - **PLAY** in EXT, and in AUTO with a clock present: stopped, it arms a start
   on the next Clock; armed, it disarms; playing, it stops. In AUTO with no
-  clock it starts the internal timer as today.
+  clock it starts the internal timer as today. An AUTO start that waits keeps
+  waiting if the master falls silent before its Clock (PLAY again cancels it,
+  and the next PLAY then starts the internal timer).
 - **Pattern Select footer.** With EXT or AUTO the jitter line shows the
   external clock instead: `X:<max deviation us> L:<losses> C:<catch-ups>`.
 

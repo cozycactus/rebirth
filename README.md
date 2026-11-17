@@ -257,7 +257,9 @@ buttons edit it.
   - PLAY with EXT (or AUTO with a Clock coming in) waits for the next Clock to
     start; the tempo prefix blinks meanwhile, and PLAY again cancels it. This
     starts in time with a master that sends Clock without Start, but not on its
-    bar.
+    bar. In AUTO a start that waits keeps waiting if the master falls silent
+    first; PLAY again cancels it, and the next PLAY, with no Clock coming in,
+    starts the device's own timer.
   - The tempo line reads `EXT 145.0` (the measured tempo), `EXT  --.-` (EXT
     with no Clock) or `INT 120.0` (AUTO on its own timer). VALUE sets the tempo
     only on the internal timer and otherwise shows `TEMPO EXT`.

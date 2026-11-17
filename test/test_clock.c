@@ -795,14 +795,18 @@ static void test_a_stall_is_not_a_tempo_change(void) {
     uint32_t last = clocks(now() + 1000, T145, 100);
     transport_start();
     last = clocks(last + T145, T145, 20);
-    uint32_t t = last + 3 * T145;
-    for (unsigned i = 0; i < 3; i++) {
-        wire(t + 320 * i, MIDI_CLOCK);
+    // The next Clock is held back a Clock time and comes bunched with the one after,
+    // then they are on time again.
+    const uint32_t at[] = {last + 2 * T145, last + 2 * T145 + 320, last + 3 * T145,
+                           last + 4 * T145};
+    for (unsigned i = 0; i < 4; i++) {
+        wire(at[i], MIDI_CLOCK);
+        CHECK(following());
         float shown = 40000000.0f / (float)ext_est.shown_x16;
         CHECK(fabsf(shown - 145.0f) < 1.0f);
+        CHECK(clock_est_timeout_us(&ext_est) >= 3u * T145 - 100u);
     }
-    CHECK(clock_est_timeout_us(&ext_est) >= 3u * T145 - 100u);
-    run_until(t + 640 + 200000);            // and then the master is gone
+    run_until(at[3] + 200000);              // and then the master is gone
     CHECK(g_seq.transport.state == TRANSPORT_PLAYING && !following());
     CHECK(fabsf(g_seq.transport.bpm - 145.0f) < 0.5f);
     // Extra Clocks in a bunch (more than real time) move it a little, not to 300.
@@ -874,6 +878,20 @@ static void test_the_alarm_drains_the_ring_when_both_are_due(void) {
     CHECK(count_byte(MIDI_CLOCK) == 7);
 }
 
+static void test_a_stale_clock_is_forgotten(void) {
+    // Once the Clocks are older than the timeout the estimate is dropped, so the
+    // 32-bit difference to the last one can never wrap round into "present".
+    reset(CLOCK_SOURCE_AUTO);
+    uint32_t last = clocks(now() + 1000, T145, 10);
+    CHECK(ext_present(now()) && !transport_tempo_is_internal());
+    run_until(last + 3 * T145 + pulse_interval_us + 10);
+    CHECK(ext_est.count == 0 && !ext_present(now()) && transport_tempo_is_internal());
+    timer_hw->timerawl = last + 100;        // the counter come round: still not present
+    CHECK(!ext_present(now()));
+    transport_start();                      // AUTO starts on its own timer
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING && !transport_armed());
+}
+
 static void test_transport_running_is_playing_or_armed(void) {
     reset(CLOCK_SOURCE_EXT);
     CHECK(!transport_running());
@@ -924,6 +942,7 @@ int main(void) {
     RUN(test_ext_on_its_own_timer_stops_when_the_clock_goes);
     RUN(test_spp_past_the_end_after_a_start_stays_stopped);
     RUN(test_the_alarm_drains_the_ring_when_both_are_due);
+    RUN(test_a_stale_clock_is_forgotten);
     RUN(test_transport_running_is_playing_or_armed);
     printf("%u clock tests passed\n", tests);
     return 0;

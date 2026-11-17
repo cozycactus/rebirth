@@ -1052,6 +1052,16 @@ static void __time_critical_func(ext_check_loss)(uint32_t now_us) {
     }
 }
 
+// A Clock older than the loss timeout is forgotten (after the loss has been handled,
+// which reads the shown tempo): the clock is not present, and 72 minutes later the
+// 32-bit difference to the last Clock cannot wrap round into "present" again. The
+// next Clock starts the estimate afresh, as after any gap.
+static void __time_critical_func(ext_forget_stale)(uint32_t now_us) {
+    if (ext_est.count && now_us - clock_est_last(&ext_est) >= clock_est_timeout_us(&ext_est)) {
+        clock_est_reset(&ext_est);
+    }
+}
+
 // The pulses of a Clock at t_us while following. Normally the at most three pulses
 // of the previous Clock still owed run at once (none is a step boundary), then this
 // Clock's first pulse, and the other three are scheduled. In a burst (a Clock less
@@ -1231,6 +1241,7 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
         if (jitter_reset_pending) jitter_reset_now();
         jitter_have_last_irq = false;
         ext_run_due(timer_hw->timerawl);
+        ext_forget_stale(timer_hw->timerawl);
         if (midi_output_overflowed()) panic_playback();
         // Still following, or back on the internal timer from now.
         arm_alarm_at(ext_following ? ext_alarm_target(timer_hw->timerawl)
@@ -1251,6 +1262,7 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
     jitter_record_entry(isr_start_us, scheduled_us);
     // EXT playing on the internal timer until it follows: stops once the Clock is gone.
     if (g_seq.clock_source == CLOCK_SOURCE_EXT) ext_check_loss(isr_start_us);
+    ext_forget_stale(isr_start_us);
 
     run_pulse();
 

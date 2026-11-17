@@ -316,7 +316,9 @@ and the reasons are in
   the internal timer at the measured tempo, which becomes `transport.bpm`, and
   follows again from its current position once three plausible intervals in a
   row have arrived (that Clock is the next multiple of four pulses). An interval
-  longer than the timeout restarts the estimate (a flash save, a cable).
+  longer than the timeout restarts the estimate (a flash save, a cable), and
+  alarm 0 forgets an estimate whose last Clock is older than the timeout, so the
+  32-bit difference to it never wraps round into "present" 72 minutes later.
 - **Shown tempo.** The time over the last 96 intervals divided by their number,
   then averaged over Clocks with weight 1/16, in us x 16
   (`transport_snapshot_t.ext_shown_x16`); three Clocks in a row more than 4 % off
