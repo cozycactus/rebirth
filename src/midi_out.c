@@ -192,6 +192,9 @@ void midi_init(void) {
     uart_init(MIDI_UART, MIDI_BAUD);
     gpio_set_function(MIDI_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(MIDI_RX_PIN, GPIO_FUNC_UART);
+    // The input opto (H11L1) has an open-collector output. The internal pull-up
+    // keeps the line idle high also on a board without the external resistor.
+    gpio_pull_up(MIDI_RX_PIN);
 
     // MIDI is 8N1
     uart_set_format(MIDI_UART, 8, 1, UART_PARITY_NONE);

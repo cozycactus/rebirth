@@ -3604,6 +3604,7 @@ static void test_midi_key_in_track_config_goes_to_the_configured_track(void) {
     CHECK(ui.selected_track == 0);
     MIDI_UPDATE(KEY_ON, 64, 100);
     CHECK(count_channel_note_on(12, 64, 100) == 1);
+    CHECK(fake_midi_length == 3);           // and on no other channel
     CHECK(ui.last_note[5] == 60);           // track 6 is a drum track
     CHECK(ui.last_note[0] == 60);
 }
@@ -3613,6 +3614,7 @@ static void test_midi_key_in_session_uses_the_focused_cell(void) {
     session_set_focus(2, 3);
     MIDI_UPDATE(KEY_ON, 70, 100);
     CHECK(count_channel_note_on(11, 70, 100) == 1);
+    CHECK(fake_midi_length == 3);
     CHECK(ui.last_note[2] == 70);
     // The cell's own configuration decides: a kit there has no last note.
     g_seq.patterns[3].tracks[2].type = TRACK_TYPE_KIT;
