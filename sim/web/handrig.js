@@ -57,12 +57,24 @@
   const YAW = 30 * D2R, FREE_YAW = 100 * D2R, PITCH = 30 * D2R;
   // The pinch: the knob's radius and the grip's height (mm); at twist 0 the
   // line from thumb to index is the arm's heading turned GRIP toward the
-  // little finger's side (right hand: clockwise seen from above). GRIP is
-  // -30°, toward the thumb's side: with the grip 12 mm up, grips from 0° to
-  // +75° left the thumb's pad under the plate, -25° to -35° keep it about
-  // 3 mm above in every pinch. The hand may roll up to PINCH_ROLL, thumb
-  // side up.
-  const KNOB_R_MM = 10, PINCH_MM = 12, GRIP = -30 * D2R, PINCH_ROLL = 20 * D2R;
+  // little finger's side (right hand: clockwise seen from above): the thumb
+  // grips the knob's near side on the thumb's side (the right thumb
+  // near-left), the index its far side, and the wrist stays nearer the
+  // player than the knob. The hand may roll up to PINCH_ROLL, thumb side up.
+  const KNOB_R_MM = 10, PINCH_MM = 12, GRIP = 50 * D2R, PINCH_ROLL = 20 * D2R;
+  // The pinch fit's seed for the thumb and the index (the others as in
+  // POSES.pinch): the thumb nearly straight, the index bent at its middle
+  // joint (the distal follows at two thirds in the fit). From POSES.pinch,
+  // whose thumb hangs about 100 mm under the knuckles, every GRIP from 45°
+  // to 75° settles with the wrist 84 to 91 mm up and the thumb 3 to 7 mm
+  // under the plate. From this seed both hands settle on the same grip: the
+  // thumb spread 14° toward the index, the index curled about 44° at its
+  // middle joint, the wrist 68 (left) and 77 mm (right) up, the thumb's
+  // underside 0.3 mm above the plate. The basin is narrow: half a degree on
+  // either thumb angle still holds, a degree may not; GRIP holds from 47°
+  // to 52° (at 45° the right wrist is 81 mm up, from 53° the fit ends at
+  // its yaw and pitch limits).
+  const PINCH_SEED = { thumb: [8.75, 4.5, 4.5], index: [0, 3, 26, 17] };
   // A fit's seed for the touching fingers: nearly straight (the distal at
   // two thirds of the intermediate, as the fit keeps it).
   const STRAIGHT = { thumb: [0, 5, 5], index: [0, 5, 6, 4], middle: [0, 5, 6, 4], ring: [0, 5, 6, 4], pinky: [0, 5, 6, 4] };
@@ -781,11 +793,12 @@
 
     // Thumb and index on the side of encoder enc's knob, opposite each
     // other on its rim, 12 mm above the plate: the grip fitted at twist 0
-    // (from the pinch pose and the arm's direction, the hand free to roll up
+    // (from PINCH_SEED and the arm's direction, the hand free to roll up
     // to 20° thumb side up), then turned about the
     // knob's axis by twistDeg, clockwise seen from above (as the knob turns
     // up). ok iff both contacts are within 2 mm. The result also carries
     // the targets.
+    const pinchSeed = Object.assign({}, POSES.pinch, PINCH_SEED);
     function pinch(enc, twistDeg) {
       const c = PANEL.control({ op: 'encsw', enc });
       const middle = new T.Vector3(c.u, -c.v, PINCH_MM * MM), dir = armDir(middle);
@@ -793,7 +806,7 @@
       const across = new T.Vector3(Math.cos(grip), Math.sin(grip), 0).multiplyScalar(KNOB_R_MM * MM);
       const targets = { thumb: middle.clone().sub(across), index: middle.clone().add(across) };
       const axis = { axis: middle.clone() }, toward = { thumb: axis, index: axis };
-      fitFrom(targets, { dir, rollMax: PINCH_ROLL }, POSES.pinch, toward);
+      fitFrom(targets, { dir, rollMax: PINCH_ROLL }, pinchSeed, toward);
       const turn = -(twistDeg || 0) * D2R;
       if (turn) {
         turnAbout(middle, turn);
