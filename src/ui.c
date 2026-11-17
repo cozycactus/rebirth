@@ -73,6 +73,10 @@ typedef struct {
     uint32_t led_anim_ms;
     bool     led_anim_phase;
 
+    // The pitch last entered on each track: a new SYNTH step starts there.
+    // UI RAM only; not saved, not cleared by Stop, Panic or load.
+    uint8_t last_note[NUM_TRACKS];
+
     // Flash notification: shown for ~1 second, then cleared
     char     notify_msg[17];    // up to 16 chars
     uint8_t  notify_ticks;      // counts down at ~30 fps
@@ -122,6 +126,17 @@ static void drop_step_gestures(void) {
     }
 }
 
+// Toggles one step. A SYNTH step that is switched on with no stored note
+// takes the track's last note: seeded after pattern_toggle_step(), which
+// writes C4 over a note of 0, so a last note of 0 survives.
+static void toggle_step(pattern_t *pat, uint8_t track, uint8_t step) {
+    step_t *st = &pat->steps[track][step];
+    bool seed = pat->tracks[track].type == TRACK_TYPE_SYNTH &&
+                !(st->flags & STEP_FLAG_ACTIVE) && st->note == 0;
+    pattern_toggle_step(pat, track, step);
+    if (seed) st->note = ui.last_note[track];
+}
+
 // Toggles the steps in `mask` of one track at one location and refreshes its
 // playback. Takes seq_lock: call with no lock held.
 static void toggle_steps(uint8_t track, uint8_t location, uint16_t mask) {
@@ -129,7 +144,7 @@ static void toggle_steps(uint8_t track, uint8_t location, uint16_t mask) {
     uint32_t lock_state = seq_lock();
     pattern_t *pat = &g_seq.patterns[location];
     for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
-        if (mask & (1u << s)) pattern_toggle_step(pat, track, s);
+        if (mask & (1u << s)) toggle_step(pat, track, s);
     }
     seq_unlock(lock_state);
     sequencer_refresh_track_playback(track, location);
@@ -477,19 +492,29 @@ static bool apply_step_edit(step_t *st, int8_t e1_amount, int8_t e2_amount,
 }
 
 // For every step in mask: activate it if inactive, then apply_step_edit().
-// Returns true if any step changed; an activation counts. Caller holds seq_lock().
+// Returns true if any step changed; an activation counts. A turn that changed
+// a note on a SYNTH track makes the lowest target's resulting note the track's
+// last note. Caller holds seq_lock().
 static bool edit_held_steps(pattern_t *pat, uint8_t track, uint16_t mask,
                             int8_t e1_amount, int8_t e2_amount,
                             button_event_t e1b, button_event_t e2b) {
     bool changed = false;
+    bool note_changed = false;
+    int lowest = -1;
     for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
         if (!(mask & (1u << s))) continue;
         step_t *st = &pat->steps[track][s];
         if (!(st->flags & STEP_FLAG_ACTIVE)) {
-            pattern_toggle_step(pat, track, s);
+            toggle_step(pat, track, s);
             changed = true;
         }
+        uint8_t note_before = st->note;
         if (apply_step_edit(st, e1_amount, e2_amount, e1b, e2b)) changed = true;
+        if (st->note != note_before) note_changed = true;
+        if (lowest < 0) lowest = s;
+    }
+    if (note_changed && pat->tracks[track].type == TRACK_TYPE_SYNTH) {
+        ui.last_note[track] = pat->steps[track][lowest].note;
     }
     return changed;
 }
@@ -604,7 +629,7 @@ static void handle_step_grid(encoder_turn_t e1, encoder_turn_t e2,
         }
         for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
             if (taps & (1u << s)) {
-                pattern_toggle_step(pat, track, s);
+                toggle_step(pat, track, s);
                 changed = true;
             }
         }
@@ -728,7 +753,11 @@ static void handle_step_edit(encoder_turn_t e1, encoder_turn_t e2,
     pattern_t *pat = &g_seq.patterns[pattern_index];
     step_t *st = &pat->steps[track][ui.edit_step];
 
+    uint8_t note_before = st->note;
     if (apply_step_edit(st, e1.amount, e2.amount, e1b, e2b)) changed = true;
+    if (st->note != note_before && pat->tracks[track].type == TRACK_TYPE_SYNTH) {
+        ui.last_note[track] = st->note;
+    }
 
     // Enc2 press: back to the screen the editor was opened from
     if (e2b == BTN_PRESS) {
@@ -749,7 +778,7 @@ static void handle_step_edit(encoder_turn_t e1, encoder_turn_t e2,
     if (steps->long_pressed) {
         for (int s = 0; s < STEPS_PER_PATTERN; s++) {
             if (steps->long_pressed & (1u << s)) {
-                pattern_toggle_step(pat, track, s);
+                toggle_step(pat, track, s);
                 changed = true;
             }
         }
@@ -1471,6 +1500,7 @@ void ui_init(void) {
     memset(&ui, 0, sizeof(ui));
     ui.mode = UI_SESSION;
     ui.step_edit_return = UI_SESSION;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) ui.last_note[track] = 60;
     session_init();         // Reads the transport: call after sequencer_init
 }
 

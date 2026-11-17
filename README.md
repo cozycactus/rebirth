@@ -156,6 +156,11 @@ buttons edit it.
   instead (see Editing a kit): a short press cycles it on release, a long press
   opens the kit step editor, and a held kit step takes no encoder, so TRACK
   still walks and VALUE still sets the tempo.
+- A new SYNTH step starts at the note last entered on that track (C4 after
+  power-up), not at C4: the last note is what a turn of encoder 1 on held steps
+  or in the step editor left on the lowest step it changed. Steps that already
+  have a note keep it, and DRUM and kit tracks do not use it. It is not saved.
+  Holding empty steps and turning therefore moves them relative to it.
 - Hold both encoder buttons for Panic: it stops playback and returns to the
   Session view. Release both before issuing another command; keys held through
   the panic or pressed while it is held do nothing afterwards.

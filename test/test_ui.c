@@ -1222,6 +1222,170 @@ static void test_grid_hold_creates_drum_hit_with_kit_note(void) {
     CHECK(STEP(4, 3).flags == STEP_FLAG_ACTIVE);
 }
 
+// ─── The last note ─────────────────────────────────────────────
+
+static void test_last_note_starts_at_c4_in_the_session_view(void) {
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) CHECK(ui.last_note[t] == 60);
+    press_step(3);
+    release_step(3);
+    CHECK(STEP(0, 3).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 3).note == 60);
+}
+
+static void test_last_note_follows_a_turn_per_track(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    turn(0, -27);
+    CHECK(STEP(0, 4).note == 33);
+    CHECK(ui.last_note[0] == 33);
+    step_up(1u << 4);
+    press_encoder(0, BTN_LONG_PRESS);       // back to the Session view
+    CHECK(ui.mode == UI_SESSION);
+    press_step(9);
+    release_step(9);
+    CHECK(STEP(0, 9).note == 33);
+    CHECK(ui.last_note[0] == 33);
+    panel(PANEL_PAD, 1, 0);                 // another SYNTH track keeps its own
+    press_step(2);
+    release_step(2);
+    CHECK(STEP(1, 2).note == 60);
+    CHECK(ui.last_note[1] == 60);
+}
+
+static void test_last_note_seeds_a_pattern_view_tap(void) {
+    ui.last_note[0] = 33;
+    enter_pattern_view();
+    step_down(1u << 6);
+    step_up(1u << 6);
+    CHECK(STEP(0, 6).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 6).note == 33);
+}
+
+static void test_last_note_seeds_the_step_edit_long_press(void) {
+    ui.last_note[0] = 33;
+    press_encoder(0, BTN_PRESS);            // Pattern View
+    press_encoder(0, BTN_PRESS);            // Step Edit, step 1
+    CHECK(ui.mode == UI_STEP_EDIT);
+    press_step(5);
+    long_step(5);
+    release_step(5);
+    CHECK(STEP(0, 5).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 5).note == 33);
+    CHECK(ui.last_note[0] == 33);
+}
+
+static void test_step_edit_turn_sets_the_last_note(void) {
+    press_encoder(0, BTN_PRESS);
+    press_encoder(0, BTN_PRESS);
+    pattern_set_step(&g_seq.patterns[0], 0, 0, 50, 100, STEP_FLAG_ACTIVE);
+    turn(0, 4);
+    CHECK(STEP(0, 0).note == 54);
+    CHECK(ui.last_note[0] == 54);
+    turn(1, 5);                             // velocity leaves it alone
+    CHECK(ui.last_note[0] == 54);
+}
+
+static void test_last_note_two_held_empty_steps_turn_together(void) {
+    ui.last_note[0] = 48;
+    enter_pattern_view();
+    step_down((1u << 2) | (1u << 9));
+    turn(0, 2);
+    CHECK(STEP(0, 2).note == 50);
+    CHECK(STEP(0, 9).note == 50);
+    CHECK(ui.last_note[0] == 50);
+    step_up((1u << 2) | (1u << 9));
+}
+
+static void test_last_note_does_not_touch_a_step_that_has_a_note(void) {
+    pattern_set_step(&g_seq.patterns[0], 0, 3, 45, 100, STEP_FLAG_ACTIVE);
+    press_step(3);
+    release_step(3);                        // off
+    CHECK(STEP(0, 3).flags == 0);
+    press_step(3);
+    release_step(3);                        // on again
+    CHECK(STEP(0, 3).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 3).note == 45);
+    CHECK(ui.last_note[0] == 60);
+}
+
+static void test_last_note_comes_from_the_lowest_held_step(void) {
+    pattern_set_step(&g_seq.patterns[0], 0, 2, 50, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[0], 0, 9, 70, 100, STEP_FLAG_ACTIVE);
+    enter_pattern_view();
+    step_down((1u << 2) | (1u << 9));
+    turn(0, 3);
+    CHECK(STEP(0, 2).note == 53);
+    CHECK(STEP(0, 9).note == 73);
+    CHECK(ui.last_note[0] == 53);
+    step_up((1u << 2) | (1u << 9));
+}
+
+static void test_last_note_zero_is_a_note(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    turn(0, -100);                          // 60 down to 0
+    CHECK(STEP(0, 4).note == 0);
+    CHECK(ui.last_note[0] == 0);
+    step_up(1u << 4);
+    step_down(1u << 5);
+    step_up(1u << 5);                       // a tap: seeded with 0, not C4
+    CHECK(STEP(0, 5).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 5).note == 0);
+    step_down(1u << 7);
+    turn(0, 2);
+    CHECK(STEP(0, 7).note == 2);
+    CHECK(ui.last_note[0] == 2);
+    step_up(1u << 7);
+}
+
+static void test_last_note_joining_step_is_not_edited(void) {
+    ui.last_note[0] = 40;
+    enter_pattern_view();
+    step_down(1u << 10);
+    deltas[0] = 2;
+    step_down(1u << 3);                     // S03 joins in the update of the turn
+    CHECK(STEP(0, 10).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 10).note == 42);
+    CHECK(STEP(0, 3).flags == 0);
+    CHECK(STEP(0, 3).note == 0);
+    CHECK(ui.last_note[0] == 42);
+    step_up((1u << 10) | (1u << 3));
+}
+
+static void test_last_note_ignores_drums_velocity_and_clamped_turns(void) {
+    ui.last_note[0] = 50;
+    enter_pattern_view();
+    step_down(1u << 4);
+    turn(1, -10);                           // velocity only
+    CHECK(ui.last_note[0] == 50);
+    step_up(1u << 4);
+    pattern_set_step(&g_seq.patterns[0], 0, 8, 127, 100, STEP_FLAG_ACTIVE);
+    step_down(1u << 8);
+    turn(0, 5);                             // clamped: no note changed
+    CHECK(STEP(0, 8).note == 127);
+    CHECK(ui.last_note[0] == 50);
+    step_up(1u << 8);
+    turn(0, 4);                             // track 5: drum, drum_note 40
+    CHECK(ui.selected_track == 4);
+    step_down(1u << 3);
+    CHECK(STEP(4, 3).note == 0);
+    turn(0, 3);                             // a drum note turn
+    step_up(1u << 3);
+    CHECK(STEP(4, 3).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(4, 3).note == 43);
+    for (uint8_t t = 4; t < NUM_TRACKS; t++) CHECK(ui.last_note[t] == 60);
+    CHECK(ui.last_note[0] == 50);
+}
+
+static void test_last_note_drum_tap_takes_drum_note(void) {
+    enter_pattern_view();
+    turn(0, 4);
+    step_down(1u << 6);
+    step_up(1u << 6);
+    CHECK(STEP(4, 6).note == 40);
+    CHECK(ui.last_note[4] == 60);
+}
+
 static void render(void) {
     display_clear();
     ui_render();
@@ -2688,6 +2852,18 @@ int main(int argc, char **argv) {
     RUN(test_kit_hold_in_pattern_view_takes_no_encoder);
     RUN(test_pattern_view_switch_between_synth_and_kit_with_a_step_held);
     RUN(test_drop_step_gestures_forgets_kit_presses_and_holds);
+    RUN(test_last_note_starts_at_c4_in_the_session_view);
+    RUN(test_last_note_follows_a_turn_per_track);
+    RUN(test_last_note_seeds_a_pattern_view_tap);
+    RUN(test_last_note_seeds_the_step_edit_long_press);
+    RUN(test_step_edit_turn_sets_the_last_note);
+    RUN(test_last_note_two_held_empty_steps_turn_together);
+    RUN(test_last_note_does_not_touch_a_step_that_has_a_note);
+    RUN(test_last_note_comes_from_the_lowest_held_step);
+    RUN(test_last_note_zero_is_a_note);
+    RUN(test_last_note_joining_step_is_not_edited);
+    RUN(test_last_note_ignores_drums_velocity_and_clamped_turns);
+    RUN(test_last_note_drum_tap_takes_drum_note);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS the six base OLED screens render (the four kit screens: test_render_kit_*)");
