@@ -22,6 +22,10 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **Panic combo** — hold both encoder buttons to stop playback, drop gates, and send MIDI all-notes-off
 - **Grouped gate edges** — two-phase output; DAC and DIN MIDI transfers remain sequential
 - **MIDI output** — DIN-5 UART only, avoiding USB MIDI host scheduling jitter
+- **Note entry from a MIDI keyboard** — hold a step on the Pattern view and press
+  a key on a keyboard at the DIN input: the step takes the key's note and velocity
+- **Pads as a keyboard** — while a step of a SYNTH clip is held, the 64 pads are a
+  four-octave piano and a pad press sets the step's note, with no MIDI keyboard
 - **CV/Gate output** — 4 channels via MCP4822 DACs (1V/oct, 12-bit; default 0-2.048 V)
 - **96 PPQN** internal timing, **24 PPQN** MIDI Clock, 20–300 BPM
 - **Swing value** per pattern (playback timing pending)
@@ -46,7 +50,7 @@ DIN MIDI bytes are queued into a UART TX ring buffer and drained by UART0's TX i
 
 | Function | GPIOs | Notes |
 |----------|-------|-------|
-| MIDI TX/RX | 0, 1 | UART0 @ 31250 baud |
+| MIDI TX/RX | 0, 1 | UART0 @ 31250 baud; RX (J402, opto) takes a keyboard, see Live Controls |
 | OLED (SSD1309) | 2–6 | SPI0, 128×64 |
 | DAC (2× MCP4822) | 10–13 | SPI1, 4 CV channels |
 | Gate outputs | 14–17 | 3.3V logic (4 channels) |
@@ -89,9 +93,9 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-Fourteen CTest targets (thirteen test sources; `test_sync` is built twice, once per DAC
+Fifteen CTest targets (fourteen test sources; `test_sync` is built twice, once per DAC
 gain) cover pattern/song data (`test_pattern`, `test_song`), the kit lane
-helpers and settings (`test_kit`), MIDI/gate output at
+helpers and settings (`test_kit`), the MIDI input parser (`test_midi_in`), MIDI/gate output at
 both DAC gains (`test_sync`, `test_sync_gain2`), the real timer/transport code
 (`test_playback`), flash storage (`test_storage`), the Session view
 (`test_session`), the LED frame builder (`test_led_frame`), the MCP23017 key
@@ -186,6 +190,46 @@ buttons edit it.
   or in the step editor left on the lowest step it changed. Steps that already
   have a note keep it, and DRUM and kit tracks do not use it. It is not saved.
   Holding empty steps and turning therefore moves them relative to it.
+- **MIDI keyboard** on the DIN input (J402), any channel; notes only, no
+  control change, pitch bend or clock. **Hold a step in the Pattern view and
+  press a key:** the step is switched on if it was off and takes the key's
+  note (SYNTH tracks) and velocity; two held steps take the same key, and a step
+  that a key wrote to is not toggled on release. In the step editor the same
+  works while the edited step's button is held (the step is not switched on or
+  off). On a DRUM track the key sets the velocity only. **A key with no step
+  held** sounds through the track being edited, on its MIDI channel (the
+  focused track in the Session view, the configured one in track config), and
+  becomes that track's last note, so the next steps switched on start there. A
+  kit track passes the keys to its channel and nothing else. A key is released
+  on the channel it started on, whatever the focus does meanwhile. At most half
+  of the output queue is used by keys: a key pressed while it is that full is
+  dropped, which cannot stop the sequencer. Keys are told apart by pitch, so
+  two keys of one pitch on different keyboard channels count as one. A key lost
+  at the UART (not counted) can give one wrong note; unplugging a keyboard
+  with a key down leaves the note sounding until Panic. A keyboard's All Notes
+  Off and All Sound Off release the notes it started, and so does a flash save
+  or load.
+- **Pads as a keyboard.** While a step of a SYNTH clip is held in the Pattern
+  view (or the edited step's button in the step editor), the pads stop launching
+  clips and are a keyboard: a pad press does what a key of the MIDI keyboard does
+  (the held step is switched on if it was off and takes the note, the note is
+  sounded on the track's channel), except that the velocity is always 100 and a
+  step's own velocity is left alone. All eight columns are keys of the track being
+  edited. Rows are paired from the bottom: in each pair the lower row is the white
+  keys and the upper row the black keys, and the pairs are consecutive octaves.
+  The window is fixed when the first step is held: the held step's octave (the
+  track's last note for an empty step) is the second pair from the bottom, one
+  octave below and two above, and it does not move until every step is let go.
+
+  | Column | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+  |---|---|---|---|---|---|---|---|---|
+  | lower row (white) | C | D | E | F | G | A | B | C |
+  | upper row (black) | - | C# | D# | - | F# | G# | A# | - |
+
+  Lights: white keys are the track's colour at half level, black keys dim, the pads
+  with no note are off, and every pad of the held step's note is white at full. In
+  the Session view, on DRUM and kit cells and with no step held, the pads launch
+  and copy as before. A pad released after its step still ends its note.
 - Hold both encoder buttons for Panic: it stops playback and returns to the
   Session view. Release both before issuing another command; keys held through
   the panic or pressed while it is held do nothing afterwards.
@@ -295,7 +339,8 @@ src/
   sequencer.c       — Core 1 engine, timer ISR, transport, launch quantization
   pattern.c         — Pattern data manipulation
   song.c            — Song editing, track mutes
-  midi_out.c        — MIDI UART, buffered output, running status
+  midi_out.c        — MIDI UART, buffered output, running status, input ring
+  midi_in.c         — Parser for the bytes of the DIN input
   kit.c             — Kit lane helpers, settings, glyphs
   cv_gate.c         — MCP4822 DAC + GPIO gate control
   display.c         — OLED drawing layer
@@ -316,6 +361,7 @@ test/
   test_pattern.c    — Pattern logic tests
   test_kit.c        — Kit lane, settings and glyph helpers
   test_encoder.c    — Encoder clicks and detent-rate acceleration
+  test_midi_in.c    — MIDI input parser
   test_sync.c       — Synchronization layer tests
   test_song.c       — Song mode tests
   test_playback.c   — Timer, transport, launch quantization, note and MIDI
@@ -349,11 +395,15 @@ test/
 - [x] USB MIDI removed by design
 - [x] Kit track: 909 over DIN MIDI, 12 lanes, velocity levels, flams (bench items
       in [HARDWARE_STATUS.md](HARDWARE_STATUS.md)), save format v6
+- [x] Note entry from a MIDI keyboard: step + key, pass-through otherwise (host
+      tests only; the input circuit is a bench item in [HARDWARE_STATUS.md](HARDWARE_STATUS.md))
 - [ ] MIDI clock sync (external)
 
 ## Known Issues
 
 - The kit feature is not bench verified; see [HARDWARE_STATUS.md](HARDWARE_STATUS.md).
+- The MIDI keyboard input is not bench verified (the H11L1 input circuit is not
+  validated); see [HARDWARE_STATUS.md](HARDWARE_STATUS.md).
 
 ## License
 

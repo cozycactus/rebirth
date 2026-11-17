@@ -6,7 +6,7 @@
 | --- | --- |
 | Core 1 timer IRQ | 96 PPQN timing, playheads, note durations, MIDI production, CV/gate output |
 | Core 0 main loop | Panel I2C polling (key matrix scan on two MCP23017, one bus step per pass; MCP23017 step buttons and LEDs), PLAY and encoders, edits, transport commands and launches; per ~33 ms frame: one transport snapshot, the RGB frame build and its LED DMA start, the OLED; stopped-only storage |
-| Core 0 UART IRQ | Drain pending MIDI bytes into UART0, one byte per interrupt (hardware FIFO off) |
+| Core 0 UART IRQ | First read every received byte into the input ring, then drain pending MIDI bytes into UART0, one byte per interrupt (hardware FIFO off) |
 
 The playback lock serializes the complete timer handler with Start, Stop,
 Continue, mode changes, selection and Panic. Stop/Panic return after any
@@ -201,6 +201,50 @@ stops playback and sends All Sound Off / All Notes Off instead of continuing
 with a truncated message. Panic discards software-queued output; hardware FIFO
 bytes precede the cleanup messages.
 
+### MIDI input
+
+UART0's receive interrupt is on wherever the TX interrupt enable is written. The
+handler (Core 0, in RAM) first reads every readable byte into a 64-byte ring,
+without the TX lock, and only then drains the TX queue. A byte is read even when
+the ring is full: with the FIFO off the interrupt stays asserted until the data
+register is read; the byte is counted in `midi_in_dropped()` and lost. The main
+loop (`ui_update()`, Core 0) takes at most 48 bytes a pass, before the panic
+check, and feeds them to the pure parser in `midi_in.c`. The ring has one
+producer and one consumer, both on Core 0, so it has no lock, and nothing new
+runs in the timer interrupt.
+
+A key is passed through to the track being edited with `midi_try_send_bytes_capped()`
+only, as the ordinary sends set the overflow flag that stops the transport: a
+Note On (with the Note Off of a retrigger) leaves only if the queue then holds
+at most half its capacity, a Note Off may fill it and, if refused, stays pending
+and is retried every pass. `thru_channel[note]` remembers the channel a note
+started on, and its Note Off goes there. The table is released entirely at a
+gap, on a keyboard's All Notes Off or All Sound Off, and before a flash save or
+load. A gap (the dropped count changed, or a save or load, which switches
+interrupts off) empties the ring and resets the parser, so a running status
+cannot turn the bytes after a loss into a wrong note. A panic clears the table
+(All Notes Off has gone out) and discards the input while it is latched.
+
+### Pads as a keyboard
+
+While a step is held (Pattern view, SYNTH cell, `ui.grid_hold & steps->held`, or
+the edited step's button in Step Edit), `update_pad_keys()` turns the pads into a
+keyboard. It takes one snapshot per pass, before the panel events (on, track, location,
+reference step), that the pad routing and the lights both read, and fixes the window
+`ui.pad_keys_base` only when the keyboard turns on. A step button that a key has
+written under in the step editor does not toggle its step on a long press. A pad press then goes through
+`handle_midi_event()` as a Note On of velocity 100 that leaves the step's velocity
+alone, so the write, the pass-through table and the capped sends are the MIDI
+keyboard's own; the pad is remembered in `ui.pad_key[track][row]` (note + 1) and is
+never recorded as a copy source. The release uses that memory, not whether the
+keyboard is still on, so a step let go first cannot hang the note. The panel layer
+can lose a release without an event, so at the end of every pass a remembered key
+whose pad `panel_input_pad_down()` no longer reports, or whose panel generation changed since its press, is released; a panic and a
+flash save or load only forget the keys, their notes having been released. The
+layout is `pad_key_note()` in `led_frame.c`, shared by the UI and the frame
+builder; `led_state_t.keys` makes `led_frame_build()` light the pads from it.
+Nothing runs in the timer interrupt and no lock is added.
+
 After an overrun the timer re-arms a future deadline, preventing a past alarm
 from stalling until the 32-bit counter wraps. It emits no catch-up burst.
 Jitter snapshots are coherent; tempo changes do not count the new period as
@@ -242,7 +286,7 @@ loss needs a future two-slot/journal design.
 
 | Function | GPIO / Interface |
 | --- | --- |
-| DIN MIDI TX, reserved RX | 0, 1; UART0, 31,250 baud, 8N1 |
+| DIN MIDI TX and RX | 0, 1; UART0, 31,250 baud, 8N1; RX is J402, an H11L1 opto |
 | SSD1309 OLED | 2 SCK, 3 MOSI, 4 CS, 5 DC, 6 reset; SPI0 |
 | Jitter probe | 7 |
 | I2C0 bus | 8 SDA, 9 SCL; 400 kHz; external pull-ups (2.2-4.7 kOhm), internal ones disabled |

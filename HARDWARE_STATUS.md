@@ -1,6 +1,6 @@
 # Hardware Status
 
-Last updated: 2026-11-16 (kit track added)
+Last updated: 2026-11-17 (MIDI keyboard input added)
 
 ## Migrating An Existing Build
 
@@ -113,6 +113,12 @@ retried every 100 ms); without the LED chain GPIO 27 drives nothing.
   base commit (see JITTER_MEASUREMENT.md, Session panel load case, and the bench
   item below).
 
+- MIDI keyboard input (host tests and the firmware build): the parser, the receive ring
+  with the handler reading before the TX lock and also with the ring full, the
+  interrupt enables, and the keys in the UI over a fake UART (pass-through with
+  capped sends, step and Step Edit writes, gaps, flash save/load, panic). The
+  fake UART models a queue, not the PL011's one-byte holding register.
+
 ## Needs Bench Verification
 
 - Timer ISR jitter under dense MIDI/CV output using GPIO 7 and on-device stats.
@@ -172,6 +178,27 @@ measured first with the same densest pattern load.
   (`ENC_ACCEL_FAST_MS`) count x4 from the fifth and x8 from the eighth, for
   numbers only. At full speed the tempo moves 0.8 BPM per click.
 
+### MIDI keyboard input
+
+None of these has been run on hardware; every item is `NOT VERIFIED`. The input
+circuit (J402, an H11L1 opto, GPIO 1) has not been validated.
+
+- `NOT VERIFIED` The opto's output at the Pico pin with a keyboard connected: a
+  clean 3.3 V logic level, idle high, 31,250 baud, correct polarity.
+- `NOT VERIFIED` No byte is lost while the display is redrawn and while a set
+  plays (`midi_in_dropped()` stays 0 with a keyboard playing dense chords; the
+  ring is 64 bytes and the redraw can stall the main loop).
+- `NOT VERIFIED` The receive interrupt does not fire continuously (the UI loop
+  time and the GPIO 7 jitter with the keyboard idle and playing).
+- `NOT VERIFIED` The receive path is in RAM in the map file: the UART interrupt
+  handler and the ring's push (inlined into it).
+- `NOT VERIFIED` A byte lost in the UART itself (overrun, framing) is not
+  detected, as `uart_getc()` hides the error flags; it can give one wrong note.
+- `NOT VERIFIED` A keyboard unplugged with a key down leaves the note sounding
+  (Active Sensing is not monitored); Panic silences it.
+- `NOT VERIFIED` The 320 us deadline of the receive interrupt against the
+  transmit drain and the display's interrupts-off sections.
+
 ### Session panel
 
 - Press-to-event latency, for single keys and for chords (target 15 ms;
@@ -207,6 +234,6 @@ measured first with the same densest pattern load.
 
 ## Not Implemented Yet
 
-- External MIDI clock sync input.
+- External MIDI clock sync input. The DIN input takes notes only; Clock, Start, Stop and Continue are ignored.
 - Swing timing in playback. Pattern data stores the swing value, but the sequencer still runs straight timing.
 - Preservation of the previous save across power loss (storage is a single region).

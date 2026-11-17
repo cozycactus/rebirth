@@ -523,6 +523,144 @@ static void test_full_queue_drains_free_uart_before_dropping(void) {
     CHECK(message_boundary(fake_midi_length));
 }
 
+// ─── The input: the UART interrupt receives into a ring ──────────
+
+// The handler must have read every received byte before it takes the TX lock:
+// core 1 can hold that lock, and the UART keeps only one byte meanwhile.
+static void assert_rx_drained(spin_lock_t *lock) {
+    (void)lock;
+    CHECK(fake_uart_rx_pending() == 0);
+}
+
+static void rx_push(const uint8_t *bytes, unsigned count) {
+    fake_uart_rx_push(bytes, count);
+    fake_before_lock = assert_rx_drained;
+    fake_irq_handlers[UART0_IRQ]();
+    fake_before_lock = NULL;
+}
+
+static void test_midi_in_irq_stays_enabled(void) {
+    CHECK(fake_uart_rx_irq);                // after midi_init()
+    CHECK(!fake_uart_tx_irq);
+    fake_uart_writable = false;
+    midi_send_note_on(0, 60, 100);          // queued, the transmit interrupt wakes
+    CHECK(fake_uart_tx_irq);
+    CHECK(fake_uart_rx_irq);
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();         // a drain that empties the queue
+    CHECK(!fake_uart_tx_irq);
+    CHECK(fake_uart_rx_irq);
+    fake_uart_writable = false;
+    midi_send_note_on(0, 61, 100);
+    midi_clear_output_queue();
+    CHECK(!fake_uart_tx_irq);
+    CHECK(fake_uart_rx_irq);
+    fake_uart_writable = false;
+    midi_send_note_on(0, 62, 100);
+    sequencer_panic();                      // All Notes Off wait for the busy UART
+    CHECK(fake_uart_tx_irq);
+    CHECK(fake_uart_rx_irq);
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(!fake_uart_tx_irq);
+    CHECK(fake_uart_rx_irq);
+}
+
+static void test_midi_in_bytes_come_out_in_order(void) {
+    uint8_t byte = 0;
+    CHECK(!midi_in_read(&byte));
+    const uint8_t bytes[] = {0x90, 60, 100, 0x80, 60, 0};
+    rx_push(bytes, sizeof(bytes));
+    CHECK(fake_uart_rx_pending() == 0);
+    for (unsigned i = 0; i < sizeof(bytes); i++) {
+        CHECK(midi_in_read(&byte));
+        CHECK(byte == bytes[i]);
+    }
+    CHECK(!midi_in_read(&byte));
+    CHECK(midi_in_dropped() == 0);
+}
+
+static void test_midi_in_full_ring_keeps_the_first_and_counts_the_rest(void) {
+    uint8_t bytes[MIDI_IN_RING_SIZE + 10];
+    for (unsigned i = 0; i < sizeof(bytes); i++) bytes[i] = (uint8_t)i;
+    rx_push(bytes, sizeof(bytes));
+    CHECK(fake_uart_rx_pending() == 0);     // every byte was read, the full ring too
+    CHECK(midi_in_dropped() == 10);
+    uint8_t byte = 0;
+    for (unsigned i = 0; i < MIDI_IN_RING_SIZE; i++) {
+        CHECK(midi_in_read(&byte));
+        CHECK(byte == i);
+    }
+    CHECK(!midi_in_read(&byte));
+    // Reading made room again.
+    const uint8_t more[] = {0x90, 64, 90};
+    rx_push(more, sizeof(more));
+    CHECK(midi_in_dropped() == 10);
+    for (unsigned i = 0; i < sizeof(more); i++) {
+        CHECK(midi_in_read(&byte));
+        CHECK(byte == more[i]);
+    }
+    CHECK(!midi_in_read(&byte));
+}
+
+static void test_midi_in_ring_wraps_over_several_rounds(void) {
+    uint8_t next_in = 0, next_out = 0, byte = 0;
+    for (unsigned round = 0; round < 7; round++) {
+        uint8_t chunk[MIDI_IN_RING_SIZE - 5 + (round % 3)];
+        for (unsigned i = 0; i < sizeof(chunk); i++) chunk[i] = next_in++;
+        rx_push(chunk, sizeof(chunk));
+        for (unsigned i = 0; i < sizeof(chunk); i++) {
+            CHECK(midi_in_read(&byte));
+            CHECK(byte == next_out++);
+        }
+        CHECK(!midi_in_read(&byte));
+    }
+    CHECK(midi_in_dropped() == 0);
+    // Exactly full, then one more.
+    uint8_t full[MIDI_IN_RING_SIZE + 1];
+    for (unsigned i = 0; i < sizeof(full); i++) full[i] = (uint8_t)(0x40 + i);
+    rx_push(full, sizeof(full));
+    CHECK(midi_in_dropped() == 1);
+    for (unsigned i = 0; i < MIDI_IN_RING_SIZE; i++) {
+        CHECK(midi_in_read(&byte));
+        CHECK(byte == full[i]);
+    }
+    CHECK(!midi_in_read(&byte));
+}
+
+static void test_midi_in_flush_empties_the_ring_and_keeps_the_count(void) {
+    uint8_t bytes[MIDI_IN_RING_SIZE + 3] = {0};
+    rx_push(bytes, sizeof(bytes));
+    CHECK(midi_in_dropped() == 3);
+    midi_in_flush();
+    uint8_t byte = 0;
+    CHECK(!midi_in_read(&byte));
+    CHECK(midi_in_dropped() == 3);
+    const uint8_t more[] = {0x91, 1, 2};
+    rx_push(more, sizeof(more));
+    CHECK(midi_in_read(&byte) && byte == 0x91);
+}
+
+static void test_midi_in_does_not_change_what_is_transmitted(void) {
+    fake_uart_writable = false;
+    midi_send_note_on(0, 60, 100);
+    midi_send_note_on(0, 62, 90);
+    midi_send_note_off(0, 60);
+    const uint8_t input[] = {0x90, 0x40, 0x7F, 0xF8, 0x40, 0x00};
+    fake_uart_rx_push(input, sizeof(input));    // arrives while the output waits
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    static const uint8_t sent[] = {0x90, 60, 100, 62, 90, 0x80, 60, 0};   // running status
+    CHECK(fake_midi_length == sizeof(sent));
+    CHECK(memcmp(fake_midi, sent, sizeof(sent)) == 0);
+    CHECK(fake_uart_rx_pending() == 0);
+    uint8_t byte = 0;
+    for (unsigned i = 0; i < sizeof(input); i++) {
+        CHECK(midi_in_read(&byte));
+        CHECK(byte == input[i]);
+    }
+}
+
 static void play_song_entries(unsigned entries) {
     for (unsigned entry = 0; entry < entries; entry++) {
         for (unsigned step = 0; step < STEPS_PER_PATTERN; step++) next_step();
@@ -2354,6 +2492,12 @@ int main(void) {
     unsigned tests = 0;
     seq_lock_init();
     RUN(test_clock_rate_and_start_order);
+    RUN(test_midi_in_irq_stays_enabled);
+    RUN(test_midi_in_bytes_come_out_in_order);
+    RUN(test_midi_in_full_ring_keeps_the_first_and_counts_the_rest);
+    RUN(test_midi_in_ring_wraps_over_several_rounds);
+    RUN(test_midi_in_flush_empties_the_ring_and_keeps_the_count);
+    RUN(test_midi_in_does_not_change_what_is_transmitted);
     RUN(test_stopped_selection_survives_start);
     RUN(test_independent_track_queues);
     RUN(test_shorten_wraps_without_skipping_start);
