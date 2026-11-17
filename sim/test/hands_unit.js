@@ -279,6 +279,213 @@ section('rig', () => {
   assert.ok(rig.pad('middle').distanceTo(want) < 1e-6, 'setRoot scales the model 0.92 into page units');
 });
 
+// ─── fit: fingertips on controls, the pinch, clearance ───────────
+// The score's hardest moments: a press, four held steps across seven keys,
+// a clip copy, a MUTE pair, the pinches. Each fit is within its limit, and
+// after clear() no clearance vertex is in a control or below the plate and
+// the contact points are still on their targets.
+section('fit', () => {
+  const HandRig = require(path.join(web, 'handrig.js'));
+  const { PANEL } = require(path.join(web, 'handplan.js'));
+  require(path.join(web, 'three.js'));
+  const T = globalThis.THREE;
+  const MM = PANEL.UNITS_PER_MM, D2R = Math.PI / 180;
+  const UP = new T.Vector3(0, 0, 1);
+  const fmt = o => JSON.stringify(o, (k, x) => (typeof x === 'number' ? +x.toFixed(2) : x));
+  // A press lands on the control's centre raised to its top along the eye ray.
+  const top = a => {
+    const c = PANEL.control(a), p = PANEL.onPanel(c.u, c.v, c.topMm);
+    return new T.Vector3(p.x, p.y, p.z);
+  };
+  const aims = (op, key, list) => {
+    const out = {};
+    for (const [finger, n] of list) out[finger] = top({ op, [key]: n });
+    return out;
+  };
+  const centre = targets => {
+    const c = new T.Vector3(), list = Object.values(targets);
+    for (const p of list) c.add(p);
+    return c.multiplyScalar(1 / list.length);
+  };
+  const at = (rig, name) => rig.bone(name).getWorldPosition(new T.Vector3());
+  const yawOf = d => Math.atan2(-d.x, d.y) / D2R;
+  // A pinch's contacts face the knob's axis.
+  const knob = enc => {
+    const c = PANEL.control({ op: 'encsw', enc });
+    return { axis: new T.Vector3(c.u, -c.v, 0) };
+  };
+
+  // Fitted within limitMm; after clear() no violations and the contact
+  // points (toward: the contact direction, default down) still within
+  // limitMm of their targets.
+  const settle = (what, rig, targets, res, limitMm, toward) => {
+    assert.ok(res.ok, what + ': not fitted: ' + fmt(res.residualMm));
+    assert.deepStrictEqual(Object.keys(res.residualMm).sort(), Object.keys(targets).sort(), what + ': residuals');
+    for (const f in targets) {
+      assert.ok(res.residualMm[f] <= limitMm, what + ': the ' + f + ' is ' + fmt(res.residualMm[f]) + ' mm off');
+    }
+    rig.clear(Object.keys(targets));
+    const left = rig.violations();
+    assert.deepStrictEqual(left, [], what + ': after clear: ' + fmt(left.slice(0, 5)));
+    for (const f in targets) {
+      const d = rig.contact(f, toward).distanceTo(targets[f]) / MM;
+      assert.ok(d <= limitMm, what + ': after clear the ' + f + ' contact is ' + fmt(d) + ' mm off');
+    }
+  };
+  // The two hands apart: their palms' boxes disjoint, the left wrist left.
+  const apart = (what, left, right) => {
+    const box = rig => new T.Box3().setFromArray(rig.skinned(rig.PALM));
+    assert.ok(!box(left).intersectsBox(box(right)), what + ': the palms overlap');
+    assert.ok(at(left, 'Wrist').x < at(right, 'Wrist').x, what + ': the left wrist is not left of the right one');
+  };
+
+  // place(): a level right hand, fingers away from the player, its index
+  // contact 2 mm below the plate. The palm faces down, the wrist points
+  // along dir, and violations() reports the sunk vertices, deepest first.
+  const flat = HandRig.create('right');
+  const sunk = new T.Vector3(700, -700, -2 * MM);
+  flat.place('index', sunk, new T.Vector3(0, 1, 0));
+  assert.ok(flat.contact('index').distanceTo(sunk) < 1e-6, 'place() puts the contact on its target');
+  const along = new T.Vector3().setFromMatrixColumn(flat.bone('Wrist').matrixWorld, 1).normalize();
+  assert.ok(along.y > 0.999, 'place(): the wrist points along dir: ' + fmt(along));
+  const radial = at(flat, 'Index_Proximal').sub(at(flat, 'Little_Proximal')).normalize();
+  const palm = radial.clone().cross(along).normalize();
+  assert.ok(palm.z < -0.95, 'place(): the right palm faces down: ' + fmt(palm));
+  const below = flat.violations();
+  assert.ok(below.length > 0, 'a hand below the plate violates');
+  below.forEach((x, i) => {
+    assert.ok(flat.CLEARANCE.includes(x.vertex) && x.mm > 0, 'violation ' + fmt(x));
+    assert.ok(i === 0 || below[i - 1].mm >= x.mm, 'violations deepest first: ' + fmt(below.slice(0, i + 1)));
+  });
+  assert.ok(below[0].mm >= 1.9, 'the deepest violation is ' + fmt(below[0]) + ' mm');
+  // The contact point is the fingertip's deepest point along its direction.
+  for (const toward of [undefined, new T.Vector3(0, 1, 0), knob(0)]) {
+    const c = flat.contact('index', toward), tip = at(flat, 'Index_Tip');
+    assert.ok(c.distanceTo(tip) < 15 * MM, 'the contact is on the fingertip: ' + fmt(c.distanceTo(tip) / MM) + ' mm');
+  }
+  assert.ok(flat.contact('index', new T.Vector3(0, 1, 0)).y > flat.contact('index').y - 1e-9, 'a contact ahead');
+
+  // The pose library: the prototype's, and the pinch.
+  const P = HandRig.POSES;
+  assert.deepStrictEqual(P.point,
+    { thumb: [12, 14, 12], index: [0, 6, 14, 8], middle: [3, 62, 78, 38], ring: [4, 68, 80, 38], pinky: [5, 72, 80, 38] });
+  assert.deepStrictEqual(P.fist,
+    { thumb: [18, 26, 26], index: [5, 82, 95, 55], middle: [5, 85, 95, 55], ring: [6, 88, 95, 55], pinky: [8, 90, 95, 55] });
+  assert.deepStrictEqual(P.lift,
+    { thumb: [-25, -20, 0], index: [0, 4, 60, 38], middle: [1, 4, 62, 38], ring: [2, 6, 62, 38], pinky: [3, 8, 60, 38] });
+  assert.deepStrictEqual(P.relax,
+    { thumb: [5, 8, 10], index: [0, 18, 26, 14], middle: [1, 22, 30, 16], ring: [2, 25, 32, 16], pinky: [3, 28, 32, 16] });
+  assert.deepStrictEqual(P.pinch,
+    { thumb: [20, 20, 10], index: [0, 25, 30, 15], middle: [5, 85, 95, 55], ring: [6, 88, 95, 55], pinky: [8, 90, 95, 55] });
+
+  // armDir(): from the side's shoulder toward the target, pitched 20° down.
+  const right = HandRig.create('right'), left = HandRig.create('left');
+  for (const [rig, sx] of [[right, 1050], [left, 350]]) {
+    const target = new T.Vector3(600, -800, 30), d = rig.armDir(target);
+    assert.ok(Math.abs(d.length() - 1) < 1e-9 && Math.abs(d.z + Math.sin(20 * D2R)) < 1e-9, rig.side + ': armDir pitch');
+    const tx = target.x - sx, ty = target.y + 2000;
+    assert.ok(Math.abs(tx * d.y - ty * d.x) < 1e-6 && tx * d.x + ty * d.y > 0, rig.side + ': armDir heading');
+  }
+
+  // One fingertip: the right index on pad (6, 4). The press keeps the look
+  // of the approved prototype, which put the load-time pad on the target
+  // with the wrist along dir: the root is within 8 mm and 5° of that (the
+  // pad and the contact are about 6 mm apart on the same fingertip).
+  const pad64 = top({ op: 'pad', track: 6, row: 4 }), dir64 = right.armDir(pad64);
+  const pressed = right.place('index', pad64, dir64);
+  const wrist = new T.Vector3().setFromMatrixColumn(right.bone('Wrist').matrixWorld, 1).normalize();
+  assert.ok(wrist.angleTo(dir64) <= 5 * D2R, 'press: the wrist turned ' + fmt(wrist.angleTo(dir64) / D2R) + '° off dir');
+  assert.ok(right.pad('index').distanceTo(pad64) <= 8 * MM,
+    'press: the root moved ' + fmt(right.pad('index').distanceTo(pad64) / MM) + ' mm from the prototype frame');
+  settle('right index on pad (6, 4)', right, { index: pad64 }, pressed, 1);
+
+  // The left hand holds steps 2, 4, 6, 8 (four keys across seven) while the
+  // right one turns TRACK at the edge of its twist window.
+  const held = aims('step', 'index', [['pinky', 1], ['ring', 3], ['middle', 5], ['index', 7]]);
+  settle('left hand on steps 1 3 5 7', left, held, left.fit(held, { dir: left.armDir(centre(held)) }), 1);
+  const track = PANEL.control({ op: 'encsw', enc: 0 });
+  const pinched = right.pinch(0, 35);
+  settle('right pinch on TRACK at 35°', right, pinched.targets, pinched, 2, knob(0));
+  for (const f of ['thumb', 'index']) {
+    const p = pinched.targets[f];
+    assert.ok(Math.abs(Math.hypot(p.x - track.u, p.y + track.v) / MM - 10) < 1e-6 && Math.abs(p.z / MM - 12) < 1e-6,
+      'pinch: the ' + f + ' target is on the rim, 12 mm up: ' + fmt(p));
+  }
+  apart('left steps, right pinch', left, right);
+
+  // The twist turns the grip and the hand with it, clockwise seen from
+  // above as the knob turns up: -35° and +35° are 70° apart.
+  const grip = t => Math.atan2(t.index.y - t.thumb.y, t.index.x - t.thumb.x) / D2R;
+  const rig0 = HandRig.create('right'), rig35 = HandRig.create('right');
+  const straight = rig0.pinch(0, 0), back35 = rig35.pinch(0, -35);
+  // At twist 0 the thumb is nearer the player than the index, and for a
+  // right hand to its right (the grip turned toward the thumb's side).
+  assert.ok(straight.targets.thumb.y < straight.targets.index.y && straight.targets.thumb.x > straight.targets.index.x,
+    'right pinch: thumb near and right');
+  assert.ok(Math.abs(grip(straight.targets) - grip(pinched.targets) - 35) < 1e-6, 'pinch: twist 35° is clockwise');
+  settle('right pinch on TRACK at -35°', rig35, back35.targets, back35, 2, knob(0));
+  const twist = yawOf(back35.dir) - yawOf(pinched.dir);
+  assert.ok(Math.abs(twist - 70) <= 5, 'pinch: the roots at -35° and 35° are ' + fmt(twist) + '° apart');
+
+  // The left hand still on its steps, the right index presses pad (6, 5).
+  const pad65 = top({ op: 'pad', track: 6, row: 5 });
+  settle('right index on pad (6, 5), left on steps', right, { index: pad65 },
+    right.place('index', pad65, right.armDir(pad65)), 1);
+  apart('left steps, right pad (6, 5)', left, right);
+
+  // The right hand holds steps 9, 11, 12, 15: two adjacent keys, then a gap
+  // of two.
+  const wide = aims('step', 'index', [['index', 8], ['middle', 10], ['ring', 11], ['pinky', 14]]);
+  settle('right hand on steps 8 10 11 14', right, wide, right.fit(wide, { dir: right.armDir(centre(wide)) }), 1);
+
+  // A clip copy: the index holds pad (2, 0), the thumb presses pad (2, 3);
+  // the hand turns so that the thumb comes below the index.
+  const copy = { index: top({ op: 'pad', track: 2, row: 0 }), thumb: top({ op: 'pad', track: 2, row: 3 }) };
+  settle('right clip copy in column 2', right, copy,
+    right.fit(copy, { dir: right.armDir(centre(copy)), freeYaw: true }), 1);
+
+  // Two MUTE keys two tracks apart with one hand.
+  const mutes = aims('mute', 'track', [['index', 0], ['ring', 2]]);
+  settle('right MUTE 0 and 2', right, mutes, right.fit(mutes, { dir: right.armDir(centre(mutes)) }), 1);
+
+  // The left hand on VALUE: the mirror image of the right grip.
+  const value = left.pinch(1, 0);
+  settle('left pinch on VALUE at 0°', left, value.targets, value, 2, knob(1));
+  assert.ok(value.targets.thumb.y < value.targets.index.y && value.targets.thumb.x < value.targets.index.x,
+    'left pinch: thumb near and left (the mirror image)');
+
+  // The solve turns the root: the index and middle contacts of the fit's
+  // own seed (STRAIGHT on the touching fingers, the others as in point),
+  // 20 mm above the plate, spread to 40 mm apart and turned 30° counter-
+  // clockwise about their midpoint, heights kept. Translating the hand
+  // leaves a zero mean residual.
+  const turn = HandRig.create('right');
+  const d0 = turn.armDir(new T.Vector3(700, -900, 0));
+  turn.place('index', new T.Vector3(700, -900, 20 * MM), d0);
+  turn.setCurls(Object.assign({}, P.point, { index: HandRig.STRAIGHT.index, middle: HandRig.STRAIGHT.middle }));
+  const seedPair = { index: turn.contact('index'), middle: turn.contact('middle') };
+  const mid = seedPair.index.clone().add(seedPair.middle).multiplyScalar(0.5), turned = {};
+  for (const f in seedPair) {
+    const off = seedPair[f].clone().sub(mid);
+    turned[f] = off.multiplyScalar(20 * MM / off.length()).applyAxisAngle(UP, 30 * D2R).add(mid);
+  }
+  const res = turn.fit(turned, { dir: d0 });
+  settle('two targets turned 30°', turn, turned, res, 1);
+  assert.ok(res.yawDeg >= 20 && res.yawDeg <= 40, 'the root turned ' + fmt(res.yawDeg) + '° for a 30° turn');
+
+  // The palm rises: the index on bare plate left of the pads with the hand
+  // pointing 10° up puts the palm under the plate; clear() lifts the root
+  // and refits the index, which stays on its target.
+  const low = HandRig.create('right'), bare = new T.Vector3(150, -700, 0);
+  const flatDir = low.armDir(bare).setZ(0).normalize();
+  const lowRes = low.place('index', bare, flatDir.multiplyScalar(Math.cos(10 * D2R)).setZ(Math.sin(10 * D2R)));
+  assert.ok(low.violations().some(x => low.PALM.includes(x.vertex)), 'the palm starts under the plate');
+  const z0 = low.root.matrix.elements[14];
+  settle('index on bare plate, the hand pointing up', low, { index: bare }, lowRes, 1);
+  assert.ok(low.root.matrix.elements[14] > z0 + 10 * MM, 'clear() lifted the root ' +
+    fmt((low.root.matrix.elements[14] - z0) / MM) + ' mm');
+});
+
 for (const { name, fn } of sections) {
   try {
     fn();
