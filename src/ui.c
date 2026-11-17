@@ -98,6 +98,28 @@ typedef struct {
     uint8_t  pad_location[NUM_TRACKS][PAD_ROWS];
     uint32_t pad_generation[NUM_TRACKS][PAD_ROWS];
 
+    // The pads as a keyboard while a step is held: one snapshot per pass, taken
+    // by update_pad_keys(). The pad routing of the pass and the frame of the
+    // lights both read it; nothing works out "is the keyboard on" again later.
+    // It holds whether the keyboard is on, the track and location it writes
+    // to, the step whose note it marks and (in the step editor) whether that
+    // is the edited step, and the C of its bottom-left pad, which is fixed when
+    // the keyboard turns on.
+    bool     pad_keys_on;
+    bool     pad_keys_edit;
+    uint8_t  pad_keys_base;
+    uint8_t  pad_keys_track;
+    uint8_t  pad_keys_location;
+    uint8_t  pad_keys_step;
+    // For each pad pressed as a key the note it stands for plus one (0 = not a
+    // key) and the panel layer's generation then. A key is released by what
+    // was remembered at its press, not by whether the keyboard is still on.
+    uint8_t  pad_key[NUM_TRACKS][PAD_ROWS];
+    uint32_t pad_key_generation[NUM_TRACKS][PAD_ROWS];
+    // Steps a key has written to during the hold of their button in the step
+    // editor: that hold is a modifier, so its long press does not toggle.
+    uint16_t key_wrote;
+
     // The pitch last entered on each track: a new SYNTH step starts there.
     // UI RAM only; not saved, not cleared by Stop, Panic or load.
     uint8_t last_note[NUM_TRACKS];
@@ -152,6 +174,7 @@ static void drop_step_gestures(void) {
     ui.step_short_pending = 0;
     ui.grid_hold = 0;
     ui.grid_tap_pending = 0;
+    ui.key_wrote = 0;
     for (uint8_t enc = 0; enc < NUM_ENCODERS; enc++) {
         ui.grid_enc_target[enc] = 0;
         ui.grid_enc_long_done[enc] = 0;
@@ -159,9 +182,12 @@ static void drop_step_gestures(void) {
 }
 
 // Forgets every pad hold: after a panic and after a save or load, whatever
-// its result, a copy source has to be pressed again.
+// its result, a copy source has to be pressed again. The notes of pad keys
+// have been released by then (the pass-through table is handled there), so
+// only the memory of them goes.
 static void drop_pad_holds(void) {
     memset(ui.pad_seen, 0, sizeof(ui.pad_seen));
+    memset(ui.pad_key, 0, sizeof(ui.pad_key));
 }
 
 // Toggles one step. A SYNTH step that is switched on with no stored note
@@ -274,9 +300,10 @@ static void midi_in_cell(uint8_t *track, uint8_t *location) {
 
 // Writes a key into the steps in `mask`: one lock, then the playback refresh. A step that
 // is off is switched on first when `activate` (Pattern view), as with the encoders. A
-// DRUM step keeps its stored note.
+// DRUM step keeps its stored note. A pad key has no velocity of its own, so it passes
+// set_velocity false and leaves the step's velocity as it is.
 static void write_key_to_steps(uint8_t track, uint8_t location, uint16_t mask, bool activate,
-                               uint8_t note, uint8_t velocity) {
+                               uint8_t note, uint8_t velocity, bool set_velocity) {
     uint32_t lock_state = seq_lock();
     pattern_t *pat = &g_seq.patterns[location];
     bool synth = pat->tracks[track].type == TRACK_TYPE_SYNTH;
@@ -285,13 +312,16 @@ static void write_key_to_steps(uint8_t track, uint8_t location, uint16_t mask, b
         step_t *st = &pat->steps[track][s];
         if (activate && !(st->flags & STEP_FLAG_ACTIVE)) toggle_step(pat, track, s);
         if (synth) st->note = note;
-        st->velocity = velocity;
+        if (set_velocity) st->velocity = velocity;
     }
     seq_unlock(lock_state);
     sequencer_refresh_track_playback(track, location);
 }
 
-static void handle_midi_event(const midi_in_event_t *event, const step_buttons_t *steps) {
+// A key of the MIDI input, or a pad shown as one (set_velocity false: see
+// write_key_to_steps()).
+static void handle_midi_event(const midi_in_event_t *event, const step_buttons_t *steps,
+                              bool set_velocity) {
     if (event->kind == MIDI_IN_ALL_OFF) {
         thru_release_all();
         return;
@@ -320,7 +350,9 @@ static void handle_midi_event(const midi_in_event_t *event, const step_buttons_t
     } else if (ui.mode == UI_STEP_EDIT) {
         mask = (uint16_t)(steps->held & (uint16_t)~steps->pressed & (1u << ui.edit_step));
     }
-    if (mask) write_key_to_steps(track, location, mask, activate, event->note, event->velocity);
+    if (mask && ui.mode == UI_STEP_EDIT) ui.key_wrote |= mask;
+    if (mask) write_key_to_steps(track, location, mask, activate, event->note, event->velocity,
+                                    set_velocity);
 }
 
 // Called at the start of every pass, before the panic check.
@@ -337,7 +369,7 @@ static void handle_midi_input(const step_buttons_t *steps) {
     if (midi_in_dropped() != ui.midi_dropped_seen) midi_in_gap();
     midi_in_event_t event;
     for (unsigned n = 0; n < MIDI_IN_BYTES_PER_PASS && midi_in_read(&byte); n++) {
-        if (midi_in_parse(&ui.midi_parser, byte, &event)) handle_midi_event(&event, steps);
+        if (midi_in_parse(&ui.midi_parser, byte, &event)) handle_midi_event(&event, steps, true);
     }
 }
 
@@ -428,6 +460,7 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
         // Panel keys held through the panic must not fire afterwards.
         panel_input_resync();
         drop_pad_holds();
+        ui.pad_keys_on = false;     // the screen goes to Session: no keyboard is shown
         ui.panic_latched = true;
         drop_step_gestures();
         ui.mode = UI_SESSION;
@@ -475,9 +508,80 @@ static void copy_clip(uint8_t track, uint8_t src, uint8_t dst) {
     show_notify(msg);
 }
 
-// A pad press: a copy when another pad of the track is a source, else the
-// ordinary launch. Either way the press is recorded, so it can be a source.
-static void handle_pad_press(uint8_t track, uint8_t row) {
+// Takes the snapshot of the keyboard, once per pass and before the panel
+// events: the pads are a keyboard when a step of a SYNTH cell is held (Pattern
+// view) or the edited step's button is down (step editor). A step pressed in
+// this pass does not count, as for the MIDI keys. The reference step is the
+// lowest held step (the edited one in the step editor). When the keyboard
+// turns on, the window is fixed to that step's note (the track's last note if
+// the step has none): its octave is the second pair of rows from the bottom.
+// It then stays put until the keyboard turns off, so it does not jump when a
+// pad changes the step's note.
+static void update_pad_keys(const step_buttons_t *steps) {
+    uint8_t track = ui.selected_track;
+    uint8_t location = g_seq.active_pattern[track];
+    const pattern_t *cell = &g_seq.patterns[location];
+    uint16_t mask = 0;
+    if (cell->tracks[track].type == TRACK_TYPE_SYNTH) {
+        if (ui.mode == UI_PATTERN_VIEW) {
+            mask = (uint16_t)(ui.grid_hold & steps->held);
+        } else if (ui.mode == UI_STEP_EDIT) {
+            mask = (uint16_t)(steps->held & (uint16_t)~steps->pressed & (1u << ui.edit_step));
+        }
+    }
+    bool on = mask != 0;
+    uint8_t step = ui.edit_step;
+    if (on && ui.mode == UI_PATTERN_VIEW) {
+        step = 0;
+        while (!(mask & (1u << step))) step++;
+    }
+    if (on && !ui.pad_keys_on) {
+        const step_t *st = &cell->steps[track][step];
+        uint8_t reference = (st->flags & STEP_FLAG_ACTIVE) || st->note ? st->note
+                                                                      : ui.last_note[track];
+        int base = 12 * (reference / 12 - 1);
+        ui.pad_keys_base = (uint8_t)(base < 0 ? 0 : base > 72 ? 72 : base);
+    }
+    ui.pad_keys_on = on;
+    ui.pad_keys_edit = ui.mode == UI_STEP_EDIT;
+    ui.pad_keys_track = track;
+    ui.pad_keys_location = location;
+    ui.pad_keys_step = step;
+}
+
+// Ends a pad key: its Note Off by the pass-through rule, and the pad is no
+// longer a key.
+static void release_pad_key(uint8_t track, uint8_t row) {
+    uint8_t remembered = ui.pad_key[track][row];
+    if (!remembered) return;
+    ui.pad_key[track][row] = 0;
+    thru_note_off((uint8_t)(remembered - 1));
+}
+
+// A pad shown as a key is a key of the MIDI input at velocity 100 that does
+// not change a step's velocity.
+static void press_pad_key(uint8_t track, uint8_t row, uint8_t note, const step_buttons_t *steps) {
+    midi_in_event_t event = {MIDI_IN_NOTE_ON, 0, note, 100};
+    handle_midi_event(&event, steps, false);
+    ui.pad_key[track][row] = (uint8_t)(note + 1);
+    ui.pad_key_generation[track][row] = panel_input_generation();
+}
+
+// A pad press: with the keyboard on, a key; else a copy when another pad of
+// the track is a source, or the ordinary launch. A launcher press is recorded,
+// so it can be a source; a key press is not.
+static void handle_pad_press(uint8_t track, uint8_t row, const step_buttons_t *steps) {
+    // A release the panel layer lost and the sweep has not found yet: end the
+    // old key before this press stands for the pad.
+    if (track < NUM_TRACKS && row < PAD_ROWS) release_pad_key(track, row);
+    if (ui.pad_keys_on && track < NUM_TRACKS && row < PAD_ROWS) {
+        // A pad shown as a key is never a copy source, and a stale hold of this
+        // very pad ends; the holds of other pads are left alone.
+        ui.pad_seen[track] &= (uint8_t)~(1u << row);
+        uint8_t note = pad_key_note(ui.pad_keys_base, track, row);
+        if (note != 0xFF) press_pad_key(track, row, note, steps);
+        return;
+    }
     uint32_t now = to_ms_since_boot(get_absolute_time());
     uint8_t target = pattern_make_index(session_bank(), row);
     int source = find_copy_source(track, row, now);
@@ -499,16 +603,20 @@ static void handle_pad_press(uint8_t track, uint8_t row) {
 // Pads, SCENE, MUTE and PLAY. Called with no lock held: every session_* and
 // transport call below takes the locks itself. A pad release only ends the
 // hold the UI tracks for copying; SCENE, MUTE and PLAY act on press.
-static void handle_panel_events(void) {
+static void handle_panel_events(const step_buttons_t *steps) {
     panel_event_t ev;
     while (panel_input_next(&ev)) {
         if (ev.kind == PANEL_PAD && !ev.down && ev.track < NUM_TRACKS) {
+            if (ev.row < PAD_ROWS && ui.pad_key[ev.track][ev.row]) {
+                release_pad_key(ev.track, ev.row);
+                continue;
+            }
             ui.pad_seen[ev.track] &= (uint8_t)~(1u << ev.row);
         }
         if (!ev.down) continue;
         switch (ev.kind) {
             case PANEL_PAD:
-                handle_pad_press(ev.track, ev.row);
+                handle_pad_press(ev.track, ev.row, steps);
                 break;
             case PANEL_SCENE:
                 if (!session_scene(ev.row)) show_notify("SONG MODE");
@@ -519,6 +627,23 @@ static void handle_panel_events(void) {
             case PANEL_PLAY:
                 toggle_transport();
                 break;
+        }
+    }
+}
+
+// A key whose release the panel layer lost (overflow, chip reset, resync) is
+// released here: a pad it no longer reports down is not held, and a pad that
+// still reads down after the panel layer lost its key state (its generation
+// changed) is not trusted either. Run after the
+// pass's events, so a release that did arrive has been handled first.
+static void release_lost_pad_keys(void) {
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        for (uint8_t row = 0; row < PAD_ROWS; row++) {
+            if (!ui.pad_key[track][row]) continue;
+            if (!panel_input_pad_down(track, row) ||
+                ui.pad_key_generation[track][row] != panel_input_generation()) {
+                release_pad_key(track, row);
+            }
         }
     }
 }
@@ -1631,6 +1756,19 @@ static void update_panel_lights(const transport_snapshot_t *snap) {
         state.pulse = (uint32_t)(((uint64_t)now_ms * 2 * PPQN) / 1000);
     }
 
+    // The keyboard of this pass's snapshot; the note it marks is read now, so
+    // it follows a pad just pressed.
+    state.keys = ui.pad_keys_on;
+    state.keys_base = ui.pad_keys_base;
+    state.keys_track = ui.pad_keys_track;
+    state.keys_note = 0xFF;
+    if (state.keys) {
+        const step_t *st = &g_seq.patterns[ui.pad_keys_location]
+                                .steps[ui.pad_keys_track][ui.pad_keys_step];
+        bool marked = (st->flags & STEP_FLAG_ACTIVE) || (ui.pad_keys_edit && st->note != 0);
+        if (marked) state.keys_note = st->note;
+    }
+
     rgb_t frame[LED_COUNT];
     led_frame_build(&state, frame);
     led_frame_apply_budget(frame, LED_RGB_BUDGET_MA);
@@ -1816,12 +1954,15 @@ void ui_update(void) {
     }
 
     // 4. Global panel controls (no lock held), then the screen's own handler
-    handle_panel_events();
+    update_pad_keys(steps);
+    handle_panel_events(steps);
+    release_lost_pad_keys();
 
     // A long press counts only for a step pressed on the screen it fires on.
     ui_mode_t screen = ui.mode;
     ui.step_gestures |= steps->pressed;
     steps->long_pressed &= ui.step_gestures;
+    steps->long_pressed &= (uint16_t)~ui.key_wrote;     // a button used as a key's modifier
 
     switch (ui.mode) {
         case UI_SESSION:
@@ -1852,7 +1993,11 @@ void ui_update(void) {
 
     // 6. Clear consumed button events; a screen change ends every gesture.
     ui.step_gestures &= (uint16_t)~steps->released;
-    if (ui.mode != screen) drop_step_gestures();
+    ui.key_wrote &= (uint16_t)~steps->released;
+    if (ui.mode != screen) {
+        drop_step_gestures();
+        ui.pad_keys_on = false;
+    }
     steps->pressed = 0;
     steps->released = 0;
     steps->long_pressed = 0;

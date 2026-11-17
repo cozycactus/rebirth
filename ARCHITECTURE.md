@@ -224,6 +224,26 @@ interrupts off) empties the ring and resets the parser, so a running status
 cannot turn the bytes after a loss into a wrong note. A panic clears the table
 (All Notes Off has gone out) and discards the input while it is latched.
 
+### Pads as a keyboard
+
+While a step is held (Pattern view, SYNTH cell, `ui.grid_hold & steps->held`, or
+the edited step's button in Step Edit), `update_pad_keys()` turns the pads into a
+keyboard. It takes one snapshot per pass, before the panel events (on, track, location,
+reference step), that the pad routing and the lights both read, and fixes the window
+`ui.pad_keys_base` only when the keyboard turns on. A step button that a key has
+written under in the step editor does not toggle its step on a long press. A pad press then goes through
+`handle_midi_event()` as a Note On of velocity 100 that leaves the step's velocity
+alone, so the write, the pass-through table and the capped sends are the MIDI
+keyboard's own; the pad is remembered in `ui.pad_key[track][row]` (note + 1) and is
+never recorded as a copy source. The release uses that memory, not whether the
+keyboard is still on, so a step let go first cannot hang the note. The panel layer
+can lose a release without an event, so at the end of every pass a remembered key
+whose pad `panel_input_pad_down()` no longer reports, or whose panel generation changed since its press, is released; a panic and a
+flash save or load only forget the keys, their notes having been released. The
+layout is `pad_key_note()` in `led_frame.c`, shared by the UI and the frame
+builder; `led_state_t.keys` makes `led_frame_build()` light the pads from it.
+Nothing runs in the timer interrupt and no lock is added.
+
 After an overrun the timer re-arms a future deadline, preventing a past alarm
 from stalling until the 32-bit counter wraps. It emits no catch-up burst.
 Jitter snapshots are coherent; tempo changes do not count the new period as
