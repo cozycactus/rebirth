@@ -99,7 +99,9 @@ screen).
   held step is switched on if it was off and takes the note,
   `last_note[track]` follows, and the held steps are not toggled on release.
 - The pad is remembered as a key with its note
-  (`pad_key[track][row] = note + 1`).
+  (`pad_key[track][row] = note + 1`), but only when its Note On was sent: a
+  press the capped send refused owns no note (the step is written all the
+  same), so its release cannot end a note another key holds on that pitch.
 - It does not launch, queue, cancel, copy or move the focus. The keyboard is
   checked before the copy source is looked for and before any of the copy
   bookkeeping is written; a key press also clears its own `pad_seen` bit, so
@@ -118,8 +120,13 @@ reporting a pad down whose release it lost. Each key remembers the panel
 layer's sync generation at its press. On every pass, after the panel events,
 a pad remembered as a key is released as above when
 `panel_input_pad_down()` no longer reports it down or the generation has
-changed. A panic and a save or load forget all pad keys (the pass-through
-table is handled there already).
+changed, and every pad key is released when the generation changed during
+this pass's poll (the panel layer can lose its key state in a poll and still
+hand out a press it had accepted before; that key would carry the new
+generation). A panic and a save or load forget all pad keys (the pass-through
+table is handled there already), and so does anything that ends every
+passed-through note: All Notes Off from the MIDI keyboard, or a gap in its
+input.
 
 **The same note twice.** Two pads can carry the same C. The pass-through
 table is by pitch: the second press retriggers, the first release ends the
@@ -218,6 +225,16 @@ construction; the sync generation as a second sign of a lost release; the
 velocity rule stated as it really is; Step Edit's long press not toggling a
 step that a key wrote to; the position of note 120 and the behaviour at the
 clamps.
+
+The review of the code (three reviewers, two of them ran it) added: a key
+pressed in a poll that lost the panel's key state is released in that pass
+(found by reproducing a hung note with the real panel layer); a pad whose
+Note On was refused is not remembered; the pads own nothing after All Notes
+Off; pad events outside the 8 by 8 tables are ignored. Not changed, by
+choice: a step and a pad pressed in one pass launch while the next frame
+already shows the keyboard, and a pad pressed in the pass that leaves the
+step editor is still a key (the lights the finger saw are what counts); a
+dark pad of the keyboard ends a stale copy hold of that same pad.
 
 ## Verification
 

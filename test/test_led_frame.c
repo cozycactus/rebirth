@@ -412,6 +412,8 @@ static void test_keys_frame_fits_the_budget(void) {
     s.muted = 0;
     rgb_t frame[LED_COUNT];
     led_frame_build(&s, frame);
+    rgb_t key = frame[LED_PAD(0, 7)];       // it is the keyboard that is measured
+    CHECK(key.r || key.g || key.b);
     led_frame_apply_budget(frame, LED_RGB_BUDGET_MA);
     CHECK(led_frame_estimate_ma(frame) <= LED_RGB_BUDGET_MA);
 }

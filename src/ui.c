@@ -243,8 +243,11 @@ static void thru_note_off(uint8_t note) {
     }
 }
 
+// Ends every note the keys hold. The pads shown as keys own nothing after it:
+// a pad still down then ends no note when it is let go.
 static void thru_release_all(void) {
     for (uint8_t note = 0; note < 128; note++) thru_note_off(note);
+    memset(ui.pad_key, 0, sizeof(ui.pad_key));
 }
 
 static void thru_retry_releases(void) {
@@ -255,8 +258,9 @@ static void thru_retry_releases(void) {
 }
 
 // A Note On, with the Note Off of a key still down on the same pitch as one batch. If the
-// queue has no room the key is dropped and not entered in the table.
-static void thru_note_on(uint8_t note, uint8_t channel, uint8_t velocity) {
+// queue has no room the key is dropped and not entered in the table. Returns whether it
+// was sent.
+static bool thru_note_on(uint8_t note, uint8_t channel, uint8_t velocity) {
     uint8_t message[6];
     uint16_t length = 0;
     uint8_t old = ui.thru_channel[note];
@@ -268,12 +272,13 @@ static void thru_note_on(uint8_t note, uint8_t channel, uint8_t velocity) {
     message[length++] = (uint8_t)(MIDI_NOTE_ON | channel);
     message[length++] = note;
     message[length++] = velocity;
-    if (!midi_try_send_bytes_capped(message, length, THRU_ON_QUEUE_MAX)) return;
+    if (!midi_try_send_bytes_capped(message, length, THRU_ON_QUEUE_MAX)) return false;
     ui.thru_channel[note] = channel;
     if (ui.thru_release_pending[note]) {
         ui.thru_release_pending[note] = false;
         ui.thru_pending_count--;
     }
+    return true;
 }
 
 // Bytes may have been lost, so the stream cannot be trusted: with running status the next
@@ -319,23 +324,24 @@ static void write_key_to_steps(uint8_t track, uint8_t location, uint16_t mask, b
 }
 
 // A key of the MIDI input, or a pad shown as one (set_velocity false: see
-// write_key_to_steps()).
-static void handle_midi_event(const midi_in_event_t *event, const step_buttons_t *steps,
+// write_key_to_steps()). Returns whether a Note On was passed through, so that
+// its sender owns the note now; the step is written either way.
+static bool handle_midi_event(const midi_in_event_t *event, const step_buttons_t *steps,
                               bool set_velocity) {
     if (event->kind == MIDI_IN_ALL_OFF) {
         thru_release_all();
-        return;
+        return false;
     }
     if (event->kind == MIDI_IN_NOTE_OFF) {
         thru_note_off(event->note);
-        return;
+        return false;
     }
 
     uint8_t track, location;
     midi_in_cell(&track, &location);
     const track_config_t *config = &g_seq.patterns[location].tracks[track];
-    thru_note_on(event->note, config->midi_channel, event->velocity);
-    if (config->type == TRACK_TYPE_KIT) return;
+    bool sounded = thru_note_on(event->note, config->midi_channel, event->velocity);
+    if (config->type == TRACK_TYPE_KIT) return sounded;
     if (config->type == TRACK_TYPE_SYNTH) ui.last_note[track] = event->note;
 
     // A step is held when its button is down now: a step pressed or released in this
@@ -353,6 +359,7 @@ static void handle_midi_event(const midi_in_event_t *event, const step_buttons_t
     if (mask && ui.mode == UI_STEP_EDIT) ui.key_wrote |= mask;
     if (mask) write_key_to_steps(track, location, mask, activate, event->note, event->velocity,
                                     set_velocity);
+    return sounded;
 }
 
 // Called at the start of every pass, before the panic check.
@@ -559,10 +566,11 @@ static void release_pad_key(uint8_t track, uint8_t row) {
 }
 
 // A pad shown as a key is a key of the MIDI input at velocity 100 that does
-// not change a step's velocity.
+// not change a step's velocity. A press whose note could not be sent owns no
+// note: its release must not end one another key holds on that pitch.
 static void press_pad_key(uint8_t track, uint8_t row, uint8_t note, const step_buttons_t *steps) {
     midi_in_event_t event = {MIDI_IN_NOTE_ON, 0, note, 100};
-    handle_midi_event(&event, steps, false);
+    if (!handle_midi_event(&event, steps, false)) return;
     ui.pad_key[track][row] = (uint8_t)(note + 1);
     ui.pad_key_generation[track][row] = panel_input_generation();
 }
@@ -606,6 +614,8 @@ static void handle_pad_press(uint8_t track, uint8_t row, const step_buttons_t *s
 static void handle_panel_events(const step_buttons_t *steps) {
     panel_event_t ev;
     while (panel_input_next(&ev)) {
+        // The pad tables are 8 by 8: a pad outside them is not one.
+        if (ev.kind == PANEL_PAD && (ev.track >= NUM_TRACKS || ev.row >= PAD_ROWS)) continue;
         if (ev.kind == PANEL_PAD && !ev.down && ev.track < NUM_TRACKS) {
             if (ev.row < PAD_ROWS && ui.pad_key[ev.track][ev.row]) {
                 release_pad_key(ev.track, ev.row);
@@ -634,13 +644,18 @@ static void handle_panel_events(const step_buttons_t *steps) {
 // A key whose release the panel layer lost (overflow, chip reset, resync) is
 // released here: a pad it no longer reports down is not held, and a pad that
 // still reads down after the panel layer lost its key state (its generation
-// changed) is not trusted either. Run after the
-// pass's events, so a release that did arrive has been handled first.
-static void release_lost_pad_keys(void) {
+// changed) is not trusted either. That covers a key pressed in this very
+// pass: the panel layer can lose its key state in a poll and still hand out a
+// press it had accepted before, which would then carry the new generation and
+// never look lost. `generation_before_poll` is the generation before this
+// pass's poll. Run after the pass's events, so a release that did arrive has
+// been handled first.
+static void release_lost_pad_keys(uint32_t generation_before_poll) {
+    bool lost_now = generation_before_poll != panel_input_generation();
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         for (uint8_t row = 0; row < PAD_ROWS; row++) {
             if (!ui.pad_key[track][row]) continue;
-            if (!panel_input_pad_down(track, row) ||
+            if (lost_now || !panel_input_pad_down(track, row) ||
                 ui.pad_key_generation[track][row] != panel_input_generation()) {
                 release_pad_key(track, row);
             }
@@ -1923,6 +1938,7 @@ void ui_init(void) {
 
 void ui_update(void) {
     // 1. Poll inputs: the panel on every pass, then encoders and step buttons
+    uint32_t panel_generation = panel_input_generation();
     panel_input_poll(to_ms_since_boot(get_absolute_time()));
     encoder_poll();
     mcp23017_poll();
@@ -1956,7 +1972,7 @@ void ui_update(void) {
     // 4. Global panel controls (no lock held), then the screen's own handler
     update_pad_keys(steps);
     handle_panel_events(steps);
-    release_lost_pad_keys();
+    release_lost_pad_keys(panel_generation);
 
     // A long press counts only for a step pressed on the screen it fires on.
     ui_mode_t screen = ui.mode;
