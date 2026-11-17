@@ -546,6 +546,307 @@ section('fit', () => {
     fmt((low.root.matrix.elements[14] - z0) / MM) + ' mm');
 });
 
+// ─── plan: touches, groups, turns, hands, fingers, timing ────────
+// Synthetic action lists in the score's shapes (times in µs), then a whole
+// show. Every plan also passes the plan's invariants (valid() below).
+section('plan', () => {
+  const HandPlan = require(path.join(web, 'handplan.js'));
+  const Artist = require(path.join(web, 'artist.js'));
+  const { PANEL } = HandPlan;
+  assert.strictEqual(HandPlan.TURN_GAP_US, 150000, 'TURN_GAP_US');
+  assert.strictEqual(typeof HandPlan.build, 'function', 'HandPlan.build');
+
+  const KINDS = ['away', 'approach', 'contact', 'lift', 'wait', 'pinch', 'push', 'still'];
+  const FINGERS = ['thumb', 'index', 'middle', 'ring', 'pinky'];
+  const PANEL_OPS = ['pad', 'scene', 'mute', 'step', 'play', 'encsw'];
+  const show = list => JSON.stringify(list);
+  const at = (frames, t) => frames.find(k => k.t === t);
+  const aimOf = a => { const c = PANEL.control(a); return { u: c.u, v: c.v, topMm: c.topMm }; };
+
+  // The plan's invariants: keyframes sorted, of the known kinds and fingers,
+  // lifts 0, 15 or 30, one lift per keyframe (the rig cannot hold a finger
+  // 15 mm above a neighbour that presses); each touch is in contact (its
+  // finger, its ref, lift 0)
+  // at its down and at its up on its hand; each turn pinches at its start
+  // and end with thumb and index; the touches are the panel's downs.
+  const valid = (plan, actions) => {
+    for (const side of ['left', 'right']) {
+      const frames = plan.hands[side];
+      assert.ok(Array.isArray(frames) && frames.length > 0, side + ': keyframes');
+      frames.forEach((k, i) => {
+        assert.ok(i === 0 || frames[i - 1].t < k.t, side + ': keyframes sorted at ' + i + ': ' + show(frames.slice(i - 1, i + 1)));
+        assert.ok(KINDS.includes(k.kind), side + ': kind ' + k.kind);
+        assert.strictEqual(typeof k.freeYaw, 'boolean', side + ': freeYaw at ' + k.t);
+        for (const f in k.fingers) {
+          const s = k.fingers[f];
+          assert.ok(FINGERS.includes(f), side + ': finger ' + f);
+          assert.ok([0, 15, 30].includes(s.liftMm), side + ': liftMm ' + s.liftMm + ' at ' + k.t);
+          assert.ok(s.liftMm !== 0 || (s.aim && s.ref), side + ': a contact without aim or ref at ' + k.t);
+        }
+        assert.ok(new Set(Object.values(k.fingers).map(s => s.liftMm)).size <= 1, side + ': one lift at ' + show(k));
+      });
+    }
+    for (const x of plan.touches) {
+      const who = plan.assign['touch:' + x.id];
+      assert.ok(who && FINGERS.includes(who.finger) && plan.hands[who.hand], 'assign of touch ' + show(x));
+      for (const t of [x.tDown, x.tUp]) {
+        const k = at(plan.hands[who.hand], t), s = k && k.fingers[who.finger];
+        assert.ok(s && s.liftMm === 0 && s.ref.type === 'touch' && s.ref.id === x.id &&
+          s.aim.u === x.control.u && s.aim.v === x.control.v && s.aim.topMm === x.control.topMm,
+        'touch ' + x.key + ' in contact at ' + t + ': ' + show(k));
+      }
+    }
+    for (const turn of plan.turns) {
+      const who = plan.assign['turn:' + turn.id];
+      assert.ok(who && plan.hands[who.hand], 'assign of turn ' + turn.id);
+      for (const t of [turn.tStart, turn.tEnd]) {
+        const k = at(plan.hands[who.hand], t);
+        assert.ok(k && k.kind === 'pinch' && ['thumb', 'index'].every(f => k.fingers[f] && k.fingers[f].liftMm === 0 &&
+          k.fingers[f].ref.type === 'turn' && k.fingers[f].ref.id === turn.id), 'turn ' + turn.id + ' pinched at ' + t + ': ' + show(k));
+      }
+    }
+    const downs = actions.filter(a => PANEL_OPS.includes(a.op) && a.down);
+    assert.strictEqual(plan.touches.length, downs.length, 'a touch per panel down');
+    for (const a of downs) {
+      const key = PANEL.control(a).key;
+      assert.ok(plan.touches.some(x => x.key === key && x.tDown === a.t), 'a touch for ' + key + ' down at ' + a.t);
+    }
+    const times = [...new Set(plan.touches.flatMap(x => [x.tDown, x.tUp]))].sort((a, b) => a - b);
+    assert.deepStrictEqual(plan.events, times, 'events');
+    return plan;
+  };
+  const plan = actions => valid(HandPlan.build(actions), actions);
+
+  // Action builders, as artist.js pushes them.
+  const press = (list, op, o, tDown, tUp) => {
+    list.push(Object.assign({ op, down: true, t: tDown }, o), Object.assign({ op, down: false, t: tUp }, o));
+  };
+  const sorted = list => list.slice().sort((a, b) => a.t - b.t);
+  // A click is four edges 3 000 apart; a burst's clicks are 16 000 apart
+  // (last edge to next first edge). Both return the last edge's time.
+  const click = (list, enc, dir, t) => {
+    for (let e = 0; e < 4; e++) list.push({ op: 'edge', enc, dir, t: t + 3000 * e });
+    return t + 9000;
+  };
+  const burst = (list, enc, dir, t, n) => {
+    let last = t;
+    for (let i = 0; i < n; i++) { last = click(list, enc, dir, t); t = last + 16000; }
+    return last;
+  };
+  const touchOf = (p, key) => p.touches.find(x => x.key === key);
+  const who = (p, key) => p.assign['touch:' + touchOf(p, key).id];
+
+  // One tap on pad (6, 4): the right index; it approaches 15 mm up about
+  // 80 ms before, is in contact from down to up, lifts, and leaves when
+  // nothing follows.
+  {
+    const list = [];
+    press(list, 'pad', { track: 6, row: 4 }, 1000000, 1070000);
+    const p = plan(list), x = p.touches[0];
+    assert.strictEqual(p.touches.length, 1, 'tap: one touch');
+    assert.deepStrictEqual(x, { id: x.id, key: 'pad:6:4', control: PANEL.control({ op: 'pad', track: 6, row: 4 }),
+      tDown: 1000000, tUp: 1070000 }, 'tap: the touch');
+    assert.deepStrictEqual(p.assign['touch:' + x.id], { hand: 'right', finger: 'index' }, 'tap: right index');
+    assert.deepStrictEqual([p.turns, p.keys], [[], []], 'tap: no turns, no keys');
+    const right = p.hands.right;
+    const approach = right.find(k => k.kind === 'approach');
+    assert.ok(approach && approach.t >= x.tDown - 90000 && approach.t <= x.tDown - 70000, 'tap: approach ' + show(approach));
+    assert.deepStrictEqual(approach.fingers.index, { aim: aimOf({ op: 'pad', track: 6, row: 4 }),
+      ref: { type: 'touch', id: x.id }, liftMm: 15 }, 'tap: approaching 15 mm up');
+    assert.strictEqual(at(right, x.tDown).kind, 'contact', 'tap: contact at the down');
+    assert.strictEqual(at(right, x.tUp).kind, 'contact', 'tap: contact at the up');
+    const after = right.filter(k => k.t > x.tUp);
+    assert.ok(after.length >= 2 && after[0].kind === 'lift' && after[0].fingers.index.liftMm === 15, 'tap: lift after ' + show(after));
+    assert.ok(after.some(k => k.kind === 'away' && k.t < x.tUp + 2000000), 'tap: away when nothing follows');
+    assert.strictEqual(right[right.length - 1].kind, 'away', 'tap: ends away');
+    assert.ok(p.hands.left.every(k => k.kind === 'away'), 'tap: the left hand stays away');
+  }
+
+  // holdEdit (artist.js:647-657): steps down 30 000 apart, after 80 000 and
+  // turnNumber's pause of 110 000 two bursts of TRACK clicks, an encoder
+  // press 96 000 after the last edge, the steps up 25 000 apart.
+  const holdEdit = (steps, burstGap) => {
+    const list = [];
+    let t = 1000000;
+    steps.forEach((index, i) => list.push({ op: 'step', index, down: true, t: t + 30000 * i }));
+    t += 30000 * steps.length + 80000 + 110000;
+    let last = burst(list, 0, 1, t, 2);
+    last = burst(list, 0, 1, last + burstGap, 4);
+    const push = last + 96000;
+    press(list, 'encsw', { enc: 0 }, push, push + 90000);
+    t = push + 90000 + 90000;
+    steps.forEach((index, i) => list.push({ op: 'step', index, down: false, t: t + 25000 * i }));
+    return { list: sorted(list), last, push };
+  };
+  {
+    const { list, last, push } = holdEdit([0, 1, 2], 126000);
+    const p = plan(list);
+    assert.strictEqual(p.touches.length, 4, 'holdEdit: three steps and a press');
+    assert.strictEqual(p.turns.length, 1, 'holdEdit: bursts 126 000 apart are one turn: ' + show(p.turns.map(x => x.tStart)));
+    const turn = p.turns[0], sw = touchOf(p, 'knob:0');
+    assert.strictEqual(turn.enc, 0, 'holdEdit: TRACK');
+    assert.strictEqual(turn.edges.length, 24, 'holdEdit: six clicks of four edges');
+    assert.deepStrictEqual(turn.edges[0], { t: list.find(a => a.op === 'edge').t, dir: 1 }, 'holdEdit: an edge');
+    assert.strictEqual(turn.tStart, turn.edges[0].t, 'holdEdit: tStart');
+    assert.strictEqual(turn.tEnd, last + 20000, 'holdEdit: tEnd 20 000 after the last edge');
+    assert.strictEqual(sw.tDown, push, 'holdEdit: the press');
+    assert.strictEqual(turn.push, sw.id, 'holdEdit: the press continues the turn');
+    assert.deepStrictEqual([0, 1, 2].map(i => who(p, 'step:' + i)),
+      [{ hand: 'left', finger: 'pinky' }, { hand: 'left', finger: 'ring' }, { hand: 'left', finger: 'middle' }],
+      'holdEdit: the left hand holds steps 0 1 2 with pinky, ring, middle');
+    assert.deepStrictEqual(p.assign['turn:' + turn.id], { hand: 'right' }, 'holdEdit: the right hand turns');
+    assert.deepStrictEqual(who(p, 'knob:0'), { hand: 'right', finger: 'index' }, 'holdEdit: the right index pushes');
+    const held = at(p.hands.left, touchOf(p, 'step:2').tDown);
+    assert.deepStrictEqual(['pinky', 'ring', 'middle'].map(f => held.fingers[f].liftMm), [0, 0, 0], 'holdEdit: three held');
+    assert.strictEqual(at(p.hands.right, sw.tDown).kind, 'push', 'holdEdit: a push');
+    const between = p.hands.right.filter(k => k.t > turn.tEnd && k.t < sw.tDown);
+    assert.ok(between.every(k => k.kind === 'approach' && k.fingers.index && k.fingers.index.liftMm === 15),
+      'holdEdit: from the pinch to the push the hand stays: ' + show(between));
+  }
+  {
+    const p = plan(holdEdit([0, 1, 2], 160000).list);
+    assert.strictEqual(p.turns.length, 2, 'holdEdit: bursts 160 000 apart are two turns');
+    assert.strictEqual(p.turns[0].push, null, 'holdEdit: the first turn has no press');
+    assert.strictEqual(p.turns[1].push, touchOf(p, 'knob:0').id, 'holdEdit: the press continues the second turn');
+    assert.ok(p.turns.every(x => p.assign['turn:' + x.id].hand === 'right'), 'holdEdit: both turns right');
+  }
+  // Two held steps: the ring on the outer one (a pinky pressing alone
+  // cannot be cleared), the other finger by the spread (up to three keys
+  // apart: middle; six: index).
+  for (const [steps, fingers] of [[[1, 2], ['ring', 'middle']], [[0, 3], ['ring', 'middle']], [[1, 7], ['ring', 'index']]]) {
+    const p = plan(holdEdit(steps, 126000).list);
+    assert.deepStrictEqual(steps.map(i => who(p, 'step:' + i)), fingers.map(finger => ({ hand: 'left', finger })),
+      'holdEdit: steps ' + steps + ' with ' + fingers);
+  }
+  {
+    const p = plan(holdEdit([12, 13, 14, 15], 126000).list);
+    assert.deepStrictEqual([12, 13, 14, 15].map(i => who(p, 'step:' + i)),
+      ['index', 'middle', 'ring', 'pinky'].map(finger => ({ hand: 'right', finger })),
+      'holdEdit: the right hand holds steps 12-15 with index, middle, ring, pinky');
+    assert.deepStrictEqual(p.assign['turn:' + p.turns[0].id], { hand: 'left' }, 'holdEdit: the left hand turns');
+    assert.deepStrictEqual(who(p, 'knob:0'), { hand: 'left', finger: 'index' }, 'holdEdit: the left index pushes');
+  }
+
+  // A clip copy: one hand, the index on the source, the thumb on the target,
+  // its yaw free.
+  {
+    const list = [];
+    press(list, 'pad', { track: 2, row: 0 }, 1000000, 1720000);
+    press(list, 'pad', { track: 2, row: 3 }, 1620000, 1690000);
+    const p = plan(sorted(list)), src = who(p, 'pad:2:0'), dst = who(p, 'pad:2:3');
+    assert.deepStrictEqual([src.finger, dst.finger, dst.hand], ['index', 'thumb', src.hand], 'copy: index and thumb of one hand');
+    const k = at(p.hands[src.hand], 1620000);
+    assert.deepStrictEqual([k.fingers.index.liftMm, k.fingers.thumb.liftMm, k.freeYaw], [0, 0, true], 'copy: both down, yaw free');
+    assert.ok(p.hands[src.hand].filter(x => x.t >= 1000000 && x.t <= 1720000).every(x => x.freeYaw), 'copy: yaw free throughout');
+    assert.deepStrictEqual(Object.keys(at(p.hands[src.hand], 1000000).fingers), ['index'],
+      'copy: while the index holds alone the thumb is free');
+  }
+
+  // mutePair (artist.js:896-902): downs 12 000 apart, ups 10 000 apart.
+  const mutePair = (a, b) => {
+    const list = [];
+    press(list, 'mute', { track: a }, 1000000, 1092000);
+    press(list, 'mute', { track: b }, 1012000, 1102000);
+    return plan(sorted(list));
+  };
+  {
+    const p = mutePair(3, 2), a = who(p, 'mute:3'), b = who(p, 'mute:2');
+    assert.strictEqual(a.hand, b.hand, 'mutePair(3, 2): one hand');
+    assert.deepStrictEqual([a.finger, b.finger].sort(), ['index', 'middle'], 'mutePair(3, 2): index and middle');
+    // The index on the thumb's side: the left of a right hand, the right of a left one.
+    assert.strictEqual(a.hand === 'right' ? b.finger : a.finger, 'index', 'mutePair(3, 2): the index on the thumb side');
+    const q = mutePair(4, 6);
+    assert.deepStrictEqual([who(q, 'mute:4'), who(q, 'mute:6')].map(x => x.finger).sort(), ['index', 'ring'],
+      'mutePair(4, 6): index and ring');
+    const r = mutePair(1, 6);
+    assert.deepStrictEqual([who(r, 'mute:1'), who(r, 'mute:6')],
+      [{ hand: 'left', finger: 'index' }, { hand: 'right', finger: 'index' }], 'mutePair(1, 6): two hands');
+  }
+
+  // Two taps on pads far apart: a hand that has 1 s to wait waits 30 mm
+  // above its next pad; with 2 s it leaves the frame in between.
+  for (const [gap, idle] of [[1000000, 'wait'], [2000000, 'away']]) {
+    const list = [];
+    press(list, 'pad', { track: 5, row: 0 }, 1000000, 1070000);
+    press(list, 'pad', { track: 7, row: 7 }, 1000000 + gap, 1070000 + gap);
+    const p = plan(list), a = who(p, 'pad:5:0'), b = who(p, 'pad:7:7');
+    assert.strictEqual(a.hand, b.hand, 'two taps ' + gap + ' apart: one hand');
+    const between = p.hands[a.hand].filter(k => k.t > 1070000 && k.t < 1000000 + gap);
+    const kinds = between.map(k => k.kind);
+    assert.ok(kinds.includes(idle) && !kinds.includes(idle === 'wait' ? 'away' : 'wait'),
+      'two taps ' + gap + ' apart: ' + idle + ' between: ' + kinds);
+    if (idle === 'wait') {
+      const w = between.find(k => k.kind === 'wait');
+      assert.deepStrictEqual(w.fingers.index, { aim: aimOf({ op: 'pad', track: 7, row: 7 }),
+        ref: { type: 'touch', id: touchOf(p, 'pad:7:7').id }, liftMm: 30 }, 'wait: 30 mm above the next pad');
+    }
+  }
+
+  // Taps 140 ms apart on neighbouring steps (artist.js programDrum): one
+  // hand; the lift and the approach between them are shortened, both
+  // within the 80 ms between the up and the next down.
+  {
+    const list = [];
+    press(list, 'step', { index: 0 }, 1000000, 1060000);
+    press(list, 'step', { index: 1 }, 1140000, 1200000);
+    const p = plan(list), a = who(p, 'step:0'), b = who(p, 'step:1');
+    assert.strictEqual(a.hand, b.hand, 'neighbouring taps: one hand');
+    const between = p.hands[a.hand].filter(k => k.t > 1060000 && k.t < 1140000);
+    const approach = between.find(k => k.kind === 'approach');
+    assert.ok(approach && approach.t > 1060000 && 1140000 - approach.t < 80000 && approach.fingers.index.liftMm === 15,
+      'neighbouring taps: a shortened approach: ' + show(between));
+  }
+
+  // Coming late: step 8, then pad (4, 0) 60 ms later. The hand on step 8 is
+  // the nearer (178 mm) but would need 120 ms: the other hand takes it.
+  {
+    const list = [];
+    press(list, 'step', { index: 8 }, 1000000, 1060000);
+    press(list, 'pad', { track: 4, row: 0 }, 1120000, 1190000);
+    const p = plan(list);
+    assert.notStrictEqual(who(p, 'step:8').hand, who(p, 'pad:4:0').hand, 'late: the other hand');
+  }
+  // Crossing: the right hand turns VALUE, the left presses step 1, then
+  // step 12. The left is the nearer, but its arm would cross the right one
+  // (still at VALUE): the right takes step 12.
+  {
+    const list = [];
+    click(list, 1, 1, 1000000);
+    press(list, 'step', { index: 1 }, 1100000, 1160000);
+    press(list, 'step', { index: 12 }, 1700000, 1760000);
+    const p = plan(sorted(list));
+    assert.deepStrictEqual([p.assign['turn:0'].hand, who(p, 'step:1').hand, who(p, 'step:12').hand],
+      ['right', 'left', 'right'], 'crossing: the right hand takes step 12');
+  }
+
+  // A key of the MIDI keyboard while a step is held: not a touch; the hand
+  // that would edit stays still from the key's down to its up.
+  {
+    const list = [];
+    press(list, 'step', { index: 3 }, 1000000, 1500000);
+    list.push({ op: 'key', note: 60, velocity: 100, down: true, t: 1200000 },
+      { op: 'key', note: 60, velocity: 0, down: false, t: 1300000 });
+    const p = plan(sorted(list));
+    assert.strictEqual(p.touches.length, 1, 'key: no touch for the key');
+    assert.deepStrictEqual(p.keys, [{ tDown: 1200000, tUp: 1300000 }], 'key: its interval');
+    const holder = who(p, 'step:3').hand, editor = holder === 'left' ? 'right' : 'left';
+    const frames = p.hands[editor];
+    assert.deepStrictEqual([at(frames, 1200000), at(frames, 1300000)].map(k => k && k.kind), ['still', 'still'],
+      'key: the editing hand is still at the key down and up');
+    assert.deepStrictEqual(frames.filter(k => k.t > 1200000 && k.t < 1300000), [], 'key: nothing else during the key');
+  }
+
+  // A whole show plans, and every panel down is assigned.
+  {
+    const s = Artist.buildShow(undefined, { song: 0, fw2: true, pads: true });
+    const p = plan(s.actions);
+    assert.ok(p.touches.length > 400 && p.turns.length > 10, 'song 0: ' + p.touches.length + ' touches, ' +
+      p.turns.length + ' turns');
+    assert.strictEqual(p.turns.reduce((n, x) => n + x.edges.length, 0), s.actions.filter(a => a.op === 'edge').length,
+      'song 0: every edge in a turn');
+  }
+});
+
 for (const { name, fn } of sections) {
   try {
     fn();
