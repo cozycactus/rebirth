@@ -144,11 +144,14 @@
   const BUSY_COST = 1e7;        // a hand already playing something else
   const BEAM = 32;              // hand choices kept at each gesture (16 already gives the same plans)
   const GROUPED = ['pad', 'step', 'mute'];
-  // A group's fingers from its outer side in, and their fingertips' natural
-  // offsets across the hand from the pinky (mm; handrig.js STRAIGHT, the
-  // multi-finger fit's seed).
+  // A group's fingers from its outer side in; a pair's (from the ring: the
+  // rig cannot clear a little finger pressing alone, which a pair would
+  // leave at its first down or last up) takes the index instead of the
+  // middle when its buttons are further apart than the middle of the two
+  // fingers' natural spreads from the ring (33 and 76 mm, handrig.js
+  // STRAIGHT).
   const OUTER = ['pinky', 'ring', 'middle', 'index'];
-  const SPREAD_MM = [0, 19, 52, 95];
+  const PAIR_WIDE_MM = 54.5;
   const other = hand => (hand === 'left' ? 'right' : 'left');
   const aimOf = c => ({ u: c.u, v: c.v, topMm: c.topMm });
   const field = (key, i) => +key.split(':')[i];    // 'pad:t:r', 'mute:t', 'knob:e'
@@ -348,25 +351,15 @@
         return g.hand === 'right' ? [touch(a, 'index'), touch(b, second)] : [touch(a, second), touch(b, 'index')];
       }
       case 'group': {
-        // The outermost button takes the pinky (two buttons: the ring; the
-        // rig cannot clear a pinky pressing alone, and a pair would leave it
-        // alone at its first down or last up), the others in order the
-        // fingers whose spread fits the buttons' best.
+        // In order across the buttons from the outer side: three or four
+        // from the little finger, a pair from the ring.
         const sign = g.hand === 'left' ? 1 : -1;
         const order = g.touches.slice().sort((x, y) => sign * (x.control.u - y.control.u));
-        const off = order.map(x => Math.abs(x.control.u - order[0].control.u) / UNITS_PER_MM);
-        const first = order.length === 2 ? 1 : 0;
-        let best = null;
-        const pick = (chosen, from) => {
-          if (chosen.length === order.length) {
-            const err = chosen.reduce((e, f, i) => e + (SPREAD_MM[f] - SPREAD_MM[first] - off[i]) ** 2, 0);
-            if (!best || err < best.err) best = { err, chosen: chosen.slice() };
-            return;
-          }
-          for (let f = from; f < OUTER.length; f++) pick(chosen.concat(f), f + 1);
-        };
-        pick([first], first + 1);
-        return order.map((x, i) => touch(x, OUTER[best.chosen[i]]));
+        if (order.length === 2) {
+          const wide = Math.abs(order[1].control.u - order[0].control.u) / UNITS_PER_MM > PAIR_WIDE_MM;
+          return [touch(order[0], 'ring'), touch(order[1], wide ? 'index' : 'middle')];
+        }
+        return order.map((x, i) => touch(x, OUTER[i]));
       }
       case 'turn': {
         const aim = aimOf(control({ op: 'encsw', enc: g.turn.enc })), ref = { type: 'turn', id: g.turn.id };

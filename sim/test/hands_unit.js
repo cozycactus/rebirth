@@ -710,12 +710,18 @@ section('plan', () => {
     assert.strictEqual(p.turns[1].push, touchOf(p, 'knob:0').id, 'holdEdit: the press continues the second turn');
     assert.ok(p.turns.every(x => p.assign['turn:' + x.id].hand === 'right'), 'holdEdit: both turns right');
   }
-  // Two held steps: the ring on the outer one (a pinky pressing alone
-  // cannot be cleared), the other finger by the spread (up to three keys
-  // apart: middle; six: index).
-  for (const [steps, fingers] of [[[1, 2], ['ring', 'middle']], [[0, 3], ['ring', 'middle']], [[1, 7], ['ring', 'index']]]) {
+  // The group rule: fingers in order across the buttons from the outer
+  // side, three or four from the little finger however far apart, a pair
+  // from the ring (the index past 54.5 mm: up to three keys apart the
+  // middle, six apart the index). Left groups lie left of TRACK, right ones
+  // right of it.
+  for (const [steps, hand, fingers] of [
+    [[1, 2], 'left', ['ring', 'middle']], [[0, 3], 'left', ['ring', 'middle']], [[1, 7], 'left', ['ring', 'index']],
+    [[12, 15], 'right', ['middle', 'ring']], [[9, 15], 'right', ['index', 'ring']],
+    [[1, 3, 5], 'left', ['pinky', 'ring', 'middle']], [[9, 11, 13], 'right', ['middle', 'ring', 'pinky']],
+    [[0, 2, 3, 5], 'left', ['pinky', 'ring', 'middle', 'index']], [[6, 9, 10, 11], 'right', ['index', 'middle', 'ring', 'pinky']]]) {
     const p = plan(holdEdit(steps, 126000).list);
-    assert.deepStrictEqual(steps.map(i => who(p, 'step:' + i)), fingers.map(finger => ({ hand: 'left', finger })),
+    assert.deepStrictEqual(steps.map(i => who(p, 'step:' + i)), fingers.map(finger => ({ hand, finger })),
       'holdEdit: steps ' + steps + ' with ' + fingers);
   }
   {
@@ -834,6 +840,37 @@ section('plan', () => {
     assert.deepStrictEqual([at(frames, 1200000), at(frames, 1300000)].map(k => k && k.kind), ['still', 'still'],
       'key: the editing hand is still at the key down and up');
     assert.deepStrictEqual(frames.filter(k => k.t > 1200000 && k.t < 1300000), [], 'key: nothing else during the key');
+  }
+
+  // Keyframe shapes of the 176 shows that the rig could not fit before its
+  // seeding changed (the little finger bent, the ring too on a miss): each
+  // fits within 1 mm, and after clear() nothing is in a control or under
+  // the plate and the contacts are still within 1 mm.
+  {
+    require(path.join(web, 'three.js'));
+    const T = globalThis.THREE, HandRig = require(path.join(web, 'handrig.js')), MM = PANEL.UNITS_PER_MM;
+    const top = (i, liftMm) => {
+      const c = PANEL.control({ op: 'step', index: i }), q = PANEL.onPanel(c.u, c.v, c.topMm + liftMm);
+      return new T.Vector3(q.x, q.y, q.z);
+    };
+    for (const [side, steps, liftMm] of [
+      ['left', { pinky: 0 }, 0], ['right', { pinky: 15 }, 0],
+      ['right', { pinky: 11, ring: 10, middle: 9, index: 6 }, 0], ['left', { pinky: 0, ring: 2, middle: 3, index: 5 }, 0],
+      ['left', { pinky: 1, ring: 3, middle: 4, index: 6 }, 15], ['right', { pinky: 14, ring: 12, middle: 9, index: 8 }, 30],
+      ['left', { pinky: 1, ring: 2, middle: 3, index: 5 }, 15], ['left', { pinky: 6, ring: 7, middle: 9 }, 0],
+      ['right', { pinky: 7, ring: 5 }, 0], ['right', { pinky: 10, ring: 8 }, 0], ['left', { pinky: 0, ring: 1 }, 0]]) {
+      const what = side + ' ' + JSON.stringify(steps) + ' +' + liftMm + ' mm';
+      const rig = HandRig.create(side), targets = {}, centre = new T.Vector3();
+      for (const f in steps) centre.add(targets[f] = top(steps[f], liftMm));
+      const res = rig.fit(targets, { dir: rig.armDir(centre.multiplyScalar(1 / Object.keys(steps).length)) });
+      assert.ok(res.ok, what + ': fitted ' + show(res.residualMm));
+      rig.clear(Object.keys(targets));
+      assert.deepStrictEqual(rig.violations(), [], what + ': nothing in a control after clear()');
+      for (const f in targets) {
+        const d = rig.contact(f).distanceTo(targets[f]) / MM;
+        assert.ok(d <= 1, what + ': the ' + f + ' is ' + d.toFixed(2) + ' mm off after clear()');
+      }
+    }
   }
 
   // A whole show plans, and every panel down is assigned.

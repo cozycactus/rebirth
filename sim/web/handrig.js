@@ -775,7 +775,11 @@
     }
 
     // Several contacts on their targets ({finger: Vector3}) in one solve,
-    // from nearly straight fingers (the others as in point), the root
+    // from nearly straight fingers (the little finger bent as in relax: from
+    // straight, the shortest finger's reach stalls the solve, or drops the
+    // hand until the curled index and middle go under the plate; when that
+    // misses, again with the ring finger bent too; the others as in point),
+    // the root
     // turned along opts.dir (default armDir of the targets' centre), then
     // to the best rigid alignment of the contacts with the targets, and
     // moved onto them. opts.freeYaw widens the yaw window to ±100°;
@@ -788,9 +792,15 @@
       opts = opts || {};
       targets = copyTargets(targets);
       const curls = {}, toward = {};
-      for (const f of FINGERS) curls[f] = f in targets ? STRAIGHT[f] : POSES.point[f];
+      for (const f of FINGERS) curls[f] = f in targets ? (f === 'pinky' ? POSES.relax.pinky : STRAIGHT[f]) : POSES.point[f];
       for (const f in targets) toward[f] = (opts.toward && opts.toward[f]) || DOWN;
-      return fitFrom(targets, opts, curls, toward);
+      const first = fitFrom(targets, opts, curls, toward);
+      if (first.ok || !('ring' in targets)) return first;
+      // Missed: once more with the ring finger bent too; the better stays.
+      const again = Object.assign({}, curls, { ring: POSES.relax.ring });
+      const second = fitFrom(targets, opts, again, toward);
+      const worst = r => Math.max(...Object.values(r.residualMm));
+      return second.ok || worst(second) < worst(first) ? second : fitFrom(targets, opts, curls, toward);
     }
 
     // Thumb and index on the side of encoder enc's knob, opposite each
