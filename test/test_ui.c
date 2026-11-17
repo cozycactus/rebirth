@@ -561,6 +561,7 @@ static void test_song_editor_lights_its_three_buttons(void) {
 }
 
 static void test_nonplaying_editor_hides_playhead(void) {
+    g_seq.patterns[3].tracks[0].type = TRACK_TYPE_DRUM;     // the step grid; the roll has its own test
     transport_start();
     g_seq.active_pattern[0] = 3;
     g_seq.transport.current_track_step[0] = 0;
@@ -1671,6 +1672,7 @@ static void check_info_line(const char *expected) {
 
 static void test_held_step_line_is_rendered(void) {
     uint8_t idle[OLED_BUF_SIZE];
+    g_seq.patterns[0].tracks[0].type = TRACK_TYPE_DRUM;     // the step grid; the roll has its own test
     enter_pattern_view();
     render();
     memcpy(idle, ssd1309_get_framebuffer(), sizeof(idle));
@@ -1685,10 +1687,11 @@ static void test_held_step_line_is_rendered(void) {
 }
 
 static void test_held_step_line_shows_lowest_held_step(void) {
+    g_seq.patterns[0].tracks[0].type = TRACK_TYPE_DRUM;     // the step grid; the roll has its own test
     enter_pattern_view();
     step_down(1u << 9);
-    turn(0, -59);                           // step 10: note 1
-    turn(1, 27);                            // velocity 127
+    STEP(0, 9).note = 1;                    // a drum step has a fixed note: set it directly
+    STEP(0, 9).velocity = 127;
     render();
     check_info_line("S10 Note:C#-1 Vel:127");
     step_down(1u << 2);                     // a lower step joins
@@ -1701,6 +1704,414 @@ static void test_held_step_line_shows_lowest_held_step(void) {
     CHECK(ssd1309_get_pixel(72, 33));
     check_info_line("S10 Note:C#-1 Vel:127");
     step_up(1u << 9);
+}
+
+// ─── Piano roll ────────────────────────────────────────────────
+//
+// Pixel tests of the Pattern view of a SYNTH clip: info column x 0..23, roll
+// x 24..127, step s on rows 4s..4s+3, semitone n of the window on columns
+// 24+4n..24+4n+3.
+
+#define ROLL_BEAT_PIXELS 26    // one per semitone on each beat line
+// FNV-1a of the frames the pre-roll code drew
+#define GOLDEN_DRUM_IDLE 505614909u
+#define GOLDEN_DRUM_HELD 2794909885u
+
+static bool px(int x, int y) { return ssd1309_get_pixel((uint8_t)x, (uint8_t)y); }
+
+static void roll_draw(uint8_t step, int8_t held_step) {
+    display_clear();
+    display_draw_pattern_view(&g_seq.patterns[0], 0, step, held_step);
+}
+
+static void roll_note(uint8_t step, uint8_t note, uint8_t flags) {
+    pattern_set_step(&g_seq.patterns[0], 0, step, note, 100, STEP_FLAG_ACTIVE | flags);
+}
+
+// True when every pixel of the rectangle is `on`.
+static bool rect_is(int x0, int y0, int x1, int y1, bool on) {
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) if (px(x, y) != on) return false;
+    }
+    return true;
+}
+
+static unsigned lit_in(int x0, int y0, int x1, int y1) {
+    unsigned n = 0;
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) if (px(x, y)) n++;
+    }
+    return n;
+}
+
+// Info line `line` (columns 0..22) is `text` drawn alone. The frame survives.
+static bool info_is(unsigned line, const char *text) {
+    uint8_t saved[OLED_BUF_SIZE];
+    bool actual[FONT_CHAR_H][23];
+    memcpy(saved, ssd1309_get_framebuffer(), sizeof(saved));
+    for (unsigned y = 0; y < FONT_CHAR_H; y++) {
+        for (unsigned x = 0; x < 23; x++) actual[y][x] = px((int)x, (int)(line * 8 + y));
+    }
+    display_clear();
+    ssd1309_draw_string(0, (uint8_t)(line * 8), text, false);
+    bool same = true;
+    for (unsigned y = 0; y < FONT_CHAR_H; y++) {
+        for (unsigned x = 0; x < 23; x++) {
+            if (actual[y][x] != px((int)x, (int)(line * 8 + y))) same = false;
+        }
+    }
+    memcpy(ssd1309_get_framebuffer(), saved, sizeof(saved));
+    return same;
+}
+
+static bool info_is_blank(unsigned line) {
+    return rect_is(0, (int)(line * 8), 22, (int)(line * 8 + 7), false);
+}
+
+static void test_roll_one_note_is_a_block_in_a_centred_window(void) {
+    roll_note(2, 60, 0);                    // window 48..73: note 60 is semitone 12
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(72, 8, 74, 10, true));    // 3x3 at x = 24 + 4*12, y = 4*2
+    CHECK(rect_is(72, 11, 74, 11, false));  // row y+3 stays clear
+    CHECK(rect_is(75, 8, 75, 11, false));
+    CHECK(rect_is(71, 8, 71, 11, false));
+    CHECK(lit_in(24, 0, 127, 63) == 9 + 3 * ROLL_BEAT_PIXELS);
+    roll_note(2, 60, STEP_FLAG_ACCENT);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(72, 8, 75, 10, true));    // accent: 4 wide
+    CHECK(rect_is(72, 11, 75, 11, false));  // and row y+3 still clear
+    CHECK(rect_is(76, 8, 76, 11, false));
+}
+
+static void test_roll_window_holds_25_semitones_and_not_26(void) {
+    roll_note(0, 40, 0);
+    roll_note(1, 65, 0);                    // 25 apart: window 40..65
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(24, 0, 26, 2, true));     // the low note in semitone 0
+    CHECK(rect_is(124, 4, 126, 6, true));   // the high one in semitone 25
+    CHECK(!px(127, 4));
+    roll_note(1, 66, 0);                    // 26 apart: the high one is an edge bar
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(24, 0, 26, 2, true));
+    CHECK(rect_is(127, 4, 127, 6, true));
+    CHECK(rect_is(126, 4, 126, 7, false));
+    CHECK(rect_is(127, 7, 127, 7, false));
+}
+
+static void test_roll_notes_0_and_127_alone_sit_at_the_window_ends(void) {
+    roll_note(0, 0, 0);                     // window 0..25
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(24, 0, 26, 2, true));
+    roll_note(0, 127, 0);                   // window 102..127
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(124, 0, 126, 2, true));   // semitone 25
+    CHECK(rect_is(127, 0, 127, 2, false));
+    CHECK(rect_is(24, 0, 27, 3, false));
+}
+
+static void test_roll_held_note_stays_in_the_window(void) {
+    roll_note(0, 30, 0);
+    roll_note(1, 90, 0);
+    roll_note(2, 60, 0);
+    roll_draw(NO_QUEUED_PATTERN, 2);        // window 35..60
+    CHECK(rect_is(24, 0, 24, 2, true));     // 30: bar at column 24
+    CHECK(rect_is(25, 0, 27, 3, false));
+    CHECK(rect_is(127, 4, 127, 6, true));   // 90: bar at column 127
+    CHECK(rect_is(124, 8, 126, 10, true));  // 60: the last semitone
+    roll_note(0, 40, 0);                    // 40 and 90 with 60 held: 40 is
+    roll_draw(NO_QUEUED_PATTERN, 2);        // inside window 40..65 (the plan said
+    CHECK(rect_is(24, 0, 26, 2, true));     // two edge bars; the formula gives one)
+    CHECK(rect_is(127, 4, 127, 6, true));
+    CHECK(rect_is(104, 8, 106, 10, true));  // 60: semitone 20
+    // A held step beyond the length is not "inside the length": no effect.
+    reset();
+    roll_note(0, 30, 0);
+    roll_note(1, 90, 0);
+    pattern_set_track_length(&g_seq.patterns[0], 0, 4);
+    roll_note(9, 60, 0);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    uint8_t free_window[OLED_BUF_SIZE];
+    memcpy(free_window, ssd1309_get_framebuffer(), sizeof(free_window));
+    roll_draw(NO_QUEUED_PATTERN, 9);
+    for (int y = 0; y < 64; y++) {
+        for (int x = 24; x < 128; x++) {
+            bool before = (free_window[(y / 8) * OLED_WIDTH + x] >> (y & 7)) & 1u;
+            CHECK(before == px(x, y));
+        }
+    }
+}
+
+static void test_roll_slide_runs_from_the_lower_to_the_higher_column(void) {
+    roll_note(0, 40, STEP_FLAG_SLIDE);
+    roll_note(1, 50, 0);                    // window 33..58: columns 52 and 92
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(52, 3, 94, 3, true));
+    CHECK(rect_is(51, 3, 51, 3, false) && rect_is(95, 3, 95, 3, false));
+    roll_note(0, 50, STEP_FLAG_SLIDE);
+    roll_note(1, 40, 0);                    // downwards: the same row
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(52, 3, 94, 3, true));
+    CHECK(rect_is(51, 3, 51, 3, false) && rect_is(95, 3, 95, 3, false));
+    // To an edge bar: 100 is above the window 40..65.
+    roll_note(0, 40, STEP_FLAG_SLIDE);
+    roll_note(1, 100, 0);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(24, 3, 127, 3, true));
+    // From an edge bar: 30 is below the window 35..60 (held step 2 on 60).
+    reset();
+    roll_note(0, 30, STEP_FLAG_SLIDE);
+    roll_note(1, 60, 0);
+    roll_note(2, 90, 0);
+    roll_draw(NO_QUEUED_PATTERN, 1);        // window 35..60
+    CHECK(rect_is(24, 3, 126, 3, true));
+    CHECK(rect_is(127, 3, 127, 3, false));
+}
+
+static void test_roll_slide_needs_a_next_step_that_is_on_and_inside_the_length(void) {
+    roll_note(0, 40, STEP_FLAG_SLIDE);      // next step off
+    roll_note(2, 50, 0);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(lit_in(24, 3, 127, 3) == 0);
+    reset();
+    roll_note(1, 40, STEP_FLAG_SLIDE);      // next step on but beyond the length
+    roll_note(2, 50, 0);
+    pattern_set_track_length(&g_seq.patterns[0], 0, 2);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(lit_in(24, 7, 127, 7) == 0);
+    reset();
+    roll_note(15, 40, STEP_FLAG_SLIDE);     // the last step does not wrap round
+    roll_note(0, 50, 0);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(lit_in(24, 63, 127, 63) == 0);
+}
+
+static void test_roll_slide_from_40_to_100_writes_nothing_outside_the_roll(void) {
+    roll_note(0, 40, 0);
+    roll_note(1, 100, 0);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    uint8_t plain[OLED_BUF_SIZE];
+    memcpy(plain, ssd1309_get_framebuffer(), sizeof(plain));
+    roll_note(0, 40, STEP_FLAG_SLIDE);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(lit_in(24, 3, 127, 3) == 104);
+    for (int y = 0; y < 64; y++) {
+        for (int x = 0; x < 24; x++) {      // the info column is the same with the slide
+            bool before = (plain[(y / 8) * OLED_WIDTH + x] >> (y & 7)) & 1u;
+            CHECK(before == px(x, y));
+        }
+    }
+    CHECK(lit_in(0, 0, 127, 63) == (unsigned)lit_in(0, 0, 23, 63) + lit_in(24, 0, 127, 63));
+}
+
+static void test_roll_tie_is_one_pixel_with_or_without_accent(void) {
+    roll_note(1, 60, STEP_FLAG_TIE);        // x = 72
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(px(73, 7));
+    CHECK(!px(72, 7) && !px(74, 7) && !px(75, 7));
+    roll_note(1, 60, STEP_FLAG_TIE | STEP_FLAG_ACCENT);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(px(73, 7));
+    CHECK(!px(72, 7) && !px(74, 7) && !px(75, 7));
+    CHECK(rect_is(72, 4, 75, 6, true));
+}
+
+static void test_roll_steps_beyond_the_length_are_dotted_and_empty(void) {
+    roll_note(1, 60, 0);
+    roll_note(6, 100, 0);                   // beyond the length: no block, no window effect
+    pattern_set_track_length(&g_seq.patterns[0], 0, 4);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(rect_is(72, 4, 74, 6, true));     // window still centred on 60
+    for (int s = 4; s < 16; s++) {
+        int y = 4 * s;
+        CHECK(lit_in(24, y, 127, y) == 0);
+        CHECK(lit_in(24, y + 2, 127, y + 2) == 0);
+        for (int x = 24; x < 128; x++) CHECK(px(x, y + 1) == ((x - 24) % 2 == 0));
+    }
+    CHECK(lit_in(24, 0, 127, 2) == 0);      // inside the length the row is plain
+    CHECK(lit_in(24, 1, 127, 1) == 0);
+}
+
+static void test_roll_beat_lines_sit_in_row_y3_of_steps_4_8_12(void) {
+    roll_draw(NO_QUEUED_PATTERN, -1);       // an empty clip
+    for (int s = 0; s < 16; s++) {
+        bool beat = s == 3 || s == 7 || s == 11;
+        for (int n = 0; n < 26; n++) {
+            CHECK(px(24 + 4 * n + 3, 4 * s + 3) == beat);
+            CHECK(!px(24 + 4 * n, 4 * s + 3));
+        }
+    }
+    CHECK(lit_in(24, 0, 127, 63) == 3 * ROLL_BEAT_PIXELS);
+}
+
+static void roll_expect_inversion(uint8_t step, bool inverted) {
+    uint8_t plain[OLED_BUF_SIZE];
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    memcpy(plain, ssd1309_get_framebuffer(), sizeof(plain));
+    roll_draw(step, -1);
+    for (int y = 0; y < 64; y++) {
+        for (int x = 0; x < 128; x++) {
+            bool before = (plain[(y / 8) * OLED_WIDTH + x] >> (y & 7)) & 1u;
+            bool flipped = inverted && x >= 24 && y / 4 == step;
+            CHECK(px(x, y) == (before != flipped));
+        }
+    }
+}
+
+static void test_roll_inverts_only_the_playing_step(void) {
+    roll_note(0, 60, 0);
+    roll_note(2, 64, STEP_FLAG_ACCENT);
+    pattern_set_track_length(&g_seq.patterns[0], 0, 8);
+    roll_expect_inversion(2, false);                    // stopped
+    transport_start();
+    CHECK(seq_playing_pattern(0) == &g_seq.patterns[0]);
+    roll_expect_inversion(2, true);
+    roll_expect_inversion(0, true);
+    roll_expect_inversion(7, true);
+    roll_expect_inversion(8, false);                    // beyond the length
+    roll_expect_inversion(12, false);
+    // Viewing another location than the one the track plays.
+    g_seq.patterns[3].tracks[0].type = TRACK_TYPE_SYNTH;
+    roll_note(2, 64, 0);
+    display_clear();
+    display_draw_pattern_view(&g_seq.patterns[3], 0, NO_QUEUED_PATTERN, -1);
+    uint8_t plain[OLED_BUF_SIZE];
+    memcpy(plain, ssd1309_get_framebuffer(), sizeof(plain));
+    display_clear();
+    display_draw_pattern_view(&g_seq.patterns[3], 0, 2, -1);
+    CHECK(memcmp(plain, ssd1309_get_framebuffer(), sizeof(plain)) == 0);
+}
+
+static void test_roll_held_step_marks_column_23_and_fills_info_lines_2_to_5(void) {
+    pattern_set_step(&g_seq.patterns[0], 0, 5, 70, 100,
+                     STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT | STEP_FLAG_SLIDE | STEP_FLAG_TIE);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(lit_in(23, 0, 23, 63) == 0);
+    for (unsigned line = 2; line <= 5; line++) CHECK(info_is_blank(line));
+    roll_draw(NO_QUEUED_PATTERN, 5);        // step 6
+    CHECK(rect_is(23, 20, 23, 23, true));
+    CHECK(lit_in(23, 0, 23, 63) == 4);
+    CHECK(info_is(2, "S06"));
+    CHECK(info_is(3, "A#4"));
+    CHECK(info_is(4, "v100"));
+    CHECK(info_is(5, "AST"));
+    pattern_set_step(&g_seq.patterns[0], 0, 5, 70, 100, STEP_FLAG_ACTIVE | STEP_FLAG_TIE);
+    roll_draw(NO_QUEUED_PATTERN, 5);
+    CHECK(info_is(5, "T"));
+    // An empty held step still shows its values.
+    roll_draw(NO_QUEUED_PATTERN, 11);
+    CHECK(rect_is(23, 44, 23, 47, true));
+    CHECK(info_is(2, "S12"));
+    CHECK(info_is(3, "C-1"));
+    CHECK(info_is(4, "v0"));
+    CHECK(info_is_blank(5));
+}
+
+static void test_roll_empty_clip_centres_the_window_on_c4(void) {
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(info_is(6, "C3"));                // window 48..73, so C4 is semitone 12
+    roll_draw(NO_QUEUED_PATTERN, 3);        // a held step that is off changes nothing
+    CHECK(info_is(6, "C3"));
+    roll_note(0, 60, 0);
+    roll_draw(NO_QUEUED_PATTERN, -1);
+    CHECK(info_is(6, "C3"));
+    CHECK(rect_is(72, 0, 74, 2, true));
+}
+
+static void test_roll_info_column_lines_0_1_6_7(void) {
+    g_seq.active_pattern[2] = 9;            // B2
+    g_seq.transport.queued_pattern[2] = 3;  // a queue and the mutes are not drawn here
+    pattern_set_track_length(&g_seq.patterns[9], 2, 7);
+    pattern_set_step(&g_seq.patterns[9], 2, 0, 1, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[9], 2, 1, 27, 100, STEP_FLAG_ACTIVE);  // 26 apart: window from C#-1
+    g_seq.transport.bpm = 145.4f;
+    display_clear();
+    display_draw_pattern_view(&g_seq.patterns[9], 2, NO_QUEUED_PATTERN, -1);
+    CHECK(info_is(0, "B2T3"));
+    CHECK(info_is(1, "L7"));
+    CHECK(info_is_blank(2) && info_is_blank(3) && info_is_blank(4) && info_is_blank(5));
+    CHECK(info_is(6, "C#-1"));
+    CHECK(info_is(7, "145"));
+    g_seq.transport.bpm = 99.6f;
+    display_clear();
+    display_draw_pattern_view(&g_seq.patterns[9], 2, NO_QUEUED_PATTERN, -1);
+    CHECK(info_is(7, "100"));
+}
+
+static void test_roll_info_text_stays_left_of_column_24(void) {
+    // An empty clip draws nothing in the roll but its beat lines, so text that
+    // overran the info column would show up as extra pixels. The held step is
+    // off, so it adds none either, yet its flags and values still print.
+    g_seq.patterns[0].steps[0][4].note = 1;
+    g_seq.patterns[0].steps[0][4].velocity = 127;
+    g_seq.patterns[0].steps[0][4].flags = STEP_FLAG_ACCENT | STEP_FLAG_SLIDE | STEP_FLAG_TIE;
+    g_seq.transport.bpm = 300.0f;
+    g_seq.active_pattern[0] = 31;           // D8
+    display_clear();
+    display_draw_pattern_view(&g_seq.patterns[0], 0, NO_QUEUED_PATTERN, 4);
+    CHECK(lit_in(24, 0, 127, 63) == 3 * ROLL_BEAT_PIXELS);
+    CHECK(info_is(0, "D8T1"));
+    CHECK(info_is(2, "S05"));
+    CHECK(info_is(3, "C#-1"));
+    CHECK(info_is(4, "v127"));
+    CHECK(info_is(5, "AST"));
+    CHECK(info_is(7, "300"));
+}
+
+// The DRUM picture is the step grid it always was: this frame was captured
+// from the code before the roll existed.
+static uint32_t frame_hash(void) {
+    const uint8_t *frame = ssd1309_get_framebuffer();
+    uint32_t hash = 2166136261u;
+    for (unsigned i = 0; i < OLED_BUF_SIZE; i++) hash = (hash ^ frame[i]) * 16777619u;
+    return hash;
+}
+
+static void test_drum_cell_keeps_the_step_grid_picture(void) {
+    g_seq.patterns[0].tracks[0].type = TRACK_TYPE_DRUM;
+    pattern_set_step(&g_seq.patterns[0], 0, 0, 36, 100, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
+    pattern_set_step(&g_seq.patterns[0], 0, 3, 36, 100, STEP_FLAG_ACTIVE | STEP_FLAG_SLIDE);
+    pattern_set_step(&g_seq.patterns[0], 0, 5, 36, 100, STEP_FLAG_ACTIVE | STEP_FLAG_TIE);
+    pattern_set_track_length(&g_seq.patterns[0], 0, 12);
+    g_seq.transport.queued_pattern[0] = 4;
+    display_clear();
+    display_draw_pattern_view(&g_seq.patterns[0], 0, NO_QUEUED_PATTERN, -1);
+    CHECK(frame_hash() == GOLDEN_DRUM_IDLE);
+    display_clear();
+    display_draw_pattern_view(&g_seq.patterns[0], 0, NO_QUEUED_PATTERN, 5);
+    CHECK(frame_hash() == GOLDEN_DRUM_HELD);
+    // Not a roll: the old info lines and the grid are there, column 23 is text.
+    CHECK(px(32, 20) || px(32, 25));
+}
+
+static void test_roll_held_step_through_the_ui(void) {
+    enter_pattern_view();                   // track 0 is a SYNTH track
+    step_down(1u << 4);
+    render();
+    CHECK(rect_is(23, 16, 23, 19, true));   // step 5, shown from the first moment
+    CHECK(info_is(2, "S05"));
+    CHECK(info_is(3, "C-1"));
+    CHECK(info_is(4, "v0"));
+    step_up(1u << 4);
+    step_down(1u << 9);
+    turn(0, -59);                           // step 10: note 1
+    turn(1, 27);                            // velocity 127
+    render();
+    CHECK(info_is(3, "C#-1"));
+    CHECK(info_is(4, "v127"));
+    step_down(1u << 2);                     // a lower step joins: the lowest is shown
+    render();
+    CHECK(rect_is(23, 8, 23, 11, true));
+    CHECK(lit_in(23, 0, 23, 63) == 4);
+    CHECK(info_is(2, "S03"));
+    step_up(1u << 2);
+    step_up(1u << 9);
+    render();
+    CHECK(lit_in(23, 0, 23, 63) == 0);
+    // The tempo is in the info column, not at the top right.
+    g_seq.transport.bpm = 123.0f;
+    render();
+    CHECK(info_is(7, "123"));
+    CHECK(lit_in(78, 0, 127, 7) == 0);
 }
 
 static void test_grid_long_press_applies_to_later_steps(void) {
@@ -1871,8 +2282,25 @@ static void test_grid_step_held_without_a_press_event_never_joins(void) {
     CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
 }
 
+// Packs the current frame into 1 bit per pixel rows, leftmost pixel in the
+// top bit, and checks that something is lit.
+static void capture_frame(uint8_t frame[OLED_HEIGHT][OLED_WIDTH / 8]) {
+    unsigned pixels = 0;
+    for (unsigned y = 0; y < OLED_HEIGHT; y++) {
+        for (unsigned x = 0; x < OLED_WIDTH; x += 8) {
+            uint8_t byte = 0;
+            for (unsigned bit = 0; bit < 8; bit++) {
+                if (ssd1309_get_pixel(x + bit, y)) { byte |= 1u << (7 - bit); pixels++; }
+            }
+            frame[y][x / 8] = byte;
+        }
+    }
+    CHECK(pixels > 0);
+}
+
 static void render_views(const char *path) {
-    uint8_t image[6][OLED_HEIGHT][OLED_WIDTH / 8];
+    // Six screens, then the piano roll not holding a step and holding one.
+    uint8_t image[8][OLED_HEIGHT][OLED_WIDTH / 8];
     for (unsigned entry = 0; entry < MAX_SONG_ENTRIES; entry++) CHECK(song_append(0, 255));
     ui.song_cursor = MAX_SONG_ENTRIES - 1;
     for (unsigned mode = UI_SESSION; mode <= UI_SONG_EDIT; mode++) {
@@ -1880,24 +2308,45 @@ static void render_views(const char *path) {
         ui.notify_ticks = 0;
         display_clear();
         ui_render();
-        unsigned pixels = 0;
-        for (unsigned y = 0; y < OLED_HEIGHT; y++) {
-            for (unsigned x = 0; x < OLED_WIDTH; x += 8) {
-                uint8_t byte = 0;
-                for (unsigned bit = 0; bit < 8; bit++) {
-                    bool on = ssd1309_get_pixel(x + bit, y);
-                    if (on) { byte |= 1u << (7 - bit); pixels++; }
-                }
-                image[mode][y][x / 8] = byte;
-            }
-        }
-        CHECK(pixels > 0);
+        capture_frame(image[mode]);
     }
+
+    // A clip that shows what the roll can draw: notes, an accent, a slide, a
+    // tie, a note out of the window (100), and steps beyond the length (12..15,
+    // one of them on). The window runs 48..73.
+    pattern_t *clip = &g_seq.patterns[0];
+    pattern_set_step(clip, 0, 0, 60, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(clip, 0, 1, 64, 100, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
+    pattern_set_step(clip, 0, 2, 67, 100, STEP_FLAG_ACTIVE | STEP_FLAG_SLIDE);
+    pattern_set_step(clip, 0, 3, 72, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(clip, 0, 4, 55, 100, STEP_FLAG_ACTIVE | STEP_FLAG_TIE);
+    pattern_set_step(clip, 0, 5, 100, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(clip, 0, 6, 48, 100, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT | STEP_FLAG_SLIDE);
+    pattern_set_step(clip, 0, 7, 52, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(clip, 0, 9, 62, 100, STEP_FLAG_ACTIVE | STEP_FLAG_SLIDE | STEP_FLAG_TIE);
+    pattern_set_step(clip, 0, 10, 100, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(clip, 0, 13, 70, 100, STEP_FLAG_ACTIVE);
+    pattern_set_track_length(clip, 0, 12);
+    sequencer_refresh_track_playback(0, 0);
+    transport_start();
+    pulses(3 * PULSES_PER_STEP + 1);        // the playhead is on step 4
+    CHECK(g_seq.transport.current_track_step[0] == 3);
+    ui.mode = UI_PATTERN_VIEW;
+    ui.selected_track = 0;
+    ui.grid_hold = 0;
+    display_clear();
+    ui_render();
+    capture_frame(image[6]);
+    ui.grid_hold = 1u << 2;                 // step 3 held
+    display_clear();
+    ui_render();
+    capture_frame(image[7]);
+    ui.grid_hold = 0;
     if (path) {
         FILE *file = fopen(path, "wb");
         CHECK(file != NULL);
-        fprintf(file, "P4\n256 192\n");
-        for (unsigned pair = 0; pair < 3; pair++) {
+        fprintf(file, "P4\n256 256\n");
+        for (unsigned pair = 0; pair < 4; pair++) {
             for (unsigned y = 0; y < OLED_HEIGHT; y++) {
                 CHECK(fwrite(image[pair * 2][y], 1, 16, file) == 16);
                 CHECK(fwrite(image[pair * 2 + 1][y], 1, 16, file) == 16);
@@ -3101,6 +3550,23 @@ int main(int argc, char **argv) {
     RUN(test_grid_hold_creates_drum_hit_with_kit_note);
     RUN(test_held_step_line_is_rendered);
     RUN(test_held_step_line_shows_lowest_held_step);
+    RUN(test_roll_one_note_is_a_block_in_a_centred_window);
+    RUN(test_roll_window_holds_25_semitones_and_not_26);
+    RUN(test_roll_notes_0_and_127_alone_sit_at_the_window_ends);
+    RUN(test_roll_held_note_stays_in_the_window);
+    RUN(test_roll_slide_runs_from_the_lower_to_the_higher_column);
+    RUN(test_roll_slide_needs_a_next_step_that_is_on_and_inside_the_length);
+    RUN(test_roll_slide_from_40_to_100_writes_nothing_outside_the_roll);
+    RUN(test_roll_tie_is_one_pixel_with_or_without_accent);
+    RUN(test_roll_steps_beyond_the_length_are_dotted_and_empty);
+    RUN(test_roll_beat_lines_sit_in_row_y3_of_steps_4_8_12);
+    RUN(test_roll_inverts_only_the_playing_step);
+    RUN(test_roll_held_step_marks_column_23_and_fills_info_lines_2_to_5);
+    RUN(test_roll_empty_clip_centres_the_window_on_c4);
+    RUN(test_roll_info_column_lines_0_1_6_7);
+    RUN(test_roll_info_text_stays_left_of_column_24);
+    RUN(test_drum_cell_keeps_the_step_grid_picture);
+    RUN(test_roll_held_step_through_the_ui);
     RUN(test_grid_long_press_applies_to_later_steps);
     RUN(test_grid_encoder_press_ending_as_a_step_goes_down_is_not_part_of_it);
     RUN(test_grid_tap_edits_selected_track_and_pattern);

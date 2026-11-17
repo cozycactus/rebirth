@@ -1482,6 +1482,8 @@ static void render_pattern_view(const transport_snapshot_t *snap) {
         }
         display_draw_pattern_view(pat, track, g_seq.transport.current_track_step[track],
                                   held_step);
+        // A SYNTH roll prints the tempo in its own info column.
+        if (pat->tracks[track].type == TRACK_TYPE_SYNTH) return;
     }
     display_draw_bpm(g_seq.transport.bpm);
 }

@@ -156,6 +156,19 @@ buttons edit it.
 - The step editor returns to the screen it was opened from. In the pattern
   view, encoder 1 long returns to the Session view; in the selector, encoder 2
   long does.
+- The Pattern view of a SYNTH clip is a piano roll: time runs from top to
+  bottom (step 1 at the top, four pixels a step) and pitch from left to right
+  (four pixels a semitone, a window of 26 semitones that follows the clip's
+  lowest and highest notes). A note is a 3x3 block, 4 wide with accent; a line
+  under the block runs to the next note for a slide, and a single dot under it
+  is a tie. A note outside the window is a bar at the left or right edge. Steps
+  beyond the clip's length are a dotted line and show no notes, a row of dots
+  after every fourth step marks the beats, and the step the track is playing is
+  inverted. The four
+  characters at the left show clip and track, length, the note at the window's
+  left edge and the tempo; while a step is held they also show its number,
+  note, velocity and flags (A accent, S slide, T tie), and a mark beside the
+  step's rows. A DRUM clip keeps the step grid, and a kit its lanes.
 - Pattern view step buttons on a SYNTH or DRUM track: a tap shorter than half
   a second toggles the step when the button is released. Hold one or more steps
   and turn encoder 1 for note or encoder 2 for velocity; encoder 1 short/long
