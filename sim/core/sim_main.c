@@ -115,6 +115,22 @@ uint32_t sim_dbg_track_config(int track) {
            ((uint32_t)c->gate_length_pct << 16) | ((uint32_t)c->output_mode << 24);
 }
 int sim_dbg_mutes(void) { return seq_get_track_mutes(); }
+int sim_dbg_clock_source(void) { return g_seq.clock_source; }
+int sim_dbg_clock_state(void) {
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    return (snap.ext_following ? 1 : 0) | (snap.ext_armed ? 2 : 0) | (snap.ext_present ? 4 : 0);
+}
+int sim_dbg_ext_tenths(void) {
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    return snap.ext_shown_x16 ? (int)(400000000.0 / snap.ext_shown_x16 + 0.5) : 0;
+}
+uint32_t sim_dbg_ext_losses(void) {
+    sequencer_jitter_stats_t stats;
+    sequencer_get_jitter_stats(&stats);
+    return stats.ext_losses;
+}
 uint32_t sim_dbg_overruns(void) {
     sequencer_jitter_stats_t stats;
     sequencer_get_jitter_stats(&stats);
