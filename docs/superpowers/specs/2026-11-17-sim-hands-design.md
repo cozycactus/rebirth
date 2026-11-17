@@ -327,9 +327,16 @@ show and checks, against a table of touches it builds itself from
    during a pinch, both pads are within 2 mm of the knob's rim;
 4. at those moments no clearance vertex of either hand is below the plate
    or the top of the control under it;
-5. the two hands' palm boxes do not overlap, and the left hand's wrist is
-   left of the right's when both are over the panel;
-6. a hand's peak speed, measured on the driver's poses, stays under 4 m/s.
+5. in the live set, the two hands' palm boxes do not overlap, and the left
+   hand's wrist is left of the right one when both are over the panel;
+6. in the live set, a hand's peak speed, measured on the driver's poses,
+   stays under 4 m/s.
+
+The preparation is never drawn at normal speed (x8, x16, or not at all), and
+its tempo sometimes leaves no assignment that avoids both a crossing and a
+late hand (the kit loop: TRACK, steps on both sides of the knob 66–100 ms
+later, TRACK again). There the check counts crossings and palm overlaps and
+bounds the peak speed at 8 m/s, but does not fail on a crossing.
 
 The poses of identical situations are cached. The check prints its running
 time; if the whole run exceeds two minutes in CI, the exact fitting (3, 4)
