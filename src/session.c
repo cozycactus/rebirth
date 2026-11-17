@@ -85,6 +85,12 @@ void session_set_kit_lane(uint8_t track, uint8_t lane) {
     if (track < NUM_TRACKS && lane < KIT_LANES) kit_lane[track] = lane;
 }
 
+void session_set_focus(uint8_t track, uint8_t location) {
+    if (track >= NUM_TRACKS || location >= MAX_PATTERNS) return;
+    focus_track = track;
+    focus_location = location;
+}
+
 void session_move_focus(int8_t detents) {
     transport_snapshot_t snap;
     sequencer_snapshot(&snap);

@@ -68,6 +68,13 @@ void pattern_clear_track(pattern_t *p, uint8_t track) {
     memset(p->kit_steps[track], 0, sizeof(p->kit_steps[track]));
 }
 
+void pattern_copy_track(pattern_t *dst, const pattern_t *src, uint8_t track) {
+    if (track >= NUM_TRACKS || dst == src) return;
+    memcpy(dst->steps[track], src->steps[track], sizeof(dst->steps[track]));
+    memcpy(dst->kit_steps[track], src->kit_steps[track], sizeof(dst->kit_steps[track]));
+    pattern_set_track_length(dst, track, pattern_get_track_length(src, track));
+}
+
 static void shift_track_steps(step_t *steps, int8_t direction) {
     if (direction == 0) return;
 

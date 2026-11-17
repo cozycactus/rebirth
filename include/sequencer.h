@@ -249,6 +249,10 @@ void pattern_toggle_step(pattern_t *p, uint8_t track, uint8_t step);
 void pattern_copy(pattern_t *dst, const pattern_t *src);
 void pattern_clear(pattern_t *p);
 void pattern_clear_track(pattern_t *p, uint8_t track);
+// Copies one track's steps, kit steps and effective length from src to dst.
+// The track configuration is not copied. No-op for an invalid track or
+// dst == src.
+void pattern_copy_track(pattern_t *dst, const pattern_t *src, uint8_t track);
 void pattern_shift(pattern_t *p, int8_t direction);
 void pattern_shift_track(pattern_t *p, uint8_t track, int8_t direction);
 uint8_t pattern_get_track_length(const pattern_t *p, uint8_t track);

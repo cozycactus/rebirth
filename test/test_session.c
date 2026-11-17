@@ -240,6 +240,28 @@ static void test_lane_walk_keeps_location(void) {
     CHECK(f.track == 1 && f.location == 5 && f.lane == LANE_SD);
 }
 
+static void test_set_focus_moves_the_cell(void) {
+    reset();
+    session_set_focus(3, 13);
+    session_focus_t f = session_get_focus();
+    CHECK(f.track == 3 && f.location == 13 && f.lane == 0);
+    session_set_focus(NUM_TRACKS, 2);
+    f = session_get_focus();
+    CHECK(f.track == 3 && f.location == 13);
+    session_set_focus(1, MAX_PATTERNS);
+    f = session_get_focus();
+    CHECK(f.track == 3 && f.location == 13);
+}
+
+static void test_set_focus_on_kit_reads_remembered_lane(void) {
+    reset();
+    g_seq.patterns[9].tracks[1].type = TRACK_TYPE_KIT;
+    session_set_kit_lane(1, LANE_RC);
+    session_set_focus(1, 9);
+    session_focus_t f = session_get_focus();
+    CHECK(f.track == 1 && f.location == 9 && f.lane == LANE_RC);
+}
+
 int main(void) {
     seq_lock_init();
     RUN(test_pad_queues_and_focuses);
@@ -259,5 +281,7 @@ int main(void) {
     RUN(test_walk_stops_across_kit);
     RUN(test_pad_on_kit_uses_remembered_lane);
     RUN(test_lane_walk_keeps_location);
+    RUN(test_set_focus_moves_the_cell);
+    RUN(test_set_focus_on_kit_reads_remembered_lane);
     return 0;
 }
