@@ -24,7 +24,7 @@
 ## Review Focus
 
 1. A MUTE press whose decision section runs right after the timer applied a boundary: the change waits for the following boundary and is never lost (Task 1 test `test_press_after_boundary_waits_for_next`).
-2. The held key released in the same UI pass as a member's press: the member is in the group that is applied (Task 3 test `test_mute_join_and_release_in_one_pass`).
+2. The held key released in the same UI pass as a member's press (all MUTE keys share one panel column): both changes wait for the same launch point, in either track order (Task 3 test `test_mute_press_and_release_in_one_pass`).
 3. The quantisation changed while a change waits (1 BAR to NEXT STEP): it lands on the next step (Task 1 test `test_waiting_mute_follows_quant_change`).
 4. A group released after PLAY stopped the transport during the hold: it applies at once (Task 3 test `test_mute_group_released_after_stop_applies_now`).
 5. The power budget scaling a frame full of white MUTE lights still keeps them white (equal channels) (Task 2 test `test_mute_white_survives_budget`).
@@ -81,6 +81,12 @@ Use the file's `reset()` (it sets TRACK LOOP; set the quantisation each test nee
 - `test_bar_inside_stored_refresh`: as `test_stored_unmute_waits_silently`, with `fake_before_lock` running the timer through the bar during the stored-mute clearing: the change landed at that bar (`track_mutes` bit clear, nothing waits), and from the next step on the track's notes are sent.
 - `test_snapshot_reports_waiting_mutes`: `sequencer_snapshot()` has `mute_pending` equal to the waiting mask.
 - `test_init_clears_mute_masks`: set both masks, `sequencer_init()`: both 0.
+- `test_mute_and_pad_decide_on_one_row`: TRACK LOOP; a waiting mute and a queued pad on the same track; `fake_before_lock` publishes a shorter row (`set_length`) between `apply_due_mutes()` and phase 1: the mute and the pad decide on the same row (both land, or neither).
+- `test_overflow_panic_cancels_waiting_mutes`: a timer-raised panic (MIDI overflow, as the existing overflow tests force it) leaves `mute_pending == 0`.
+- `test_clear_queue_keeps_waiting_mutes`: `transport_clear_queue()` and `transport_clear_track_queue()` leave a waiting change.
+- `test_mute_calls_leave_other_tracks`: each of the four calls leaves the pending, target and live bits of tracks outside its mask unchanged.
+
+Test-helper traps: `fake_before_lock` fires before every lock, so a hook clears itself before ticking the timer (as `bar_line_on_second_playback_lock` in `test_ui.c` does) and picks its lock: the playback lock for the press-after-boundary case, a shared-lock acquisition after the decision section has unlocked for the stored-refresh case. `count_note_on()` also counts velocity-0 Note Ons (kit releases): tell hits by velocity > 0.
 
 Register each in `main()` in the file's order.
 
@@ -114,7 +120,9 @@ static void change_mutes(uint8_t mask, uint8_t target, mutes_op_t op) {
 }
 ```
 
-The timer: right after the MIDI Clock send and before `uint8_t track_mutes = g_seq.track_mutes;`, when `g_seq.mute_pending` and `t->pulse_count % PULSES_PER_STEP == 0`, call `static void apply_due_mutes(transport_t *t)`: quantisation from `g_seq.launch_quant` (TRACK LOOP read as BAR in Song mode); global step `t->pulse_count / PULSES_PER_STEP`; BAR `% 16 == 0`, BEAT `% 4 == 0`, STEP always; TRACK LOOP: `load_prepared_track(tr)` then due when `t->track_step_count[tr] >= clamp_pattern_steps(prepared_playback.track[tr].length)`. Write the due bits of `mute_target` into `track_mutes` in one `seq_lock` section and clear them from `mute_pending`.
+`transport_cancel_mutes()` is not an op of `change_mutes()`: under both locks it takes `mask & mute_pending`, reports their `mute_target` bits, clears those pending bits, and does no stored-mute work.
+
+The timer: right after the MIDI Clock send and before `uint8_t track_mutes = g_seq.track_mutes;`, when `g_seq.mute_pending` and `t->pulse_count % PULSES_PER_STEP == 0`, call `static void apply_due_mutes(transport_t *t)`: quantisation from `g_seq.launch_quant` (TRACK LOOP read as BAR in Song mode); global step `t->pulse_count / PULSES_PER_STEP`; BAR `% 16 == 0`, BEAT `% 4 == 0`, STEP always; TRACK LOOP: `load_prepared_track(tr)` then due when `t->track_step_count[tr] >= clamp_pattern_steps(prepared_playback.track[tr].length)`. `load_prepared_track()` takes `seq_lock` itself and the timer already holds the playback lock, so load first with no lock of yours held, then write the due bits of `mute_target` into `track_mutes` in one `seq_lock` section and clear them from `mute_pending`. `apply_due_mutes()` returns the mask of tracks it loaded and phase 1 skips `load_prepared_track()` for them (a location switched by `apply_track_queue_if_ready()` still loads its new row there), so the mute and a queued pad decide on one row.
 
 Clear `mute_pending` in `stop_playback_outputs()`, in `transport_start()` where the queues are reset (before the empty-song return), and both masks in `sequencer_init()`. `sequencer_snapshot()` copies `mute_pending`.
 
@@ -135,7 +143,7 @@ git commit -m "Engine: MUTE changes wait for the launch point"
 ### Task 2: The panel accessor and the lights
 
 **Files:**
-- Modify: `include/panel_input.h`, `src/panel_input.c`, `include/led_frame.h`, `src/led_frame.c`
+- Modify: `include/panel_input.h`, `src/panel_input.c`, `include/led_frame.h`, `src/led_frame.c`, `src/ui.c` (only `led_state_t state = {0};` in `update_panel_lights()`, so the new fields are 0 until Task 3 fills them)
 - Test: `test/test_panel_input.c`, `test/test_led_frame.c`
 
 **Interfaces:**
@@ -188,7 +196,7 @@ git commit -m "Panel: MUTE down state; lights for waiting and grouped mutes"
 
 - [ ] **Step 1: Extend the `test_ui.c` panel fake**
 
-`panel_input_mute_down()` from a `mutes_down[NUM_TRACKS]` array that `push_panel_event()` sets for `PANEL_MUTE` and `panel_input_resync()` clears; helpers `mute_down(track)` and `mute_up(track)` that push one event and run `ui_update()`.
+`panel_input_mute_down()` from a `mutes_down[NUM_TRACKS]` array that `push_panel_event()` sets for `PANEL_MUTE` and `panel_input_resync()` and `reset()` clear (beside `pads_down`, so a key left down cannot leak into the next test); helpers `mute_down(track)` and `mute_up(track)` that push one event and run `ui_update()`.
 
 - [ ] **Step 2: Write the failing tests**
 
@@ -199,26 +207,33 @@ New tests (BAR and playing unless said otherwise; "lands" = after `pulses()` to 
 - `test_mute_second_press_cancels`.
 - `test_two_quick_mute_presses_are_two_presses`: `mute_down(0)`, `sleep_ms(100)`, `mute_down(1)`, both up: both bits pending, no group.
 - `test_mute_group_collects_after_half_a_second`: `mute_down(0)` (pending 0), `sleep_ms(PAD_COPY_HOLD_MS)`, `mute_down(1)`, `mute_up(1)`: pending empty, both MUTE lights steady white in the shown frame; `mute_up(0)`: pending 0 and 1; both land on the same pulse.
-- `test_mute_join_and_release_in_one_pass`: after the hold, push MUTE 1 down and MUTE 0 up, then one `ui_update()`: the group (0 and 1) is pending.
+- `test_mute_press_and_release_in_one_pass`: after the hold, push a member's press and the held key's release before one `ui_update()`, once with the member's track below the held key's (the press comes first: it joins, then the release queues the group) and once above (the release comes first: the press is an ordinary one): in both, both changes wait and land on the same pulse.
+- `test_mute_hold_threshold`: a press 499 ms after the held key's is an ordinary press; at 500 ms it joins.
 - `test_mute_group_target_fixed_at_join`: track 1 audible joins; before the release `seq_set_track_mute(1, true)`; release; at the bar track 1 is muted (the target), not unmuted.
 - `test_mute_group_member_toggles_out`: join 1, press 1 again: not in the group; release 0: only 0's change is pending.
 - `test_mute_group_waiting_key_press_cancels_it`: tap MUTE 2 (pending); hold 0 for the hold time; press 2: its change is cancelled and it does not join; 0's change still waits (no group formed).
 - `test_mute_empty_group_release_keeps_held_change`: hold 0 past the hold time, release: 0's change still pending.
 - `test_mute_group_without_landed_held_key`: hold 0, play through the bar (0 lands), press 1: the group is 1 only; release: 1 pending, 0 unchanged.
-- `test_mute_group_immediate_mode`: NEXT STEP: hold 0 (toggles at once), after the hold time press 1: unchanged; release 0: 1 toggled at once.
+- `test_mute_group_immediate_mode`: NEXT STEP: hold 0 (toggles at once), after the hold time press 1: unchanged; release 0: 1 toggled at once and 0 not toggled again.
+- `test_mute_group_unmutes_stored_mute`: a member muted by a stored mute joins (target audible): after the bar it plays and no location keeps its stored mute; with a held key whose change was an unmute, the withdrawn target (audible) is the one applied.
+- `test_mute_group_lands_as_targets`: after the bar of `test_mute_group_collects_after_half_a_second`, `track_mutes` has both bits (both were audible).
+- `test_mute_sweep_drops_hold_not_reported_down`: the held key's `mutes_down` cleared without an event (generation unchanged): the sweep drops the hold and the group.
 - `test_mute_group_released_after_stop_applies_now`: group formed while playing, PLAY stops, release: the members change at once.
-- `test_mute_lost_hold_drops_group`: group formed; `poll_loses_sync = true` and a pass: the group is gone (no white light), and the later release of 0 changes nothing.
+- `test_mute_lost_hold_drops_group`: group formed; `poll_loses_sync = true` and a pass: the group is gone (no white light), and after the later release of 0 `mute_pending` and `track_mutes` are what they were before the group formed minus the withdrawn change, and stay so through the next bar.
+- `test_mute_release_after_lost_generation_in_one_pass`: group formed; `poll_loses_sync = true` and the held key's release in the same pass: nothing is queued.
 - `test_mute_join_in_a_pass_that_lost_the_hold`: 0 held past the hold time; `poll_loses_sync = true` and MUTE 1 pushed down in that same pass: 1 is an ordinary press (its change waits), no group forms, and 0's own change still waits.
-- `test_mute_hold_dropped_by_panic` and `test_mute_hold_dropped_by_save`: the group is gone and the release changes nothing.
+- `test_mute_hold_dropped_by_panic`, `test_mute_hold_dropped_by_save` and `test_mute_hold_dropped_by_load`: the group is gone and the release changes nothing.
 - `test_selector_mute_acts_now_and_leaves_group`: MUTE 2 waiting; selector short release of button 3 (track 2): pending bit clear, `track_mutes` toggled at once; with track 2 collected in a group, the selector press also takes it out of the group.
 - `test_pending_mute_light_in_frame`: MUTE 4 waiting: the shown frame's `LED_MUTE(4)` is white on an odd sixteenth.
+
+Frames reach `shown[]` only through `ui_render()`: call it before every light assertion, at a pulse inside an odd sixteenth (24-47 within a beat) for the waiting light.
 
 - [ ] **Step 3: Run; the new tests fail.**
 
 - [ ] **Step 4: Implement**
 
 - `session_mute()` → `transport_toggle_mutes(1u << track)`.
-- `handle_panel_events()`: MUTE press and release per the spec's "Groups": no held key → ordinary press, becomes held; held key down for less than `PAD_COPY_HOLD_MS`, or no longer trusted (`!panel_input_mute_down(held)` or generation changed) → ordinary press; otherwise join (in group → out; waiting change → `transport_cancel_mutes()` only; else the first joiner withdraws the held key's waiting change with its target, and the key joins with target `!(seq_get_track_mutes() & bit)`). Release of the held key: if the group is non-empty and the generation is unchanged, `transport_set_mutes(group, target)`; then no held key and an empty group. Other MUTE releases do nothing.
+- `handle_panel_events()`: today `if (!ev.down) continue;` drops every non-pad release before the switch; MUTE releases must be handled before it. MUTE press and release per the spec's "Groups": no held key → ordinary press, becomes held; held key down for less than `PAD_COPY_HOLD_MS`, or the panel generation changed since its press → ordinary press; otherwise join (in group → out; waiting change → `transport_cancel_mutes()` only; else the first joiner withdraws the held key's waiting change: only when `transport_cancel_mutes(held_bit, &t)` returns its bit does the held key enter the group, with target `t`, never a recomputed one; the joining key's own target is `!(seq_get_track_mutes() & bit)`). The join does not ask `panel_input_mute_down(held)`: see the spec on same-pass events. Release of the held key: if the group is non-empty and the generation is unchanged, `transport_set_mutes(group, target)`; then no held key and an empty group. Other MUTE releases do nothing.
 - End-of-pass sweep beside `release_lost_pad_keys()`: a held key not reported down or whose generation changed is dropped with its group. The panic combo and a flash save or load drop it where they drop pad holds.
 - Selector buttons 1-8: take the track out of the group, then `transport_toggle_mutes_now(1u << t)`.
 - `update_panel_lights()`: `state.mute_pending = snap->mute_pending; state.mute_group = <group>;`.
@@ -250,12 +265,13 @@ git commit -m "UI: quantised MUTE presses and mute groups"
 - `artist_check.js`, `device_check.js`: `quantMutes: process.env.QMUTE === '1'` into `buildShow`.
 - `app.js` `startShow()`: `quantMutes: device.features().quantMutes`.
 
-- [ ] **Step 2: `device_check.js`**: the "MUTE does not work after the resets" tap: with `QMUTE`, check the mutes unchanged right after the tap, then run one bar (`show.barUs`) plus 50 ms and check the change.
+- [ ] **Step 2: `device_check.js`**: the "MUTE does not work after the resets" tap: with `QMUTE`, first run to the middle of a bar (the transport's pulse is in `device.inspect()`), tap, run 30 ms, check the mutes unchanged, then run to the next bar plus 50 ms and check the change. A tap not aligned to the bar would straddle a boundary about one run in nine.
 
 - [ ] **Step 3: The `QMUTE` score in `artist.js`** (`Script` keeps `this.quantMutes`; only `stage()`, `perform()`, `prepare()` captions and `mutePair` change):
 
-- Captions: `perform()` says MUTE also waits for the bar and flashes white until then; `mute`/`mutePair` say the change lands on the downbeat.
-- `mute()` and `mutePair()` (as two fingers) keep their moments. With `quantMutes` each records two mutes-only points: `{ t: downbeat - 40 ms, mutesOnly: true, map: { muted: before } }` and `{ t: downbeat + 40 ms, ..., muted: after }`, the downbeat being that of the bar passed to `onDownbeat` (remember it in `st`).
+- Captions: `perform()` says MUTE also waits for the bar and flashes white until then; `mute`/`mutePair` say the change lands on the downbeat; the group gesture's caption says it is a group (for example "MUTE A держит, B добавляет в группу"), so the logs can count groups apart from two-finger pairs.
+- The script's `muted` model may still toggle when `mute`/`mutePair` is called (the mid-bar snapshots read it after the downbeat), but every mutes-only point takes its `before` and `after` explicitly, never the model at a later moment.
+- `mute()` and `mutePair()` (as two fingers) keep their moments. With `quantMutes` each records two mutes-only points: `{ t: downbeat - 25 ms, mutesOnly: true, map: { muted: before } }` and `{ t: downbeat + 40 ms, ..., muted: after }` (-25 ms: a pair's second key can be reported as late as about -38 ms), the downbeat being that of the bar passed to `onDownbeat` (remember it in `st`).
 - With `quantMutes`, `onDownbeat(bar)` only records the target bar and `mute`/`mutePair` move the cursor themselves (`st.at(bar, 1, -70 - 20 * s.rnd())` as today), because the cursor may only move forward and `mutePair` must see where it was. `stop()` keeps its moment by calling `st.at` itself.
 - `mutePair()` with `quantMutes`, when the cursor is at or before beat 2 of bar `N - 2` (N = the target bar): the group gesture instead — down(a) at bar `N-2` beat 2; wait 650 ms; tap b; hold a across bar `N-1`'s downbeat; up(a) at bar `N` beat 1 minus 120 ms. Points: mutes-only at bar `N-1` downbeat + 40 ms (unchanged), a lights point 100 ms after b's press (`{ t, lights: [a, b] }`: both MUTE lights white), and the two points around bar N. Where there is no room, two fingers at the old moment.
 - `artist_check.js`: for a `mutesOnly` point check only the mutes; for a `lights` point check `device.leds()` at `LED_MUTE(t) = 72 + t`: `r === g && g === b && r > 0` for each track listed.

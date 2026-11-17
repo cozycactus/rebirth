@@ -134,13 +134,20 @@ key is pressed with none held.
 deliberate hold from two quick presses that way.
 
 **A hold the panel may have lost is not trusted.** A key joins only while the
-held key is still reported down and the panel's generation is the one of its
-press; a release applies the group only under that same generation; and an
-end-of-pass sweep drops a held key the panel no longer reports down or whose
-generation changed. Dropping the group changes nothing in it, a withdrawn
-change of the held key included. A panic and a flash save or load drop it too.
-Stop does not: a group released after Stop applies at once, as any press
-while stopped.
+panel's generation is the one of the held key's press; a release applies the
+group only under that same generation; and an end-of-pass sweep drops a held
+key the panel no longer reports down or whose generation changed. Dropping
+the group changes nothing in it, a withdrawn change of the held key included.
+A panic and a flash save or load drop it too. Stop does not: a group released
+after Stop applies at once, as any press while stopped.
+
+The join does not also ask whether the held key is still reported down: the
+panel reports every MUTE key in one column sample, so a member's press and
+the held key's release can arrive in the same pass, and the panel already
+reports the key up while its release still waits behind the press. Such a
+pass is taken in event order (track order): a press before the release
+joins, a release before the press ends the hold and the press is an ordinary
+one. Either way both changes wait for the same launch point.
 
 The selector's buttons 1-8 take their track out of the group, then cancel its
 waiting change and toggle it at once, in one engine call.
@@ -177,7 +184,9 @@ shown.
     touched.
   - `void transport_set_mutes(uint8_t mask, uint8_t target)`: a group's
     release: each track in `mask` gets a change to its bit of `target`,
-    replacing a waiting one.
+    replacing a waiting one; a track already in its target state only loses
+    its waiting change (no white flash for nothing, and no stored mutes
+    cleared on a track that is already audible).
   - `uint8_t transport_cancel_mutes(uint8_t mask, uint8_t *target)`: cancels
     the waiting changes in `mask` and returns them, with their targets.
   - `void transport_toggle_mutes_now(uint8_t mask)`: the selector. Cancels
@@ -199,10 +208,11 @@ shown.
   does not trigger; a newly unmuted track plays this step. Due is the queue's
   rule from `pulse_count` (16 or 4 steps; NEXT STEP: every step). For TRACK
   LOOP in Pattern mode the waiting track's row is loaded first
-  (`load_prepared_track()`, which phase 1 repeats as a no-op) and due is
-  `track_step_count >= length` of that row, the very condition the queued pad
-  uses; in Song mode TRACK LOOP is BAR. One shared-lock section, only when
-  something waits.
+  (`load_prepared_track()`; phase 1 then does not load it again, so a row
+  Core 0 publishes in between cannot make the mute and a queued pad decide on
+  different lengths) and due is `track_step_count >= length` of that row, the
+  very condition the queued pad uses; in Song mode TRACK LOOP is BAR. One
+  shared-lock section, only when something waits.
 - `mute_pending` is cleared by `stop_playback_outputs()` (Stop, panic, song
   end, a mode change, a restart while playing) and by `transport_start()`
   before its early return for an empty song. `transport_clear_queue()` and
@@ -346,6 +356,13 @@ failed: its API credits were exhausted). Changes:
 - `device_check.js` was missing from the simulator plan (Codex, DeepSeek).
 - Builder traps named: `seq_get_track_mutes()` under the lock, the empty
   song's early return, `sequencer_init()`, the empty group.
+
+The plan's review (the same three) added: the joining key is not asked to
+be still reported down (same-pass events, above); the timer's mute check and
+phase 1 decide on one loaded row (a row published in between made them
+disagree, reproduced by Codex); a group release skips tracks already at their
+target (DeepSeek); `device_check.js` taps at a known phase of the bar (Grok,
+DeepSeek); and further tests.
 
 Not changed: an epoch counter or a runtime stored-mute override (Codex):
 publishing at the decision removes the window they guarded. Running the
