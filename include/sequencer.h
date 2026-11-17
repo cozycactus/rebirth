@@ -256,7 +256,11 @@ launch_quant_t transport_get_launch_quant(void);
 void transport_set_clock_source(clock_source_t source);
 clock_source_t transport_get_clock_source(void);
 // A start waits for the first external Clock (PLAY or Start/Continue from the wire).
+// Takes the playback lock.
 bool transport_armed(void);
+// Playing, or armed: one read under the playback lock, so a start from the wire is
+// seen whole. PLAY stops (or disarms) when it is true.
+bool transport_running(void);
 // True when the VALUE knob sets the tempo: INT, or AUTO with no Clock followed or
 // present. Takes the playback lock.
 bool transport_tempo_is_internal(void);

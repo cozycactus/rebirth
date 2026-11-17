@@ -114,8 +114,11 @@ uint32_t __not_in_flash_func(clock_est_last)(const clock_est_t *e) {
 }
 
 uint32_t __not_in_flash_func(clock_est_timeout_us)(const clock_est_t *e) {
-    if (e->interval_us == 0) return CLOCK_EST_LOSS_UNKNOWN_US;
-    uint32_t three = 3u * e->interval_us;
+    // The longer of the two estimates: a burst shortens only the short one.
+    uint32_t interval = e->interval_us;
+    if (e->shown_x16 / 16u > interval) interval = e->shown_x16 / 16u;
+    if (interval == 0) return CLOCK_EST_LOSS_UNKNOWN_US;
+    uint32_t three = 3u * interval;
     return three > CLOCK_EST_LOSS_MIN_US ? three : CLOCK_EST_LOSS_MIN_US;
 }
 
@@ -146,7 +149,11 @@ uint32_t __not_in_flash_func(clock_est_tick)(clock_est_t *e, uint32_t t_us) {
         uint32_t short_x16 = e->interval_us * 16u;
         uint32_t diff = short_x16 > e->shown_x16 ? short_x16 - e->shown_x16
                                                  : e->shown_x16 - short_x16;
-        e->off = diff * 25u > e->shown_x16 ? (uint8_t)(e->off + 1u) : 0;
+        // Only an interval of a tempo (a quarter to four times the shown one) counts:
+        // the bunched Clocks that end a stall are a burst, not a tempo change.
+        uint32_t shown_us = e->shown_x16 / 16u;
+        bool tempo = interval >= shown_us / 4u && interval <= 4u * shown_us;
+        e->off = tempo && diff * 25u > e->shown_x16 ? (uint8_t)(e->off + 1u) : 0;
         if (e->off >= 3) {
             // A tempo change: restart the window from the last two intervals, which
             // three Clocks off in a row place after the change.

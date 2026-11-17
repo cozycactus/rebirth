@@ -298,7 +298,7 @@ and the reasons are in
   song is walked entry by entry as `advance_song_position()` would run it (one
   short `seq_lock` section per entry passed): the entry, its remaining repeats
   and each track's steps since its location last changed. SPP while playing is
-  ignored.
+  ignored, and an SPP past the end of a song that stops disarms a start.
 - **Core 0.** `transport_start()` in EXT, or AUTO with Clocks arriving, arms
   instead of playing; PLAY while armed disarms (`transport_stop()`). Stopped no
   longer means Core 1 is idle, so one inhibit flag, set under the playback lock,
@@ -307,9 +307,12 @@ and the reasons are in
   and load (`sequencer_storage_begin()` / `_end()`, which refuse unless stopped
   and not armed). While it is set Core 1 ignores Start, Continue and SPP and
   starts nothing on a Clock.
-- **Loss.** No Clock for `max(3 x interval, 50 ms)` (375 ms before the interval
-  is known), checked at alarm 0's deadline and on the next Clock: EXT stops as on
-  Stop (notes, gates and kit voices released, MIDI Stop out); AUTO hands over to
+- **Loss.** No Clock for `max(3 x interval, 50 ms)`, the interval being the
+  longer of the short and the shown estimate (a burst shortens only the short
+  one; 375 ms before either is known), checked at alarm 0's deadline and on the
+  next Clock: EXT stops as on Stop (notes, gates and kit voices released, MIDI
+  Stop out), also when it still plays on the internal timer after a change of
+  source and has not yet followed the Clock; AUTO hands over to
   the internal timer at the measured tempo, which becomes `transport.bpm`, and
   follows again from its current position once three plausible intervals in a
   row have arrived (that Clock is the next multiple of four pulses). An interval
@@ -317,7 +320,9 @@ and the reasons are in
 - **Shown tempo.** The time over the last 96 intervals divided by their number,
   then averaged over Clocks with weight 1/16, in us x 16
   (`transport_snapshot_t.ext_shown_x16`); three Clocks in a row more than 4 % off
-  restart that window from the last two intervals. Core 0 turns it into BPM and
+  restart that window from the last two intervals. Only an interval of a tempo
+  (a quarter to four times the shown one) counts as off, so the bunched Clocks
+  that end a stall do not restart it. Core 0 turns it into BPM and
   keeps the shown tenth until the value leaves it by more than 0.07 BPM.
 - **Not covered.** A byte lost in the UART receiver (Core 0's interrupts off for
   more than one byte time) is not detected; a lost Clock leaves the device a

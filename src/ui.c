@@ -441,7 +441,7 @@ static void show_notify(const char *msg) {
 
 // PLAY. A start that waits for the external clock is cancelled like a stop.
 static void toggle_transport(void) {
-    if (g_seq.transport.state == TRANSPORT_PLAYING || transport_armed()) {
+    if (transport_running()) {
         transport_stop();
     } else if (g_seq.transport.state == TRANSPORT_PAUSED) {
         transport_continue();
@@ -1280,7 +1280,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
 
     // Step button 9 (index 8): save to flash
     if (steps->pressed & (1u << 8)) {
-        if (g_seq.transport.state != TRANSPORT_STOPPED || transport_armed()) {
+        if (transport_running()) {
             show_notify("STOP TO SAVE");
         } else {
             thru_release_all();     // the stall would leave a held key sounding
@@ -1295,7 +1295,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
 
     // Step button 10 (index 9): load from flash
     if (steps->pressed & (1u << 9)) {
-        if (g_seq.transport.state != TRANSPORT_STOPPED || transport_armed()) {
+        if (transport_running()) {
             show_notify("STOP TO LOAD");
         } else {
             thru_release_all();

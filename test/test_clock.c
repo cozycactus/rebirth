@@ -785,6 +785,106 @@ static void test_panic_lets_go(void) {
     CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
 }
 
+// ─── Found in review ────────────────────────────────────────────
+
+static void test_a_stall_is_not_a_tempo_change(void) {
+    // Two Clocks held back by a stall come bunched with the third: the shown tempo and
+    // the tempo AUTO plays on at, once the master is gone, stay at 145.
+    reset(CLOCK_SOURCE_AUTO);
+    every_step();
+    uint32_t last = clocks(now() + 1000, T145, 100);
+    transport_start();
+    last = clocks(last + T145, T145, 20);
+    uint32_t t = last + 3 * T145;
+    for (unsigned i = 0; i < 3; i++) {
+        wire(t + 320 * i, MIDI_CLOCK);
+        float shown = 40000000.0f / (float)ext_est.shown_x16;
+        CHECK(fabsf(shown - 145.0f) < 1.0f);
+    }
+    CHECK(clock_est_timeout_us(&ext_est) >= 3u * T145 - 100u);
+    run_until(t + 640 + 200000);            // and then the master is gone
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING && !following());
+    CHECK(fabsf(g_seq.transport.bpm - 145.0f) < 0.5f);
+    // Extra Clocks in a bunch (more than real time) move it a little, not to 300.
+    reset(CLOCK_SOURCE_AUTO);
+    last = clocks(now() + 1000, T145, 100);
+    transport_start();
+    last = clocks(last + T145, T145, 20);
+    clocks(last + T145, 320, 6);
+    run_until(now() + 120000);
+    CHECK(fabsf(g_seq.transport.bpm - 145.0f) < 2.0f);
+}
+
+static void test_ext_on_its_own_timer_stops_when_the_clock_goes(void) {
+    // Switched to EXT while Clocks were arriving, before it follows them: when they
+    // stop, EXT stops too.
+    reset(CLOCK_SOURCE_INT);
+    every_step();
+    transport_start();
+    uint32_t last = clocks(now() + 1000, T145, 2);
+    transport_set_clock_source(CLOCK_SOURCE_EXT);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING && !following());
+    run_until(last + 3 * T145 - 100);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    run_until(last + 3 * T145 + pulse_interval_us + 100);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED && fake_gates == 0);
+    CHECK(count_byte(MIDI_STOP) == 1);
+}
+
+static void test_spp_past_the_end_after_a_start_stays_stopped(void) {
+    reset(CLOCK_SOURCE_EXT);
+    set_note(0, 0, 0, 60, 0);
+    song_clear();
+    CHECK(song_append(0, 1));
+    song_set_end_mode(SONG_END_STOP);
+    transport_set_mode(PLAY_MODE_SONG);
+    uint32_t t = now() + 1000;
+    wire(t, MIDI_START);
+    CHECK(transport_armed());
+    wire(t + 320, 0xF2);
+    wire(t + 640, 17);
+    wire(t + 960, 0);
+    CHECK(g_seq.transport.song_position >= g_seq.song.length);
+    CHECK(!transport_armed() && !following());
+    clocks(t + T145, T145, 30);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED && note_ons(0, 60) == 0);
+}
+
+static void test_the_alarm_drains_the_ring_when_both_are_due(void) {
+    // On the RP2040 TIMER_IRQ_0 runs first when both core 1 interrupts are pending: the
+    // Clock is taken by the timer ISR, and the doorbell after it finds the ring empty.
+    reset(CLOCK_SOURCE_EXT);
+    every_step();
+    uint32_t t = now() + 1000;
+    wire(t, MIDI_START);
+    uint32_t last = clocks(t + T145, T145, 6);
+    run_until(last + T145 - 10);
+    CHECK(g_seq.transport.pulse_count == 24);
+    // The next Clock arrives as alarm 0 falls due.
+    timer_hw->timerawl = timer_hw->alarm[0];
+    uint8_t clock = MIDI_CLOCK;
+    fake_uart_rx_push(&clock, 1);
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(timer_hw->intf & (1u << CLOCK_IN_ALARM));
+    sequencer_timer_isr();
+    CHECK(g_seq.transport.pulse_count == 25 && note_ons(0, 41) == 1);
+    sequencer_clock_in_isr();
+    CHECK(!(timer_hw->intf & (1u << CLOCK_IN_ALARM)));
+    CHECK(g_seq.transport.pulse_count == 25 && note_ons(0, 41) == 1);
+    CHECK(count_byte(MIDI_CLOCK) == 7);
+}
+
+static void test_transport_running_is_playing_or_armed(void) {
+    reset(CLOCK_SOURCE_EXT);
+    CHECK(!transport_running());
+    transport_start();
+    CHECK(transport_running() && transport_armed());
+    wire(now() + 1000, MIDI_CLOCK);
+    CHECK(transport_running() && !transport_armed());
+    transport_stop();
+    CHECK(!transport_running());
+}
+
 #define RUN(test) do { test(); printf("PASS %s\n", #test); tests++; } while (0)
 
 int main(void) {
@@ -820,6 +920,11 @@ int main(void) {
     RUN(test_storage_keeps_the_wire_from_starting);
     RUN(test_transport_start_keeps_the_wire_out_while_rows_load);
     RUN(test_panic_lets_go);
+    RUN(test_a_stall_is_not_a_tempo_change);
+    RUN(test_ext_on_its_own_timer_stops_when_the_clock_goes);
+    RUN(test_spp_past_the_end_after_a_start_stays_stopped);
+    RUN(test_the_alarm_drains_the_ring_when_both_are_due);
+    RUN(test_transport_running_is_playing_or_armed);
     printf("%u clock tests passed\n", tests);
     return 0;
 }

@@ -67,8 +67,9 @@ void clock_est_reset(clock_est_t *e);
 uint32_t clock_est_tick(clock_est_t *e, uint32_t t_us);
 // The time of the last Clock; meaningful when count > 0.
 uint32_t clock_est_last(const clock_est_t *e);
-// No Clock for this long means the clock is lost: max(3 x interval, 50 ms),
-// 375 ms while the interval is not known.
+// No Clock for this long means the clock is lost: max(3 x interval, 50 ms), the
+// interval being the longer of the short and the shown estimate (a burst shortens
+// only the short one); 375 ms while neither is known.
 uint32_t clock_est_timeout_us(const clock_est_t *e);
 
 #endif

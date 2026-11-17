@@ -1035,13 +1035,17 @@ static void ext_to_internal(void) {
     pulse_interval_us = bpm_to_pulse_interval_us(bpm);
 }
 
-// No Clock for the loss timeout while following: EXT stops (notes, gates and kit
-// voices released, MIDI Stop out), AUTO plays on on the internal timer.
+// No Clock for the loss timeout while playing: following, EXT stops (notes, gates
+// and kit voices released, MIDI Stop out) and AUTO plays on on the internal timer.
+// EXT also stops when it plays on the internal timer waiting to follow (a change of
+// source while Clocks were still arriving) and the Clock goes away: EXT never runs
+// on its own.
 static void __time_critical_func(ext_check_loss)(uint32_t now_us) {
-    if (!ext_following || g_seq.transport.state != TRANSPORT_PLAYING || ext_est.count == 0) return;
-    if (now_us - clock_est_last(&ext_est) < clock_est_timeout_us(&ext_est)) return;
+    if (g_seq.transport.state != TRANSPORT_PLAYING) return;
+    if (!ext_following && g_seq.clock_source != CLOCK_SOURCE_EXT) return;
+    if (ext_est.count && now_us - clock_est_last(&ext_est) < clock_est_timeout_us(&ext_est)) return;
     jitter_stats.ext_losses++;
-    if (g_seq.clock_source == CLOCK_SOURCE_AUTO) {
+    if (ext_following && g_seq.clock_source == CLOCK_SOURCE_AUTO) {
         ext_to_internal();
     } else {
         stop_locked();
@@ -1154,7 +1158,11 @@ static void __time_critical_func(ext_on_event)(const clock_in_event_t *ev) {
     case CLOCK_IN_SPP:
         if (ext_inhibit || t->state == TRANSPORT_PLAYING) return;
         locate_locked(ev->value);
-        if (ext_armed == EXT_ARM_START) ext_armed = EXT_ARM_CONTINUE;
+        if (t->mode == PLAY_MODE_SONG && t->song_position >= g_seq.song.length) {
+            ext_disengage();                // past the end of a song that stops: no start
+        } else if (ext_armed == EXT_ARM_START) {
+            ext_armed = EXT_ARM_CONTINUE;
+        }
         return;
     default:
         return;
@@ -1241,6 +1249,8 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
         return;
     }
     jitter_record_entry(isr_start_us, scheduled_us);
+    // EXT playing on the internal timer until it follows: stops once the Clock is gone.
+    if (g_seq.clock_source == CLOCK_SOURCE_EXT) ext_check_loss(isr_start_us);
 
     run_pulse();
 
@@ -1461,7 +1471,17 @@ clock_source_t transport_get_clock_source(void) {
 }
 
 bool transport_armed(void) {
-    return ext_armed != EXT_ARM_NONE;
+    uint32_t playback_irq_state = playback_lock();
+    bool armed = ext_armed != EXT_ARM_NONE;
+    playback_unlock(playback_irq_state);
+    return armed;
+}
+
+bool transport_running(void) {
+    uint32_t playback_irq_state = playback_lock();
+    bool running = g_seq.transport.state == TRANSPORT_PLAYING || ext_armed != EXT_ARM_NONE;
+    playback_unlock(playback_irq_state);
+    return running;
 }
 
 bool transport_tempo_is_internal(void) {

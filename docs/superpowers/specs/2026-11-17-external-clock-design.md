@@ -128,8 +128,9 @@ can play a step before its Clock and lags a tempo change.
 
 ### Lost clock
 
-The clock is lost when no Clock arrives for `max(3 x interval, 50 ms)`
-(375 ms before the interval is known), checked by alarm 0 at that deadline:
+The clock is lost when no Clock arrives for `max(3 x interval, 50 ms)`, the
+interval being the longer of the short and the shown estimate, so a burst cannot
+shorten it (375 ms before either is known), checked by alarm 0 at that deadline:
 
 - **EXT:** stop as on a Stop from the wire: notes and gates released, kit
   voices released, MIDI Stop out; the OLED shows `EXT  --.-`.
@@ -160,7 +161,8 @@ playback lock it already holds (never `transport_start()`, which takes it).
   (repeats, skipped entries, the end mode): the entry, its remaining repeats,
   the step in the bar, and for each track the steps since its location last
   changed, modulo its length. A position past the end of a song that stops
-  leaves it stopped. An SPP while armed for START arms CONTINUE instead.
+  leaves it stopped, and disarms a start already armed. An SPP while armed for
+  START arms CONTINUE instead.
 - In INT the wire's transport bytes are ignored.
 
 ### Launch quantisation, Song mode, MIDI out
@@ -176,7 +178,18 @@ and Stop go out when ReBirth's own transport changes.
 - To INT while following: the internal timer takes over at the measured tempo.
 - To EXT or AUTO while on the internal timer: follows once three plausible
   intervals have been seen, as AUTO does after a loss. To EXT with no Clock
-  arriving: stops at once (EXT never runs on the internal timer).
+  arriving: stops at once (EXT never runs on the internal timer); with Clocks
+  arriving that then stop before they are followed, it stops at the loss timeout.
+
+## Review changes
+
+An independent review of the code (Codex, Grok, DeepSeek) found, each with a
+reproduction: EXT kept playing on the internal timer when the Clock went away
+after a change of source and before it was followed; an SPP past the end of a
+song that stops did not disarm a start armed before it; a stall's bunched
+Clocks restarted the shown tempo's window, so AUTO, losing the clock right after,
+played on at 300 BPM; and `transport_armed()` was read without the lock (PLAY
+now reads playing-or-armed in one locked call). All four are fixed and tested.
 
 ### Core 0 and storage
 
@@ -196,7 +209,9 @@ Core 1 keeps the last 128 Clock times. The shown interval is the time over the
 last 96 intervals (one bar) divided by their number, then averaged over Clocks
 with weight 1/16, in microseconds times 16. When the short estimate differs
 from it by more than 4 % for three Clocks in a row, the window restarts from
-the last two intervals, so a tempo change shows within about a beat. Core 0
+the last two intervals, so a tempo change shows within about a beat. Only an
+interval of a tempo (a quarter to four times the shown one) counts, so the
+bunched Clocks that end a stall are not taken for a tempo change. Core 0
 turns it into BPM and keeps the shown tenth unless the value moves by more
 than 0.07 BPM from it.
 
