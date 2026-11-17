@@ -83,7 +83,10 @@ its knobs, switch and ladder-current meter, and the Effects board, in that
 page's colours and type (three fonts from Google Fonts; without a network the
 fallbacks are used). Above them is a small mixer: a fader and a mute for every
 instrument, a lamp that shows the device sending it a note, and the master
-with a peak meter. The mixer's mute is not the device's MUTE.
+with a peak meter. The mixer's mute is not the device's MUTE. Every strip has
+a pan knob and, except the 303s (which have their own delay and reverb), sends
+to the rig's delay and reverb, taken after the fader; they start where the mix
+had them fixed. The 909's reverb send reaches the snare, clap and crash only.
 
 ## The artist
 

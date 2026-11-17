@@ -111,6 +111,17 @@
     color: var(--dim); cursor: pointer; }
   .strip button[aria-pressed="true"] { background: var(--warn); border-color: var(--warn); color: #111; }
   .strip.muted input.fader { opacity: .35; }
+  .strip .mknobs { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .strip .mknob { display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 50px; }
+  .strip .mknob .mname { font-size: 8px; font-weight: 600; line-height: 1; letter-spacing: .06em; color: var(--dim); margin-bottom: 1px; }
+  .strip .mknob .dial { width: 28px; height: 28px; touch-action: none; cursor: ns-resize; border-radius: 50%; }
+  .strip .mknob .dial:focus-visible { outline: 2px solid var(--rig); outline-offset: 1px; }
+  .strip .mknob svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .strip .mknob circle { fill: #2b2e39; stroke: #3b3f4d; stroke-width: 1.5; }
+  .strip .mknob .arc { fill: none; stroke: var(--rig); stroke-width: 3; stroke-linecap: round; }
+  .strip .mknob .ptr { stroke: var(--text); stroke-width: 2.4; stroke-linecap: round; }
+  .strip .mknob .mval { font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .strip.muted .mknob { opacity: .5; }
 
   /* ─── The two 303s, drawn as the x0xb0x VCF Bench page draws its one ───
      White solder mask, black silkscreen legends, gold for what is set; its own

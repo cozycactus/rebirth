@@ -91,10 +91,19 @@
     out.push(
       k('bass.cutoff', 'Cutoff', 'Bass', 0.45), k('bass.level', 'Level', 'Bass', 0.8),
       k('lead.cutoff', 'Cutoff', 'Lead', 0.6), k('lead.level', 'Level', 'Lead', 0.6),
-      k('lead.delay', 'Delay send', 'Lead', 0.6),
-      k('arp.level', 'Level', 'Arp', 0.5), k('arp.delay', 'Delay send', 'Arp', 0.5),
+      k('arp.level', 'Level', 'Arp', 0.5),
       k('drums.level', 'Kit level', 'Drums', 0.85), k('kick.level', 'Kick level', 'Drums', 0.9),
       k('fx.level', 'Level', 'FX', 0.6), k('fx.riserBars', 'Riser length', 'FX', 8, 1, 16, 'bars'));
+    // The mixer strips' pan (0.5 is the centre) and their sends to the rig's
+    // delay and reverb, set where the mix had them fixed before. The 303s
+    // have their own delay and reverb (Bench page effects), so only a pan.
+    for (const [x, g, pan, delay, reverb] of [
+      ['kick', 'Kick', 0.5, 0, 0], ['drums', 'Drums', 0.5, 0, 0.18], ['bass', 'Bass', 0.5, 0, 0],
+      ['acid1', 'Acid 1', 0.375], ['acid2', 'Acid 2', 0.625],
+      ['lead', 'Lead', 0.55, 0.6, 0.25], ['arp', 'Arp', 0.45, 0.5, 0.2], ['fx', 'FX', 0.5, 0.3, 0.5]]) {
+      out.push(k(x + '.pan', 'Pan', g, pan));
+      if (delay != null) out.push(k(x + '.delay', 'Delay send', g, delay), k(x + '.reverb', 'Reverb send', g, reverb));
+    }
     return out;
   }
 
@@ -345,7 +354,7 @@
   }
 
   class AcidVoice {
-    constructor(rig, id, wave, pan) {
+    constructor(rig, id, wave) {
       this.rig = rig;
       this.id = id;
       this.wave = wave;
@@ -357,7 +366,7 @@
       this.out = rig.gain(1);
       // Its own delay and reverb, as on the Bench page: no sends to the rig's.
       this.fx = new BenchFx(rig, id, this.out);
-      rig.strip(this.fx.out, { level: id + '.level', k: ACID_GAIN, pan });
+      rig.strip(this.fx.out, { id, level: id + '.level', k: ACID_GAIN, panned: true, sends: false });
     }
 
     send(t, lines) { if (this.sink) this.sink({ t, lines }); }
@@ -447,7 +456,7 @@
       },
     });
     for (const f of v.filters) rig.bind('bass.cutoff', f.detune, (x) => x * CUT_BASS);
-    rig.strip(v.out, { level: 'bass.level', k: 1.0 });
+    rig.strip(v.out, { id: 'bass', level: 'bass.level', k: 1.0 });
     return v;
   }
 
@@ -462,7 +471,7 @@
       },
     });
     for (const f of v.filters) rig.bind('lead.cutoff', f.detune, (x) => x * CUT_LEAD);
-    rig.strip(v.out, { level: 'lead.level', k: 1.78, pan: 0.1, delay: 'lead.delay', rev: 0.25 });
+    rig.strip(v.out, { id: 'lead', level: 'lead.level', k: 1.78, panned: true });
     return v;
   }
 
@@ -475,7 +484,7 @@
                  fPeak: 1, fDec: 0.02 };
       },
     });
-    rig.strip(v.out, { level: 'arp.level', k: 2.2, pan: -0.1, delay: 'arp.delay', rev: 0.2 });
+    rig.strip(v.out, { id: 'arp', level: 'arp.level', k: 2.2, panned: true });
     return v;
   }
 
@@ -578,12 +587,14 @@
       super(rig);
       this.kickBus = rig.gain(1);
       this.punch = curve((x) => Math.tanh(1.6 * x) / Math.tanh(1.6));
-      rig.strip(this.kickBus, { level: 'kick.level', k: 1.25 });
+      rig.strip(this.kickBus, { id: 'kick', level: 'kick.level', k: 1.25 });
       // kit: dry bus (hats, toms, rim, ride) and an ambient one (snare, clap, crash)
       this.kit = rig.gain(1);
       this.amb = rig.gain(1);
-      rig.strip(this.kit, { level: 'drums.level', k: 0.9 });
-      rig.strip(this.amb, { level: 'drums.level', k: 0.9, rev: 0.18 });
+      // One strip on the mixer for both buses; its reverb send reaches the
+      // ambient bus only, as the dry one never had any.
+      rig.strip(this.kit, { id: 'drums', level: 'drums.level', k: 0.9, revK: 0 });
+      rig.strip(this.amb, { id: 'drums', level: 'drums.level', k: 0.9 });
     }
 
     on(note, vel, t) {
@@ -679,7 +690,7 @@
       super(rig);
       this.bus = rig.gain(1);
       this.riser = null;
-      rig.strip(this.bus, { level: 'fx.level', k: 1.4, delay: 0.3, rev: 0.5 });
+      rig.strip(this.bus, { id: 'fx', level: 'fx.level', k: 1.4 });
     }
     on(note, vel, t) {
       if (this.riser) { this.choke(this.riser, Math.max(t, this.riser.t0)); this.riser = null; }
@@ -785,7 +796,7 @@
 
       this.inst = [
         new Drums(this), makeBass(this),
-        new AcidVoice(this, 'acid1', 'saw', -0.25), new AcidVoice(this, 'acid2', 'square', 0.25),
+        new AcidVoice(this, 'acid1', 'saw'), new AcidVoice(this, 'acid2', 'square'),
         makeLead(this), makeArp(this), new Fx(this), makePad(this),
       ];
       // Resolves once the 303s can sound; until then their notes are dropped.
@@ -845,24 +856,35 @@
     // response): fn runs when the knob is set, after its value has changed.
     watch(id, fn) { this.knobs.get(id).watchers.push(fn); }
 
-    // Channel strip: level knob (square taper) -> pan -> mix, plus sends.
+    // Channel strip: level knob (square taper) -> pan -> mix, plus sends
+    // taken after the level, before the pan. A strip with an `id` takes its
+    // pan and sends from the knobs `<id>.pan`, `<id>.delay`, `<id>.reverb`
+    // (`sends: false` for none; `revK`, `delayK` scale a send, 0 for none).
+    // One without an id is fixed: `rev` and `delay` are send gains.
     strip(src, o) {
       const lvl = this.gain(o.k);
       if (o.level) this.bind(o.level, lvl.gain, (x) => o.k * x * x);
       src.connect(lvl);
-      let out = lvl;
-      if (o.pan) {
-        out = this.ctx.createStereoPanner();
-        out.pan.value = o.pan;
-        lvl.connect(out);
+      if (!o.id) {
+        lvl.connect(this.mix);
+        if (o.delay) chain(lvl, this.gain(o.delay), this.delayIn);
+        if (o.rev) chain(lvl, this.gain(o.rev), this.reverbIn);
+        return;
       }
-      out.connect(this.mix);
-      if (o.delay != null) {
-        const s = this.gain(typeof o.delay === 'number' ? o.delay : 0);
-        if (typeof o.delay === 'string') this.bind(o.delay, s.gain, (x) => x);
-        chain(lvl, s, this.delayIn);
+      // A mono source panned to the centre comes out 3 dB down on each side.
+      // A strip that had no panner before gets that back, so the mix stays
+      // where it was calibrated; one that had (`panned`) was set with it.
+      const pan = this.ctx.createStereoPanner();
+      this.bind(o.id + '.pan', pan.pan, (x) => 2 * x - 1);
+      if (o.panned) chain(lvl, pan, this.mix);
+      else chain(lvl, this.gain(Math.SQRT2), pan, this.mix);
+      if (o.sends === false) return;
+      for (const [name, bus, scale] of [['delay', this.delayIn, o.delayK], ['reverb', this.reverbIn, o.revK]]) {
+        if (scale === 0) continue;
+        const s = this.gain(0), k = scale == null ? 1 : scale;
+        this.bind(o.id + '.' + name, s.gain, (x) => k * x);
+        chain(lvl, s, bus);
       }
-      if (o.rev) chain(lvl, this.gain(o.rev), this.reverbIn);
     }
 
     buildMaster() {

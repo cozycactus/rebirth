@@ -316,13 +316,14 @@
   // that shows the device sending it a note (the kick and the kit share
   // channel 10; the kick is note 36 there).
   const STRIPS = [
-    { name: 'KICK', level: 'kick.level' }, { name: '909', level: 'drums.level' }, { name: 'BASS', level: 'bass.level' },
-    { name: 'ACID 1', level: 'acid1.level' }, { name: 'ACID 2', level: 'acid2.level' }, { name: 'LEAD', level: 'lead.level' },
-    { name: 'ARP', level: 'arp.level' }, { name: 'FX', level: 'fx.level' }, { name: 'MASTER', level: 'master.volume' },
+    { name: 'KICK', id: 'kick' }, { name: '909', id: 'drums' }, { name: 'BASS', id: 'bass' },
+    { name: 'ACID 1', id: 'acid1', ownFx: true }, { name: 'ACID 2', id: 'acid2', ownFx: true }, { name: 'LEAD', id: 'lead' },
+    { name: 'ARP', id: 'arp' }, { name: 'FX', id: 'fx' }, { name: 'MASTER', level: 'master.volume' },
   ];
+  for (const s of STRIPS) if (s.id) s.level = s.id + '.level';
   const stripOf = (channel, note) => channel === 9 ? (note === 36 ? 0 : 1) : channel >= 2 && channel <= 7 ? channel : undefined;
   // The other synths' knobs that stay as plain sliders.
-  const KNOBS = ['bass.cutoff', 'lead.cutoff', 'lead.delay', 'arp.delay', 'delay.feedback', 'delay.level', 'reverb.level'];
+  const KNOBS = ['bass.cutoff', 'lead.cutoff', 'delay.feedback', 'delay.level', 'reverb.level'];
   const KNOB_TIP = {
     tune: 'Tune: подстройка высоты генератора, в середине — без сдвига.',
     cutoff: 'Cut off freq: частота среза фильтра. Артист открывает и прикрывает её по ходу сета.',
@@ -406,9 +407,17 @@
       el.setAttribute('aria-valuetext', text);
       shown.textContent = text;
     };
-    const turn = (to) => { v = Math.min(1, Math.max(0, to)); draw(); userSet(id, v); };
+    handleKnob(el, id, () => v, (to) => { v = to; draw(); }, def);
+  }
+
+  // What every drawn knob does: drag up and down (Shift for fine), arrow and
+  // Page keys, Home and End, double click for the default. `get` reads the
+  // knob, `show` draws a new value; the rig is set here.
+  function handleKnob(el, id, get, show, def) {
+    const clamp = (x) => Math.min(1, Math.max(0, x));
+    const turn = (to) => { show(clamp(to)); userSet(id, get()); };
     let startY = 0, startV = 0, dragging = false;
-    el.addEventListener('pointerdown', (e) => { dragging = true; startY = e.clientY; startV = v; el.setPointerCapture(e.pointerId); e.preventDefault(); });
+    el.addEventListener('pointerdown', (e) => { dragging = true; startY = e.clientY; startV = get(); el.setPointerCapture(e.pointerId); e.preventDefault(); });
     el.addEventListener('pointermove', (e) => { if (dragging) turn(startV + (startY - e.clientY) / (e.shiftKey ? 600 : 180)); });
     const end = () => { dragging = false; };
     el.addEventListener('pointerup', end);
@@ -416,12 +425,45 @@
     el.addEventListener('dblclick', () => turn(def));
     el.addEventListener('keydown', (e) => {
       const step = { ArrowUp: 0.01, ArrowRight: 0.01, ArrowDown: -0.01, ArrowLeft: -0.01, PageUp: 0.1, PageDown: -0.1 }[e.key];
-      if (step !== undefined) { e.preventDefault(); turn(v + step); }
+      if (step !== undefined) { e.preventDefault(); turn(get() + step); }
       if (e.key === 'Home') { e.preventDefault(); turn(0); }
       if (e.key === 'End') { e.preventDefault(); turn(1); }
     });
-    draw();
-    sliders[id] = { get value() { return v; }, set value(to) { v = Math.min(1, Math.max(0, +to)); draw(); } };
+    show(get());
+    sliders[id] = { get value() { return get(); }, set value(to) { show(clamp(+to)); } };
+  }
+
+  // A small knob on a mixer strip. A pan knob draws its arc from the centre.
+  const MIX_KNOB = {
+    delay: { label: 'DLY', tip: (s) => 'Посыл канала «' + s + '» в общую задержку (пинг-понг по темпу прибора).',
+             text: (v) => (v * 10).toFixed(1) },
+    reverb: { label: 'REV', tip: (s) => 'Посыл канала «' + s + '» в общий ревербератор.', text: (v) => (v * 10).toFixed(1) },
+    pan: { label: 'PAN', tip: (s) => 'Панорама канала «' + s + '»: влево, по центру (C), вправо.',
+           text: (v) => Math.abs(v - 0.5) < 0.005 ? 'C' : (v < 0.5 ? 'L' : 'R') + Math.round(Math.abs(v - 0.5) * 200) },
+  };
+  function mixKnob(container, id, stripName) {
+    const name = id.split('.')[1], kind = MIX_KNOB[name], p = rig.params.find(x => x.id === id);
+    const cell = document.createElement('div');
+    cell.className = 'mknob';
+    cell.dataset.tip = kind.tip(stripName) + (name === 'reverb' && id === 'drums.reverb' ? ' Только малый, клэп и крэш: хэты, томы и райд идут сухими.' : '') +
+      '\nТянуть вверх и вниз (с Shift точнее), стрелки, двойной клик — исходное положение.' + NOT_DEVICE;
+    cell.innerHTML = `<span class="mname">${kind.label}</span><div class="dial" role="slider" tabindex="0" aria-label="${stripName} ${kind.label}" aria-valuemin="0" aria-valuemax="1">` +
+      `<svg viewBox="0 0 40 40" aria-hidden="true"><circle cx="20" cy="20" r="13"/><path class="arc"/>` +
+      `<line class="ptr" x1="20" y1="20" x2="20" y2="9"/></svg></div><span class="mval"></span>`;
+    container.appendChild(cell);
+    const el = cell.querySelector('.dial'), shown = cell.querySelector('.mval');
+    const r = 17, at = (deg) => { const a = deg * Math.PI / 180; return `${20 + r * Math.sin(a)} ${20 - r * Math.cos(a)}`; };
+    let v = p.value;
+    const draw = (to) => {
+      v = to;
+      const deg = START + SWEEP * v, from = name === 'pan' ? 0 : START, a = Math.min(from, deg), b = Math.max(from, deg);
+      el.querySelector('.ptr').setAttribute('transform', `rotate(${deg} 20 20)`);
+      el.querySelector('.arc').setAttribute('d', b - a < 0.5 ? '' : `M ${at(a)} A ${r} ${r} 0 ${b - a > 180 ? 1 : 0} 1 ${at(b)}`);
+      el.setAttribute('aria-valuenow', v.toFixed(2));
+      el.setAttribute('aria-valuetext', kind.text(v));
+      shown.textContent = kind.text(v);
+    };
+    handleKnob(el, id, () => v, draw, p.value);
   }
 
   // One 303 as the Bench page shows it: the panel with its seven knobs, the
@@ -486,7 +528,7 @@
       const p = rig && rig.params.find(x => x.id === strip.level), master = i === STRIPS.length - 1;
       const el = document.createElement('div');
       el.className = 'strip' + (master ? ' master' : '');
-      el.innerHTML = `<span class="lamp">${strip.name}</span><div class="well"><input class="fader" type="range" aria-label="${strip.name}">` +
+      el.innerHTML = `<span class="lamp">${strip.name}</span><div class="mknobs"></div><div class="well"><input class="fader" type="range" aria-label="${strip.name}">` +
         (master ? '<div class="vu"><i></i></div>' : '') + `</div><span class="val"></span>` +
         (master ? '' : '<button type="button" aria-pressed="false">M</button>');
       box.appendChild(el);
@@ -495,6 +537,14 @@
       lamp.dataset.tip = master ? 'Общий выход всех синтезаторов.'
         : 'Вспыхивает, когда прибор шлёт ноту этому инструменту.' + (strip.name.startsWith('ACID') ? ' Это модель x0xb0x (схема TB-303) из x0xb0x VCF Bench.' : '');
       if (!p) { fader.disabled = true; return; }
+      // Sends, then pan, as on a console; a 303 has its own effects, so only a pan.
+      const knobs = el.querySelector('.mknobs');
+      for (const name of ['delay', 'reverb', 'pan']) {
+        const id = strip.id && strip.id + '.' + name;
+        // (a 303's `delay` is the Delay of its own effects, on its own board)
+        if (id && !(strip.ownFx && name !== 'pan') && rig.params.some(x => x.id === id)) mixKnob(knobs, id, strip.name);
+        else knobs.appendChild(Object.assign(document.createElement('div'), { className: 'mknob empty' }));
+      }
       fader.min = p.min; fader.max = p.max; fader.step = (p.max - p.min) / 100; fader.value = p.value;
       fader.dataset.tip = (master ? 'Общая громкость.' : 'Уровень канала «' + strip.name + '» в общем миксе.') + NOT_DEVICE;
       const show = () => { val.textContent = (10 * fader.value / p.max).toFixed(1); };
