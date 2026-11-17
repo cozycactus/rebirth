@@ -36,6 +36,22 @@ J:<latency> P:<period> I:<isr>
 
 Press step button 13 in pattern select to reset the counters.
 
+With the clock source EXT or AUTO (step button 14) the footer shows the external
+clock instead:
+
+```text
+X:<deviation> L:<losses> C:<catch-ups>
+```
+
+- `X`: the largest |Clock interval - the estimate before it| in microseconds:
+  the master's jitter as received, plus core 0's UART interrupt latency.
+- `L`: followed clocks lost (no Clock for three intervals, at least 50 ms).
+- `C`: bursts of late Clocks the timer caught up with.
+
+While the device follows an external clock alarm 0 fires at irregular times, so
+those pulses are not recorded as ISR latency or period error; the counters of
+the internal timer resume when it leads again.
+
 ## GPIO Probe
 
 GPIO 7 is the timing probe. It is driven high at sequencer timer ISR entry and low at ISR exit.

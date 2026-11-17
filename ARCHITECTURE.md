@@ -4,9 +4,10 @@
 
 | Context | Work |
 | --- | --- |
-| Core 1 timer IRQ | 96 PPQN timing, playheads, note durations, MIDI production, CV/gate output |
+| Core 1 timer IRQ | 96 PPQN timing, playheads, note durations, MIDI production, CV/gate output; while following an external clock, the pulses still owed for a Clock and the loss deadline |
+| Core 1 doorbell IRQ | `TIMER_IRQ_1`, forced by Core 0's UART interrupt: the external clock's events, in order (see External clock) |
 | Core 0 main loop | Panel I2C polling (key matrix scan on two MCP23017, one bus step per pass; MCP23017 step buttons and LEDs), PLAY and encoders, edits, transport commands and launches; per ~33 ms frame: one transport snapshot, the RGB frame build and its LED DMA start, the OLED; stopped-only storage |
-| Core 0 UART IRQ | First read every received byte into the input ring, then drain pending MIDI bytes into UART0, one byte per interrupt (hardware FIFO off) |
+| Core 0 UART IRQ | First read every received byte, stamped with the time: Clock, Start, Continue, Stop and SPP into the external clock's ring for Core 1 (then force `TIMER_IRQ_1`), every byte but the first four into the input ring; then drain pending MIDI bytes into UART0, one byte per interrupt (hardware FIFO off) |
 
 The playback lock serializes the complete timer handler with Start, Stop,
 Continue, mode changes, selection and Panic. Stop/Panic return after any
@@ -166,7 +167,8 @@ lane order.
 
 ## Timing and MIDI
 
-The internal timer runs at 96 PPQN. MIDI Clock runs at **24 PPQN**, one message
+The internal timer runs at 96 PPQN (from the received Clock when following an
+external clock; see External clock). MIDI Clock runs at **24 PPQN**, one message
 every four internal pulses. At 120 BPM the integer timer period is 5,208 us; the
 nominal MIDI Clock interval is approximately 20.833 ms.
 [MIDI Timing Clock reference](https://docs.circuitpython.org/projects/midi/en/latest/api.html#adafruit_midi.timing_clock.TimingClock).
@@ -210,8 +212,9 @@ the ring is full: with the FIFO off the interrupt stays asserted until the data
 register is read; the byte is counted in `midi_in_dropped()` and lost. The main
 loop (`ui_update()`, Core 0) takes at most 48 bytes a pass, before the panic
 check, and feeds them to the pure parser in `midi_in.c`. The ring has one
-producer and one consumer, both on Core 0, so it has no lock, and nothing new
-runs in the timer interrupt.
+producer and one consumer, both on Core 0, so it has no lock. Clock, Start,
+Continue and Stop do not enter this ring: they go to the external clock (below),
+the one thing the input adds to Core 1.
 
 A key is passed through to the track being edited with `midi_try_send_bytes_capped()`
 only, as the ordinary sends set the overflow flag that stops the transport: a
@@ -244,6 +247,81 @@ flash save or load only forget the keys, their notes having been released. The
 layout is `pad_key_note()` in `led_frame.c`, shared by the UI and the frame
 builder; `led_state_t.keys` makes `led_frame_build()` light the pads from it.
 Nothing runs in the timer interrupt and no lock is added.
+
+### External clock
+
+The clock source (`g_seq.clock_source`: INT, EXT, AUTO; Pattern Select step 14;
+not saved, INT at power-up) says where the 96 PPQN pulses come from. The design
+and the reasons are in
+`docs/superpowers/specs/2026-11-17-external-clock-design.md`.
+
+- **Receiving.** The UART interrupt reads `timer_hw->timerawl` for each byte and
+  hands it to `clock_in_rx_byte()` (`clock_in.c`, in RAM). Clock, Start,
+  Continue, Stop and SPP (`F2 lsb msb`, real-time bytes may come between its
+  bytes) become `{time, kind, value}` events in a 32-entry single-producer ring
+  (a barrier orders an entry before the head that publishes it). After a pass
+  that pushed one it sets bit 1 of `timer_hw->intf`: alarm 1 is never armed,
+  its interrupt is Core 1's doorbell. The UART interrupt takes no new lock.
+- **Core 1.** The timer ISR and the doorbell ISR have the same priority and run
+  under the playback lock; each drains the ring in order first (the alarm runs
+  first when both are pending). The doorbell clears its request before it
+  drains. Core 1 keeps, under the playback lock, whether it follows the Clock,
+  whether a start is armed (waiting for the first Clock), the pulses owed for
+  Clocks received and when the next is due, and the tempo estimate (the last
+  128 Clock times). Every path that stops the transport goes through
+  `stop_playback_outputs()`, which also lets go of the clock, so a song that
+  ended is never restarted by the master's next Clock.
+- **Pulses.** A Clock is a hard reference. Its first pulse (4n) runs when it is
+  handled; the other three follow at a quarter of the mean of the last four
+  intervals (the internal pulse period before two Clocks have been seen). A step
+  is 24 pulses, six Clocks, so every step, MIDI Clock out and launch decision
+  falls on a received Clock and carries the master's timing, jitter included,
+  plus the handling latency. No pulse runs ahead of the last Clock. An early
+  Clock runs the at most three sub-pulses of the previous one at once (never a
+  step boundary). A burst (a Clock less than half the estimate after the last,
+  or one that finds the timer still behind) adds four owed pulses that the timer
+  runs four times as fast (never closer than 250 us) until at most three are
+  left; owed pulses beyond 48 (two steps) are dropped and counted, so a stall
+  shifts the phase only when it is that long. While following, alarm 0 fires at
+  the next owed pulse, the loss deadline, or one internal pulse period from
+  now, whichever comes first, so a return to the internal timer never waits
+  longer than today's first pulse. Its writes never fall at or behind the clock.
+  Launch quantisation and Song bar changes read `pulse_count` at step
+  boundaries as before.
+- **Transport from the wire** (EXT, or AUTO; ignored with INT), applied by Core 1
+  with helpers that run under the playback lock it holds. Start resets the
+  position as `transport_start()` does and arms; the first Clock after it is
+  pulse 0, and MIDI Start goes out just before it. Continue arms at the position
+  rounded up to a multiple of four pulses; MIDI Continue goes out on the first
+  Clock. Stop stops (MIDI Stop out). SPP while stopped sets the position: in
+  Pattern mode every track's next step is SPP modulo its length; in Song mode the
+  song is walked entry by entry as `advance_song_position()` would run it (one
+  short `seq_lock` section per entry passed): the entry, its remaining repeats
+  and each track's steps since its location last changed. SPP while playing is
+  ignored.
+- **Core 0.** `transport_start()` in EXT, or AUTO with Clocks arriving, arms
+  instead of playing; PLAY while armed disarms (`transport_stop()`). Stopped no
+  longer means Core 1 is idle, so one inhibit flag, set under the playback lock,
+  covers each Core 0 section that relies on it: `transport_start()` between its
+  two lock sections (it loads the rows with the lock released) and flash save
+  and load (`sequencer_storage_begin()` / `_end()`, which refuse unless stopped
+  and not armed). While it is set Core 1 ignores Start, Continue and SPP and
+  starts nothing on a Clock.
+- **Loss.** No Clock for `max(3 x interval, 50 ms)` (375 ms before the interval
+  is known), checked at alarm 0's deadline and on the next Clock: EXT stops as on
+  Stop (notes, gates and kit voices released, MIDI Stop out); AUTO hands over to
+  the internal timer at the measured tempo, which becomes `transport.bpm`, and
+  follows again from its current position once three plausible intervals in a
+  row have arrived (that Clock is the next multiple of four pulses). An interval
+  longer than the timeout restarts the estimate (a flash save, a cable).
+- **Shown tempo.** The time over the last 96 intervals divided by their number,
+  then averaged over Clocks with weight 1/16, in us x 16
+  (`transport_snapshot_t.ext_shown_x16`); three Clocks in a row more than 4 % off
+  restart that window from the last two intervals. Core 0 turns it into BPM and
+  keeps the shown tenth until the value leaves it by more than 0.07 BPM.
+- **Not covered.** A byte lost in the UART receiver (Core 0's interrupts off for
+  more than one byte time) is not detected; a lost Clock leaves the device a
+  Clock behind until the next Start. SPP is not forwarded.
 
 After an overrun the timer re-arms a future deadline, preventing a past alarm
 from stalling until the 32-bit counter wraps. It emits no catch-up burst.
@@ -419,5 +497,7 @@ not measure RP2040 timing or analog voltages.
 
 Inspect the linked ELF/map for memory usage. Measure GPIO 7 and physical outputs
 under load before claiming an ISR budget or timing margin; the kit track's ISR
-budget, wire-level Clock interval and Core 0 interrupts-off window are bench items. See
+budget, wire-level Clock interval and Core 0 interrupts-off window are bench items,
+and so is following a real master (the latency from a received Clock to the step
+it starts, and the jitter added). See
 [HARDWARE_STATUS.md](HARDWARE_STATUS.md) for remaining checks.

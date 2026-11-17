@@ -135,8 +135,8 @@ The clock is lost when no Clock arrives for `max(3 x interval, 50 ms)`
   voices released, MIDI Stop out; the OLED shows `EXT  --.-`.
 - **AUTO:** the transport plays on from where it is on the internal timer, at
   the measured tempo (it becomes the INT tempo, which VALUE can then change).
-  When three Clocks in a row arrive at plausible intervals again, the device
-  follows them from its current position: the next Clock's 4n is the next
+  When three intervals in a row are plausible again (within half to twice the
+  estimate before them), the device follows the Clocks from its current position: the next Clock's 4n is the next
   multiple of four pulses (the sub-pulses up to it run at once). The tempo
   locks again; whatever phase the gap cost stays until the next Start.
 
@@ -175,8 +175,8 @@ and Stop go out when ReBirth's own transport changes.
 
 - To INT while following: the internal timer takes over at the measured tempo.
 - To EXT or AUTO while on the internal timer: follows once three plausible
-  Clocks have been seen, as AUTO does after a loss. EXT with no clock stops
-  after the loss timeout.
+  intervals have been seen, as AUTO does after a loss. To EXT with no Clock
+  arriving: stops at once (EXT never runs on the internal timer).
 
 ### Core 0 and storage
 
@@ -196,7 +196,7 @@ Core 1 keeps the last 128 Clock times. The shown interval is the time over the
 last 96 intervals (one bar) divided by their number, then averaged over Clocks
 with weight 1/16, in microseconds times 16. When the short estimate differs
 from it by more than 4 % for three Clocks in a row, the window restarts from
-the last four intervals, so a tempo change shows within about a beat. Core 0
+the last two intervals, so a tempo change shows within about a beat. Core 0
 turns it into BPM and keeps the shown tenth unless the value moves by more
 than 0.07 BPM from it.
 
