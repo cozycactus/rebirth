@@ -156,9 +156,9 @@ lane order.
   MUTE, the RGB lights, the selector's step LEDs 1-8 and the OLED mute lines
   all show a track as muted by this rule (`seq_get_track_mutes()`).
   MUTE on a muted track makes it audible when its change lands: the stored
-  mute of every location is cleared right after the press, the live bit when
-  the change lands, and until then the live bit keeps the track silent
-  (below).
+  mute of every location is cleared as soon as the change is made (a press,
+  or a group's release), the live bit when the change lands, and until then
+  the live bit keeps the track silent (below).
 - A MUTE change gives a track a target live mute: `transport_toggle_mutes()`
   (a press) the opposite of its state by the rule above, `transport_set_mutes()`
   the bit it is given; a track already in that state gets none and only loses a

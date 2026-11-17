@@ -941,11 +941,14 @@
           s.down(MUTE(a));
           s.wait(650);
           s.down(MUTE(b));
-          // Both lights white, at two moments a sixteenth apart: one of them
-          // falls on an even sixteenth, where a change that only waits shows
-          // its normal light and a collected key alone stays white.
-          out.expected.push({ t: s.t + 100000, bar: bar - 2, lights: [a, b] });
-          out.expected.push({ t: s.t + 100000 + Math.round(STEP_US), bar: bar - 2, lights: [a, b], later: true });
+          // Both lights white in the middle of two sixteenths in a row, the
+          // first starting at least 100 ms after the second key's press: one
+          // of them is an even sixteenth, where a change that only waits shows
+          // its normal light and a collected key alone stays white. The middle,
+          // as the lights reach the chain up to a frame (about 33 ms) late.
+          const lit = t0 + (Math.ceil((s.t + 100000 - t0) / STEP_US) + 0.5) * STEP_US;
+          out.expected.push({ t: Math.round(lit), bar: bar - 2, lights: [a, b] });
+          out.expected.push({ t: Math.round(lit + STEP_US), bar: bar - 2, lights: [a, b], later: true });
           s.wait(s.human(80));
           s.up(MUTE(b));
           // Nothing changes on the downbeat the hold crosses.
