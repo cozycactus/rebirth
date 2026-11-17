@@ -235,8 +235,12 @@ targets (see "Poses and fitting").
   `Index_Proximal_R`, ...). A bone's local +Y runs along the bone, +X out of
   the back of the hand, Z across; a curl is a rotation about Z, a spread
   about X. The left hand is checked against these conventions at load and
-  a sign that differs is taken from the model, not assumed. The pad of each
-  fingertip is the most palmar vertex near its tip joint, found at load.
+  a sign that differs is taken from the model, not assumed.
+- A fingertip touches with its contact point: in the current pose, the
+  deepest vertex of its last two segments along the contact direction (down
+  onto a control's top; toward the axis on a knob's side). The point moves
+  over the fingertip as the finger tilts, as a real fingertip's does; the
+  fit re-picks it and refits (at most 3 rounds).
 - Pose library (curl per joint, degrees): `point` (pressing finger nearly
   straight, the others curled), `relax`, `fist` (where a free finger goes to
   clear the panel), `lift` (the thumb's way up), `pinch`.
@@ -244,30 +248,37 @@ targets (see "Poses and fitting").
   x 350 for the left, 1050 for the right; page y 2000, that is 130 mm in
   front of the front edge; 350 mm above the plate) toward the control, and
   is pitched down about 20 degrees, as the prototype's press.
-- One fingertip: the root is translated so the fingertip pad is exactly on
-  the target. The target is the control's centre raised to its top height
+- One fingertip (seeded from `point`): the root is translated so the
+  contact point is exactly on the target. The target is the control's centre raised to its top height
   along the eye ray, so it lands on the drawn spot (the camera has a
   shifted lens; see below).
-- Several fingertips (held steps, a one-hand MUTE pair, a clip copy): each
+- Several fingertips (held steps, a one-hand MUTE pair, a clip copy; seeded
+  from nearly straight fingers, with the hand's yaw first turned to the best
+  rigid alignment of the fingertips with the targets): each
   finger has three angles (spread at the knuckle, flex at the knuckle, flex
   at the middle joint with the last joint following at two thirds; for the
   thumb, two at its base and one shared by its other joints), solved by
   damped least squares within joint limits (spread ±20°, flex 0–95°)
   together with the root's position, yaw and pitch, with a light pull
-  toward the seed pose so the solution stays natural. A target left more
+  toward the seed pose so the solution stays natural. If fingertips still
+  hook under, the descent of the last segment is capped. A target left more
   than 1 mm away is an error that the check reports (no silent pose).
 - Clearance: about 60 vertices spread over the palm, knuckles and fingers
   are skinned each fitted frame; free fingers curl toward `fist` (the thumb
   toward `lift`) and, if that is not enough, the root rises, until no
   such vertex is below the plate or inside a control (a box up to its top;
   an encoder knob is a cylinder 20 mm across and 14.5 mm tall, so fingers
-  on its side are allowed).
-- Encoder turn: thumb and index pads on opposite sides of the knob, 8 mm
-  above the plate. The hand's twist follows the knob angle (15° a detent, as
+  on its side are allowed). A touching finger's last two segments may sink
+  up to 1 mm into its own target (a fingertip pressed into silicone), never
+  below the plate.
+- Encoder turn: thumb and index contact points on opposite sides of the
+  knob, 8 mm above the plate; the grip at a twist is the grip at twist 0
+  turned about the knob's axis. The hand's twist follows the knob angle (15° a detent, as
   `app.js` draws the knob) within a window of ±35°; inside a fast burst the
   fingers slide on the knob and the twist eases back toward the middle of
   the window; a full lift and regrip happens only in a pause of 100 ms or
-  more between bursts. Encoder press: the index pad on the knob top (14.5 mm).
+  more between bursts. Encoder press: the index contact point on the knob
+  top (14.5 mm).
 
 ### Drawing (`handlayer.js`)
 
@@ -310,7 +321,8 @@ show and checks, against a table of touches it builds itself from
    hands; a clip copy is one hand, index and thumb; a MUTE pair follows the
    distance rule;
 3. at the down, the middle and 1 ms before the up of every interval, the
-   finger's pad is within 1.5 mm of the target (FK through `handrig.js`);
+   finger's contact point is within 1.5 mm of the target (FK through
+   `handrig.js`);
    during a pinch, both pads are within 2 mm of the knob's rim;
 4. at those moments no clearance vertex of either hand is below the plate
    or the top of the control under it;
@@ -400,6 +412,13 @@ A second review, of the implementation plan, moved the turn threshold from
 knob a cylinder for clearance, let the driver fit the root with the fingers
 in one solve, and moved the hand speed check from the plan to the driver's
 poses.
+
+Building the fitting (plan Task 3) then showed that a contact point fixed
+on the mesh at load cannot stay a fingertip's lowest point once the finger
+tilts past about 43°: the fit reached every target, but the rest of the
+fingertip sank 0.4–6 mm into the control. The contact point is now picked
+per pose, the seeds and the yaw alignment are as above, and a fingertip may
+sink 1 mm into its own target.
 
 A builder's read of the first version then found that a one-hand copy with
 index and middle cannot reach a pad straight below (now index and thumb,
