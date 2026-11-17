@@ -1019,6 +1019,93 @@
     window.addEventListener('blur', hide);
   }
 
+  // ─── The hands' pose viewer (temporary) ───────────────────────
+  // With #hands-poses=N in the address (N = 0…6), the hands hold one of the
+  // hardest moments of the score, fitted as sim/test/hands_unit.js fits them;
+  // hands-dots in the hash marks the targets. A hand with no role is away.
+  function loadHandScripts() {
+    const v = window.SIM_BUILD ? '?v=' + window.SIM_BUILD.short : '';
+    return ['three.js', 'handmodel.js', 'handrig.js', 'handplan.js', 'handlayer.js'].reduce((done, name) =>
+      done.then(() => new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = name + v;
+        s.onload = resolve;
+        s.onerror = () => reject(new Error('the hands: cannot load ' + name));
+        document.head.appendChild(s);
+      })), Promise.resolve());
+  }
+  function handsViewer() {
+    loadHandScripts().then(() => window.HandLayer.create(deviceEl, { quality: 'full' })).then(layer => {
+      const T = window.THREE, PANEL = window.HandPlan.PANEL, MM = PANEL.UNITS_PER_MM;
+      const L = layer.left, R = layer.right;
+      // A press lands on the control's centre raised to its top along the eye ray.
+      const top = a => {
+        const c = PANEL.control(a), p = PANEL.onPanel(c.u, c.v, c.topMm);
+        return new T.Vector3(p.x, p.y, p.z);
+      };
+      const aims = (op, key, list) => {
+        const out = {};
+        for (const [finger, n] of list) out[finger] = top({ op, [key]: n });
+        return out;
+      };
+      const centre = targets => {
+        const c = new T.Vector3(), list = Object.values(targets);
+        for (const p of list) c.add(p);
+        return c.multiplyScalar(1 / list.length);
+      };
+      const knob = enc => {
+        const c = PANEL.control({ op: 'encsw', enc });
+        return { axis: new T.Vector3(c.u, -c.v, 0) };
+      };
+      const press = (rig, finger, target) =>
+        ({ rig, targets: { [finger]: target }, res: rig.place(finger, target, rig.armDir(target)) });
+      const hold = (rig, targets, opts) =>
+        ({ rig, targets, res: rig.fit(targets, Object.assign({ dir: rig.armDir(centre(targets)) }, opts)) });
+      const grip = (rig, enc, twist) => {
+        const res = rig.pinch(enc, twist);
+        return { rig, targets: res.targets, toward: knob(enc), res };
+      };
+      const lowSteps = rig => hold(rig, aims('step', 'index', [['pinky', 1], ['ring', 3], ['middle', 5], ['index', 7]]));
+      const FRAMES = [
+        () => [press(R, 'index', top({ op: 'pad', track: 6, row: 4 }))],
+        () => [lowSteps(L), grip(R, 0, 35)],
+        () => [lowSteps(L), press(R, 'index', top({ op: 'pad', track: 6, row: 5 }))],
+        () => [hold(R, aims('step', 'index', [['index', 8], ['middle', 10], ['ring', 11], ['pinky', 14]])), grip(L, 0, 0)],
+        () => [hold(R, { index: top({ op: 'pad', track: 2, row: 0 }), thumb: top({ op: 'pad', track: 2, row: 3 }) },
+          { freeYaw: true })],
+        () => [hold(R, aims('mute', 'track', [['index', 0], ['ring', 2]]))],
+        () => [grip(R, 0, -35)],
+      ];
+      const showFrame = () => {
+        const m = /hands-poses=(\d+)/.exec(location.hash), n = m ? +m[1] : 0;
+        if (!FRAMES[n]) { console.warn('hands-poses: no frame ' + n + ', 0…' + (FRAMES.length - 1)); return; }
+        L.root.visible = R.root.visible = false;
+        const report = [], dots = [];
+        for (const role of FRAMES[n]()) {
+          const { rig, targets, toward, res } = role;
+          rig.clear(Object.keys(targets));
+          rig.root.visible = true;
+          const offMm = {};
+          for (const f in targets) {
+            offMm[f] = +(rig.contact(f, toward).distanceTo(targets[f]) / MM).toFixed(3);
+            dots.push(targets[f]);
+          }
+          const violations = rig.violations();
+          report.push({ side: rig.side, ok: res.ok, offMm, violations: violations.length,
+            yawDeg: +res.yawDeg.toFixed(1), pitchDeg: +res.pitchDeg.toFixed(1), rollDeg: +res.rollDeg.toFixed(1),
+            capped: res.capped || [] });
+          if (!res.ok || violations.length) console.warn('hands-poses ' + n + ': the ' + rig.side + ' hand', res, violations);
+        }
+        layer.debugDots(dots);
+        layer.render();
+        window.sim.handsViewer = { layer, frame: n, report };
+        console.log('hands-poses ' + n + ': ' + JSON.stringify(report));
+      };
+      showFrame();
+      window.addEventListener('hashchange', showFrame);
+    }).catch(e => console.error(e));
+  }
+
   // ─── Start ────────────────────────────────────────────────────
   RebirthCore().then(core => {
     device = new Device(core);
@@ -1073,5 +1160,6 @@
     requestAnimationFrame(frame);
     window.sim = { device, hands, get rig() { return rig; }, get ctx() { return ctx; }, get phase() { return phase; },
                    get show() { return show; }, startShow, endShow, sendMidiIn };
+    if (/hands-poses/.test(location.hash)) handsViewer();
   });
 })();
