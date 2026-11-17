@@ -56,4 +56,15 @@ bool panel_input_next(panel_event_t *out);
 // when it was down or is down now.
 void panel_input_resync(void);
 
+// True while the pad is reported down (debounced, accepted): from the sample
+// that queued its press to the one that queued its release. False for a track
+// or row out of range. A loss of the scanner keeps it, as it keeps every
+// reported state, so trust it only with panel_input_generation().
+bool panel_input_pad_down(uint8_t track, uint8_t row);
+// Changes whenever key state may have been lost: panel_input_init, a resync,
+// any I2C error or check that finds a chip changed (a lost scanner), and each
+// configuration that succeeds after one. A hold recorded under an older value
+// must not be trusted.
+uint32_t panel_input_generation(void);
+
 #endif

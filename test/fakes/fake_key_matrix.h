@@ -45,6 +45,8 @@ extern int fake_matrix_reset_txn;              // before this transfer, fake_mat
 extern uint8_t fake_matrix_reset_addr;
 extern int fake_matrix_reset_in_read_txn;      // this read: chip resets after its first data byte, the rest reads 0xFF,
                                                // full count (a write with this number is unaffected)
+extern int fake_matrix_faults;                 // faults applied so far: a failed or short transfer, a reset
+                                               // before a transfer or inside a read
 extern unsigned fake_matrix_wire_bytes;        // bytes on the wire, address bytes included
 extern bool fake_matrix_clock;                 // each transfer advances timer_hw->timerawl by its wire time (22.5 us/byte)
 extern int fake_matrix_low_column;             // column (0-9) low at the last U801 row read, -1 none

@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReBirth — симулятор</title>
+<!-- The type of the x0xb0x VCF Bench page, for the two 303 panels; without a network they fall back. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=B612:wght@400;700&family=B612+Mono&family=Saira+Condensed:wght@500;600;700&display=swap">
+<style>
+  :root {
+    --bg: #14151a; --card: #1d1f26; --line: #2c2f3a; --text: #e6e8ee; --dim: #9096a6;
+    --accent: #8be28b; --rig: #f0a560; --info: #9db7ff; --warn: #ff7a6b;
+    --panel: #1a1b1e; --pad-off: #77787c; --key-off: #9a9b9f;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; }
+  .layout { display: grid; grid-template-columns: minmax(320px, min(100vh - 32px, 760px)) minmax(320px, 1fr);
+    gap: 16px; padding: 16px; align-items: start; max-width: 1500px; margin: 0 auto; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
+
+  /* ─── The device ─── */
+  #device { position: relative; width: 100%; aspect-ratio: 1; container-type: inline-size;
+    background: #3a3b40; border-radius: 1.2%; user-select: none; -webkit-user-select: none; touch-action: none; }
+  #device .cheek { position: absolute; top: 4.8%; bottom: 4.4%; width: 3.3%; border-radius: 0.6cqw;
+    background: linear-gradient(180deg, #b9743f, #8a5127 30%, #b9743f 55%, #8a5127 80%, #b9743f); }
+  #device .face { position: absolute; left: 6.8%; right: 6.8%; top: 4.9%; bottom: 4.6%; background: var(--panel);
+    border-radius: 0.4cqw; box-shadow: inset 0 0 0 0.15cqw #2a2b30, 0 0.6cqw 1.6cqw rgba(0,0,0,.5); }
+  #device .at { position: absolute; }
+  #device .label { position: absolute; transform: translate(-50%, -50%); color: #e9e9ea; font-size: 1.05cqw;
+    font-weight: 600; letter-spacing: .04em; white-space: nowrap; pointer-events: none; }
+  #oled-frame { background: #0b0c0f; border: 0.15cqw solid #33353b; border-radius: 0.3cqw; padding: 0.9cqw 1cqw; }
+  #oled { width: 100%; height: 100%; display: block; image-rendering: pixelated; background: #030406; }
+  .pad, .scene, .mutekey, .stepkey, #play { border-radius: 0.9cqw; cursor: pointer;
+    background: var(--pad-off); box-shadow: inset 0 -0.35cqw 0.5cqw rgba(0,0,0,.28), inset 0 0.25cqw 0.4cqw rgba(255,255,255,.18);
+    transition: transform .04s; }
+  .scene { border-radius: 0.8cqw; }
+  .mutekey { border-radius: 0.6cqw; }
+  .stepkey { border-radius: 0.5cqw; background: var(--key-off); }
+  .down { transform: scale(.93); filter: brightness(.82); }
+  .latched { outline: 0.25cqw dashed #fff; outline-offset: 0.15cqw; }
+  .finger::after { content: ""; position: absolute; inset: -0.9cqw; border-radius: 50%;
+    border: 0.35cqw solid rgba(255,255,255,.9); box-shadow: 0 0 1cqw rgba(255,255,255,.7); pointer-events: none; }
+  .stepled, #beat { border-radius: 50%; background: #3b1414; }
+  #pad-well { background: #2a2b2e; border-radius: 0.4cqw; }
+  .knob { border-radius: 50%; cursor: grab; background: radial-gradient(circle at 35% 30%, #5a5b60, #26272a 70%);
+    box-shadow: 0 0.4cqw 0.9cqw rgba(0,0,0,.6), inset 0 0 0 0.25cqw #18191b; }
+  .knob i { position: absolute; left: 50%; top: 9%; width: 7%; height: 30%; margin-left: -3.5%;
+    background: #f1f1f1; border-radius: 0.3cqw; pointer-events: none; }
+  .knob.down { transform: scale(.94); }
+  .encbtn { position: absolute; transform: translate(-50%, -50%); background: none; border: 0; color: #7f8390;
+    font-size: 1.5cqw; cursor: pointer; padding: 0.2cqw 0.6cqw; }
+  .encbtn:hover { color: #fff; }
+
+  .stage { position: sticky; top: 16px; }
+  @media (max-width: 900px) { .stage { position: static; } }
+  #caption { margin-top: 8px; min-height: 44px; padding: 8px 12px; border-radius: 10px; background: var(--card);
+    border: 1px solid var(--line); font-size: 13px; }
+  #caption b { color: var(--accent); } #caption.rig b { color: var(--rig); } #caption.info { color: var(--info); font-weight: 600; }
+  #caption.warn b { color: var(--warn); }
+
+  /* ─── Side column ─── */
+  .side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+  .card h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
+  h1 { font-size: 18px; margin: 0; }
+  .sub { color: var(--dim); font-size: 13px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  button.btn { background: #2b2e39; color: var(--text); border: 1px solid #3b3f4d; border-radius: 8px; padding: 7px 12px;
+    font: inherit; cursor: pointer; }
+  button.btn:hover { background: #343846; }
+  button.btn.primary { background: #2f6b3a; border-color: #3f8a4c; font-weight: 600; }
+  button.btn.primary:hover { background: #377a43; }
+  button.btn:disabled { opacity: .5; cursor: default; }
+  a.btn { display: inline-block; background: #2b2e39; color: var(--text); border: 1px solid #3b3f4d; border-radius: 8px;
+    padding: 7px 12px; text-decoration: none; }
+  a.btn:hover { background: #343846; }
+  .card select { max-width: 100%; min-width: 0; }
+  #show-song, #show-form { flex: 1 1 200px; }
+  /* One floating hint for whatever carries data-tip (app.js, initTips). */
+  #tip { position: fixed; z-index: 50; max-width: 330px; padding: 7px 10px; border-radius: 8px; background: #0d0e12;
+    border: 1px solid #454a5b; color: var(--text); font-size: 12px; line-height: 1.4; white-space: pre-line;
+    pointer-events: none; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
+  #tip[hidden] { display: none; }
+  select, input[type=checkbox] { accent-color: var(--accent); }
+  select { background: #2b2e39; color: var(--text); border: 1px solid #3b3f4d; border-radius: 6px; padding: 4px 6px; font: inherit; }
+  #progress { height: 6px; background: #2a2d37; border-radius: 3px; overflow: hidden; margin: 10px 0 6px; }
+  #progress i { display: block; height: 100%; width: 0; background: var(--accent); }
+  #log { height: 260px; overflow-y: auto; font-size: 13px; border-top: 1px solid var(--line); margin-top: 8px; padding-top: 6px; }
+  #log p { margin: 0 0 5px; display: grid; grid-template-columns: 58px 1fr; gap: 8px; }
+  #log .when { color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
+  #log .device b { color: var(--accent); } #log .rig b { color: var(--rig); } #log .info { color: var(--info); font-weight: 600; }
+  #log .warn b { color: var(--warn); }
+  .knobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 14px; }
+  .knobs label { display: grid; grid-template-columns: 1fr; font-size: 12px; color: var(--dim); }
+  .knobs input[type=range] { width: 100%; accent-color: var(--rig); margin: 2px 0 0; }
+  /* ─── Mini mixer ─── */
+  .mixer { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 4px; margin-bottom: 12px; }
+  .strip { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 6px 2px; border: 1px solid var(--line);
+    border-radius: 8px; background: #191b22; min-width: 0; }
+  .strip.master { background: #20232c; }
+  .strip .lamp { padding: 2px 4px; font-size: 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .strip .well { display: flex; gap: 3px; align-items: stretch; height: 96px; }
+  .strip input.fader { writing-mode: vertical-lr; direction: rtl; width: 20px; height: 96px; margin: 0; accent-color: var(--rig); }
+  .strip .vu { width: 5px; border-radius: 3px; background: #2a2d37; position: relative; overflow: hidden; }
+  .strip .vu i { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: var(--accent); }
+  .strip .val { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .strip button { font: 600 10px/1 inherit; padding: 4px 6px; border-radius: 5px; border: 1px solid #3b3f4d; background: #2b2e39;
+    color: var(--dim); cursor: pointer; }
+  .strip button[aria-pressed="true"] { background: var(--warn); border-color: var(--warn); color: #111; }
+  .strip.muted input.fader { opacity: .35; }
+  .strip .mknobs { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .strip .mknob { display: flex; flex-direction: column; align-items: center; width: 100%; min-height: 50px; }
+  .strip .mknob .mname { font-size: 8px; font-weight: 600; line-height: 1; letter-spacing: .06em; color: var(--dim); margin-bottom: 1px; }
+  .strip .mknob .dial { width: 28px; height: 28px; touch-action: none; cursor: ns-resize; border-radius: 50%; }
+  .strip .mknob .dial:focus-visible { outline: 2px solid var(--rig); outline-offset: 1px; }
+  .strip .mknob svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .strip .mknob circle { fill: #2b2e39; stroke: #3b3f4d; stroke-width: 1.5; }
+  .strip .mknob .arc { fill: none; stroke: var(--rig); stroke-width: 3; stroke-linecap: round; }
+  .strip .mknob .ptr { stroke: var(--text); stroke-width: 2.4; stroke-linecap: round; }
+  .strip .mknob .mval { font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .strip.muted .mknob { opacity: .5; }
+
+  /* ─── The two 303s, drawn as the x0xb0x VCF Bench page draws its one ───
+     White solder mask, black silkscreen legends, gold for what is set; its own
+     dark palette where the system asks for dark. */
+  .bench { --b-bg: #e6ebe8; --b-mask: #f7f9f8; --b-ink: #141816; --b-muted: #56605b; --b-line: #c3ccc7; --b-gold: #9a6d1c;
+    --b-gold-soft: #e9d6ab; --b-led: #d23a1e;
+    --b-display: "Saira Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+    --b-body: "B612", "Segoe UI", system-ui, sans-serif; --b-mono: "B612 Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    container-type: inline-size; display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;
+    color: var(--b-ink); font-family: var(--b-body); font-size: 14px; line-height: 1.45; }
+  @media (prefers-color-scheme: dark) {
+    .bench { --b-bg: #0a0c0c; --b-mask: #141817; --b-ink: #edf1ee; --b-muted: #8e9893; --b-line: #2a302e; --b-gold: #d8a94e;
+      --b-gold-soft: #3a2f19; --b-led: #ff5b3a; }
+  }
+  .bench .board { background: var(--b-mask); border: 1px solid var(--b-line); border-radius: 6px; padding: 14px;
+    display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .bench .legend { font-family: var(--b-display); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; font-size: 13px; color: var(--b-ink); }
+  .bench .small { font-size: 12px; color: var(--b-muted); }
+  .bench .bhead { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+  .bench .bknobs { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 10px 6px; align-items: start; }
+  @container (max-width: 520px) { .bench .bknobs { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .bench .bcell { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+  .bench .bknob { width: 100%; max-width: 92px; aspect-ratio: 1; touch-action: none; cursor: ns-resize; border-radius: 50%; }
+  .bench .bknob svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .bench .bknob:focus-visible, .bench button:focus-visible { outline: 2px solid var(--b-gold); outline-offset: 2px; }
+  .bench .bval { font: 12px var(--b-mono); color: var(--b-muted); font-variant-numeric: tabular-nums; }
+  .bench .bcell .legend { font-size: 12px; text-align: center; line-height: 1.1; min-height: 2.2em; display: flex; align-items: end; }
+  .bench .bswitch { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 92px; margin-top: 6px; }
+  .bench button { font: 600 13px var(--b-display); letter-spacing: .08em; text-transform: uppercase; color: var(--b-ink);
+    background: var(--b-mask); border: 1px solid var(--b-line); border-radius: 4px; padding: 6px 0; cursor: pointer; min-height: 34px; }
+  .bench button:hover { border-color: var(--b-muted); }
+  .bench button[aria-pressed="true"] { background: var(--b-gold-soft); border-color: var(--b-gold); }
+  .bench .bmeter { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: center; }
+  .bench .bmeter .bbar, .bench .bmeter .bticks { grid-column: 1 / -1; }
+  .bench .bbar { position: relative; height: 14px; background: var(--b-bg); border: 1px solid var(--b-line); border-radius: 3px; overflow: hidden; }
+  .bench .bbar i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--b-gold); transition: width 60ms linear; }
+  .bench .bticks { position: relative; height: 14px; font: 10px var(--b-mono); color: var(--b-muted); }
+  .bench .bticks span { position: absolute; transform: translateX(-50%); }
+  .bench .breadout { font: 15px var(--b-mono); font-variant-numeric: tabular-nums; min-width: 8ch; text-align: right; }
+  @media (prefers-reduced-motion: reduce) { .bench .bbar i { transition: none; } }
+  .lamp { font-size: 11px; padding: 3px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim);
+    font-variant-numeric: tabular-nums; }
+  .lamp.on { color: #111; background: var(--rig); border-color: var(--rig); }
+  .meters { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 4px 14px; font-size: 12px; color: var(--dim); }
+  .meters b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
+  #midi { font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); height: 66px; overflow: hidden;
+    margin-top: 8px; white-space: pre; }
+  .hint { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  #kbd-keys { position: relative; height: 104px; margin: 10px 0 6px; user-select: none; -webkit-user-select: none; touch-action: none; cursor: pointer; }
+  #kbd-keys .kw, #kbd-keys .kb { position: absolute; top: 0; display: flex; align-items: flex-end; justify-content: center;
+    font-size: 10px; padding-bottom: 3px; border-radius: 0 0 4px 4px; }
+  #kbd-keys .kw { bottom: 0; background: #d9dbe2; color: #3a3d48; border: 1px solid var(--bg); }
+  #kbd-keys .kb { height: 62%; z-index: 1; background: #0d0e12; border: 1px solid #000; }
+  #kbd-keys .kw.kdown { background: var(--accent); }
+  #kbd-keys .kb.kdown { background: #3f8a4c; }
+  #kbd-vel { width: 110px; accent-color: var(--accent); }
+  .klamp { font-size: 11px; padding: 3px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
+  .klamp.on { color: #111; background: var(--accent); border-color: var(--accent); }
+  #kbd-nofw { color: var(--warn); }
+  kbd { background: #2b2e39; border: 1px solid #3b3f4d; border-radius: 4px; padding: 0 4px; font: inherit; font-size: 11px; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="stage">
+    <div id="device"></div>
+    <div id="caption"><span class="sub">Здесь будет видно, что артист делает прямо сейчас.</span></div>
+  </div>
+
+  <div class="side">
+    <div class="card">
+      <h1>ReBirth — симулятор прибора</h1>
+      <div class="sub">Внутри работает настоящая прошивка из <code>src/</code>, собранная в WebAssembly. Смоделировано только железо вокруг неё.</div>
+      <div class="sub" id="build" style="margin-top:4px"></div>
+      <div class="row" style="margin-top:10px">
+        <a class="btn" id="manual" href="manual-ru.pdf" target="_blank" rel="noopener"
+           data-tip="Руководство пользователя ReBirth (PDF, на русском): экраны, органы управления, MIDI и CV/Gate, сохранение. Откроется в новой вкладке.">📖 Руководство пользователя</a>
+      </div>
+      <div class="meters" style="margin-top:10px">
+        <span>Время прибора <b id="m-time">0.0 с</b></span>
+        <span>Транспорт <b id="m-state">стоп</b></span>
+        <span>Скорость <b id="m-speed">×1</b></span>
+        <span>Звук <b id="m-audio">выключен</b></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Гоа-артист</h2>
+      <div class="row">
+        <button class="btn primary" id="show-start"
+          data-tip="Артист включает прибор заново, набирает на нём клипы выбранной песни и играет её вживую. Любое ваше нажатие на панели забирает управление у артиста.">▶ Сыграть гоа-сет</button>
+        <button class="btn" id="show-stop" disabled
+          data-tip="Останавливает артиста и нажимает PLAY, чтобы музыка стихла. Прибор остаётся в том состоянии, до которого артист дошёл.">■ Остановить</button>
+        <button class="btn" id="reboot"
+          data-tip="Снять и подать питание: память как после включения, виртуальная flash пуста. На настоящем приборе сохранённое во flash остаётся.">⏻ Выключить и включить</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label for="show-song">Песня:</label>
+        <select id="show-song"
+          data-tip="Что сыграет артист: у каждой песни свои тональность, темп, клипы и звук синтезаторов. Все песни написаны для этой страницы и не повторяют записей."></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label for="show-form">Аранжировка:</label>
+        <select id="show-form"
+          data-tip="Как из клипов песни складывается сет. Клип на приборе не длиннее 16 шагов, поэтому форма строится сменой клипов, MUTE и сценами. У каждой песни есть своя аранжировка, но любую песню можно сыграть в любой."></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label data-tip="С галочкой видно, как артист набирает клипы на остановленном приборе, в ускоренном времени. Без неё подготовка проходит мгновенно."><input type="checkbox" id="show-prep" checked> показать подготовку ускоренно</label>
+        <select id="prep-speed" data-tip="Во сколько раз ускорить подготовку. Сам сет всегда идёт в настоящем времени."><option value="8">×8</option><option value="16" selected>×16</option><option value="40">×40</option></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label for="show-variant">Как артист набирает клипы:</label>
+        <select id="show-variant"
+          data-tip="Способ ввода нот. Доступны только те, что умеет прошивка внутри симулятора: партитура для другой прошивки на ней сбилась бы.">
+          <option value="base">каждая нота от «до», каждый клип заново</option>
+          <option value="fw2">последняя нота и копирование клипов</option>
+          <option value="keys">то же и MIDI-клавиатура</option>
+          <option value="pads">то же и ноты с пэдов (без клавиатуры)</option>
+        </select>
+      </div>
+      <div id="progress"><i></i></div>
+      <div class="sub" id="phase">Прибор включён и ждёт. Можно играть самому или запустить артиста.</div>
+      <div id="log"></div>
+    </div>
+
+    <div class="card">
+      <h2>MIDI-клавиатура (вход прибора)</h2>
+      <div class="row">
+        <button class="btn" id="kbd-down" data-tip="Октава ниже">−</button>
+        <span class="sub" id="kbd-range">C3 – C5</span>
+        <button class="btn" id="kbd-up" data-tip="Октава выше">+</button>
+        <label class="sub" data-tip="Velocity, с которой играют экранные и компьютерные клавиши.">Скорость <input type="range" id="kbd-vel" min="1" max="127" value="100"> <b id="kbd-vel-n">100</b></label>
+        <span class="klamp" id="kbd-lamp" data-tip="Мигает, когда на вход MIDI прибора уходит сообщение.">MIDI IN</span>
+      </div>
+      <div id="kbd-keys"></div>
+      <div class="row">
+        <button class="btn" id="kbd-connect" data-tip="Настоящая MIDI-клавиатура через Web MIDI: её ноты пойдут на вход MIDI прибора. Браузер спросит разрешение.">Подключить MIDI-клавиатуру</button>
+        <span class="sub" id="kbd-status"></span>
+      </div>
+      <div class="hint">Удержите кнопку шага на экране паттерна (Shift+клик фиксирует её) и нажмите клавишу: шаг получит ноту. Без удержанного шага клавиша звучит через выбранную дорожку.
+        Компьютерная клавиатура: <kbd>Z</kbd> <kbd>S</kbd> <kbd>X</kbd> … и <kbd>Q</kbd> <kbd>2</kbd> <kbd>W</kbd> … <kbd>I</kbd>.</div>
+      <div class="hint" id="kbd-nofw" hidden>Эта сборка прошивки не принимает MIDI.</div>
+    </div>
+
+    <div class="card">
+      <h2>Синтезаторы (не часть прибора)</h2>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn" id="audio-toggle" data-tip="Включает и выключает синтезаторы страницы. Прибор при этом работает как обычно: он шлёт только MIDI и CV/Gate.">🔊 Включить звук</button>
+        <span class="sub">Прибор шлёт только MIDI и CV/Gate; звук делают эти инструменты.</span>
+      </div>
+      <div class="mixer" id="mixer"></div>
+      <div class="bench" id="effects"></div>
+      <div class="bench" id="acid1"></div>
+      <div class="bench" id="acid2"></div>
+      <div class="knobs" id="knobs"></div>
+    </div>
+
+    <div class="card">
+      <h2>Диагностика</h2>
+      <div class="meters">
+        <span data-tip="Сколько раз таймер секвенсора сработал позже срока. Запись во flash останавливает оба ядра примерно на секунду, поэтому одно опоздание после сохранения ожидаемо.">Опоздания таймера <b id="d-overruns">0</b></span>
+        <span data-tip="Очередь исходящих MIDI-сообщений переполнилась, и часть их потеряна.">Переполнение MIDI <b id="d-overflow">нет</b></span>
+        <span data-tip="Кадры светодиодов, от которых драйвер отказался, потому что прошлый ушёл меньше 3 мс назад.">Пропущено кадров LED <b id="d-leds">0</b></span>
+        <span data-tip="Блокировка взята дважды. В симуляторе всё идёт в одном потоке, поэтому это ошибка, а не ожидание.">Ошибки блокировок <b id="d-locks">0</b></span>
+        <span data-tip="Уровни четырёх выходов Gate.">Gate 1-4 <b id="d-gates">----</b></span>
+        <span data-tip="Напряжения четырёх выходов CV, как их выставил ЦАП.">CV 1-4, В <b id="d-cv">0.00 0.00 0.00 0.00</b></span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="fault-keys" data-tip="Расширитель строк клавиатуры U801 (MCP23017) теряет настройки, как от разряда статики: его строки повисают и читаются как нажатые. Прошивка находит сброс в начале следующего скана и настраивает его заново, не приняв это за нажатия.">Сброс сканера пэдов (как от статики)</button>
+        <button class="btn" id="fault-steps" data-tip="Микросхема MCP23017 теряет настройки: её линии читаются как нажатые. Прошивка не должна принять это за нажатия кнопок шагов.">Сброс расширителя кнопок шагов</button>
+      </div>
+      <div id="midi"></div>
+      <div class="hint">Мышь: нажатие и удержание работают как на приборе. <kbd>Shift</kbd>+клик удерживает кнопку шага, пока не кликнуть ещё раз.
+        Энкодеры: колесо мыши или стрелки под ручкой, клик по ручке — нажатие. <kbd>Пробел</kbd> — PLAY.</div>
+    </div>
+  </div>
+</div>
+
+<div id="tip" hidden></div>
+<script src="version.js"></script>
+<script src="core.js"></script>
+<script src="device.js"></script>
+<script src="artist.js"></script>
+<script src="dsp.js"></script>
+<script src="acid.js"></script>
+<script src="rig.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

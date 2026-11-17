@@ -48,6 +48,8 @@ static bool scanner_checked;    // a check has passed since key_scan_init
 static bool retry_armed;        // the last configuration attempt failed
 static uint32_t retry_from_ms;
 static uint8_t scan_step;       // CHECK_STEP, or 1 + the column to sample
+// Bumped whenever key state may have been lost; see panel_input_generation().
+static uint32_t generation;
 
 static panel_event_t ring[EVENT_RING_SIZE];
 static uint8_t ring_head;
@@ -114,6 +116,7 @@ static void forget_play(void) {
 // two up samples again.
 static void lose_scanner(uint32_t now_ms) {
     scanner_configured = false;
+    generation++;
     for (uint8_t row = 0; row < PANEL_ROWS; row++) {
         for (uint8_t col = 0; col < PANEL_COLS; col++) {
             debounce_t *key = &keys[row][col];
@@ -127,10 +130,13 @@ static void lose_scanner(uint32_t now_ms) {
 // and then the check that starts the next pass: the attempt fails if either
 // does. An attempt after a failed one waits PANEL_RETRY_MS, so a dead bus, or
 // one on which only reads fail, costs one timeout per 100 ms instead of one
-// every pass or two.
+// every pass or two. A configuration that succeeds starts a new generation, so
+// a press the UI handled while the scanner was lost is not trusted as held:
+// every pad press after it comes from a sample of the new configuration.
 static void configure(uint32_t now_ms) {
     if (retry_armed && (uint32_t)(now_ms - retry_from_ms) < PANEL_RETRY_MS) return;
     scanner_configured = key_scan_init();
+    if (scanner_configured) generation++;
     scanner_checked = false;
     retry_armed = !scanner_configured;
     retry_from_ms = now_ms;
@@ -222,6 +228,7 @@ void panel_input_init(void) {
     gpio_init(PLAY_BUTTON_PIN);
     gpio_set_dir(PLAY_BUTTON_PIN, GPIO_IN);
     gpio_pull_up(PLAY_BUTTON_PIN);
+    generation++;
     memset(keys, 0, sizeof(keys));
     memset(&play, 0, sizeof(play));
     ring_head = 0;
@@ -237,6 +244,7 @@ void panel_input_init(void) {
 }
 
 void panel_input_resync(void) {
+    generation++;
     forget_play();
     ring_count = 0;             // PLAY events too: nothing from the stall is a command
     hold_keys();
@@ -267,4 +275,21 @@ bool panel_input_next(panel_event_t *out) {
     ring_head = (ring_head + 1) % EVENT_RING_SIZE;
     ring_count--;
     return true;
+}
+
+bool panel_input_pad_down(uint8_t track, uint8_t row) {
+    if (track >= 8 || row >= 8) return false;
+    for (uint8_t r = 0; r < PANEL_ROWS; r++) {
+        for (uint8_t col = 0; col < PANEL_COLS; col++) {
+            const key_control_t *control = &key_map[r][col];
+            if (control->kind == PANEL_PAD && control->track == track && control->row == row) {
+                return keys[r][col].accepted;
+            }
+        }
+    }
+    return false;
+}
+
+uint32_t panel_input_generation(void) {
+    return generation;
 }

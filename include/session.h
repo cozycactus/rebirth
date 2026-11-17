@@ -30,6 +30,10 @@ void session_walk_stops(uint8_t *track, uint8_t *lane, int8_t detents, uint8_t k
 uint8_t session_kit_lane(uint8_t track);
 void session_set_kit_lane(uint8_t track, uint8_t lane);
 
+// Puts the focus on a cell. Ignored for a track or location out of range. The
+// lane of a kit cell stays the track's remembered one.
+void session_set_focus(uint8_t track, uint8_t location);
+
 // Walks the focus by `detents` stops. A track is a kit for the walk when its
 // type is KIT in the location it would be edited in: the focused location for
 // the focused track, the queued location if one is pending, else the current

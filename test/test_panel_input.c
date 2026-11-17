@@ -507,11 +507,16 @@ static int open_window(void) {
 // those 12 passes, in which no column is sampled twice: so neither may ever be
 // reported); then the second scan, whose samples settle the DOWN_ROW and
 // UP_ROW keys.
-static void run_window(void) {
-    passes(1 + SCAN_PASSES);
+static void run_window_after_configuration(void) {
+    passes(SCAN_PASSES);
     fake_matrix_key[HELD_ROW][CHATTER_COL] = true;
     for (int col = 0; col < COLS; col++) fake_matrix_key[TAP_ROW][col] = false;
     passes(SCAN_PASSES);
+}
+
+static void run_window(void) {
+    pass();                                 // the configuration
+    run_window_after_configuration();
 }
 
 static void test_fault_at_every_transfer(void) {
@@ -1339,6 +1344,203 @@ static void test_bus_load_is_bounded(void) {
            scans_done, fake_matrix_wire_bytes / (unsigned)scans_done);
 }
 
+// ---- Held pads (clip copy) ------------------------------------------------------
+
+// fake_matrix_key[row][col] is the pad of track col in slot row.
+static void test_pad_down_follows_the_accepted_press(void) {
+    start();
+    panel_event_t e[4];
+    CHECK(!panel_input_pad_down(5, 2));
+    fake_matrix_key[2][5] = true;
+    until_sample_of(5);
+    CHECK(!panel_input_pad_down(5, 2));         // seen once: still in its debounce time
+    until_sample_of(5);
+    CHECK(panel_input_pad_down(5, 2));          // the sample that queued its press
+    CHECK(!panel_input_pad_down(2, 5));         // track and row are not swapped
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 2, 5, true));
+    fake_matrix_key[2][5] = false;
+    until_sample_of(5);
+    CHECK(panel_input_pad_down(5, 2));
+    until_sample_of(5);
+    CHECK(!panel_input_pad_down(5, 2));
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 2, 5, false));
+}
+
+// SCENE and MUTE keys are not pads, whatever their row.
+static void test_pad_down_is_only_pads(void) {
+    start();
+    panel_event_t e[4];
+    fake_matrix_key[2][SCENE_COL] = true;
+    fake_matrix_key[2][MUTE_COL] = true;
+    scans(3);
+    CHECK(take(e, 4) == 2);
+    for (int track = 0; track < 8; track++) {
+        for (int row = 0; row < 8; row++) CHECK(!panel_input_pad_down((uint8_t)track, (uint8_t)row));
+    }
+}
+
+static void test_pad_down_refuses_arguments_out_of_range(void) {
+    start();
+    fake_matrix_key[0][0] = true;
+    fake_matrix_key[7][7] = true;
+    scans(3);
+    CHECK(panel_input_pad_down(0, 0));
+    CHECK(panel_input_pad_down(7, 7));
+    CHECK(!panel_input_pad_down(8, 0));
+    CHECK(!panel_input_pad_down(0, 8));
+    CHECK(!panel_input_pad_down(255, 255));
+}
+
+// A pad held through a stall is taken as held but not reported down, so it
+// is no copy source until it is released and pressed again.
+static void test_pad_down_is_false_after_a_resync(void) {
+    start();
+    panel_event_t e[4];
+    fake_matrix_key[1][3] = true;
+    scans(3);
+    CHECK(panel_input_pad_down(3, 1));
+    panel_input_resync();
+    CHECK(!panel_input_pad_down(3, 1));
+    scans(5);
+    CHECK(!panel_input_pad_down(3, 1));
+    CHECK(take(e, 4) == 1);
+}
+
+// A press that finds the ring full stays pending, and so does its pad: it is
+// reported down only by the sample that queues the press.
+static void test_pad_down_waits_for_its_press_to_be_queued(void) {
+    start();
+    panel_event_t e[40];
+    ui_drains = false;
+    for (int col = 0; col < 4; col++) {
+        for (int row = 0; row < ROWS; row++) fake_matrix_key[row][col] = true;
+    }
+    scans(3);                               // 32 presses: the ring is full
+    fake_matrix_key[4][6] = true;
+    scans(3);
+    CHECK(!panel_input_pad_down(6, 4));
+    collect();
+    CHECK(take(e, 40) == 32);
+    until_sample_of(6);
+    CHECK(panel_input_pad_down(6, 4));
+    collect();
+    CHECK(take(e, 40) == 1 && is_key(&e[0], 4, 6, true));
+}
+
+// A lost scanner keeps a reported pad down, as it keeps every reported state,
+// but the generation tells the UI not to trust a hold from before.
+static void test_pad_down_survives_a_lost_scanner_under_a_new_generation(void) {
+    start();
+    panel_event_t e[4];
+    fake_matrix_key[3][1] = true;
+    scans(3);
+    CHECK(take(e, 4) == 1);
+    uint32_t g = panel_input_generation();
+    fake_matrix_fail_txn = fake_matrix_txn + 1;
+    pass();
+    CHECK(panel_input_pad_down(1, 3));
+    CHECK(panel_input_generation() != g);
+    scans(3);
+    CHECK(panel_input_pad_down(1, 3));
+    CHECK(take(e, 4) == 0);
+}
+
+static void test_generation_changes_when_key_state_may_be_lost(void) {
+    start();
+    uint32_t g = panel_input_generation();
+    panel_input_resync();
+    CHECK(panel_input_generation() != g);
+
+    // A failed transfer loses the scanner; the configuration after it is a
+    // new generation again.
+    start();
+    g = panel_input_generation();
+    fake_matrix_fail_txn = fake_matrix_txn + 1;
+    pass();
+    CHECK(panel_input_generation() != g);
+    g = panel_input_generation();
+    int txn = fake_matrix_txn;
+    pass();
+    CHECK(fake_matrix_txn - txn == 6);      // the configuration
+    CHECK(panel_input_generation() != g);
+
+    // A chip that reset, found by the check.
+    for (int chip = 0; chip < 2; chip++) {
+        start();
+        g = panel_input_generation();
+        fake_matrix_chip_reset(chip == 0 ? U801 : U802);
+        scans(1);
+        CHECK(panel_input_generation() != g);
+    }
+
+    // After failed configuration attempts, the one that succeeds changes it:
+    // a press handled while the scanner was lost is not a hold.
+    start();
+    fake_matrix_fail_from = fake_matrix_txn + 1;
+    pass();                                 // a step fails
+    pass();                                 // the configuration at once fails too
+    g = panel_input_generation();
+    passes(150);                            // and the retry after 100 ms
+    fake_matrix_fail_from = 0;
+    txn = fake_matrix_txn;
+    passes(100);
+    CHECK(fake_matrix_txn - txn >= 6);      // a configuration
+    CHECK(panel_input_generation() != g);
+
+    start();
+    g = panel_input_generation();
+    panel_input_init();
+    CHECK(panel_input_generation() != g);
+}
+
+// Every fault of every kind at every transfer of the window after its
+// configuration changes the generation by the next check. (A fault in the
+// configuration only fails that attempt: the scanner was lost already, and
+// the configuration that succeeds later changes it.) A reset inside a read
+// numbered on a write does nothing, and must change nothing.
+static void test_generation_changes_at_every_fault(void) {
+    int window_from = open_window();
+    run_window();
+    int window = fake_matrix_txn - window_from;
+    for (int kind = 0; kind < FAULT_KINDS; kind++) {
+        int applied = 0;
+        for (int k = 6 + 1; k <= window; k++) {
+            int from = open_window();
+            inject(kind, from + k);
+            pass();                         // the configuration
+            CHECK(fake_matrix_txn - from == 6);
+            int faults = fake_matrix_faults;
+            uint32_t g = panel_input_generation();
+            run_window_after_configuration();
+            scans(2);                       // the next check finds a late reset
+            bool fault = fake_matrix_faults != faults;
+            CHECK(fault || kind == RESET_IN_READ);
+            CHECK((panel_input_generation() != g) == fault);
+            applied += fault;
+        }
+        CHECK(applied >= (window - 6) / 4);    // at least one transfer in four is a read
+    }
+}
+
+static void test_generation_is_steady_through_ordinary_polls(void) {
+    start();
+    uint32_t g = panel_input_generation();
+    fake_matrix_key[0][0] = true;
+    fake_matrix_key[4][3] = true;
+    fake_matrix_key[2][SCENE_COL] = true;
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    scans(3);
+    fake_matrix_key[0][0] = false;
+    fake_gpio_level[PLAY_BUTTON_PIN] = true;
+    scans(3);
+    ui_drains = false;                      // a full ring keeps changes pending
+    for (int col = 0; col < 8; col++) {
+        for (int row = 0; row < ROWS; row++) fake_matrix_key[row][col] = !fake_matrix_key[row][col];
+    }
+    scans(6);
+    CHECK(panel_input_generation() == g);
+}
+
 int main(void) {
     RUN(test_keys_map_to_controls);
     RUN(test_bounce_yields_one_press);
@@ -1379,5 +1581,14 @@ int main(void) {
     RUN(test_press_to_event_within_15_ms);
     RUN(test_press_to_event_under_stress);
     RUN(test_bus_load_is_bounded);
+    RUN(test_pad_down_follows_the_accepted_press);
+    RUN(test_pad_down_is_only_pads);
+    RUN(test_pad_down_refuses_arguments_out_of_range);
+    RUN(test_pad_down_is_false_after_a_resync);
+    RUN(test_pad_down_waits_for_its_press_to_be_queued);
+    RUN(test_pad_down_survives_a_lost_scanner_under_a_new_generation);
+    RUN(test_generation_changes_when_key_state_may_be_lost);
+    RUN(test_generation_changes_at_every_fault);
+    RUN(test_generation_is_steady_through_ordinary_polls);
     return 0;
 }

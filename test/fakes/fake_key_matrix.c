@@ -58,6 +58,7 @@ int fake_matrix_short_txn;
 int fake_matrix_reset_txn;
 uint8_t fake_matrix_reset_addr;
 int fake_matrix_reset_in_read_txn;
+int fake_matrix_faults;
 unsigned fake_matrix_wire_bytes;
 bool fake_matrix_clock;
 int fake_matrix_low_column = -1;
@@ -92,6 +93,7 @@ void fake_matrix_reset(void) {
     fake_matrix_fail_reads = false;
     fake_matrix_short_txn = fake_matrix_reset_txn = fake_matrix_reset_in_read_txn = 0;
     fake_matrix_reset_addr = 0;
+    fake_matrix_faults = 0;
     fake_matrix_wire_bytes = 0;
     fake_matrix_clock = false;
     fake_matrix_low_column = -1;
@@ -182,6 +184,7 @@ static int begin(i2c_inst_t *i2c, uint8_t addr, size_t len, unsigned timeout_us)
     fake_matrix_txn++;
     if (fake_matrix_reset_txn != 0 && fake_matrix_txn == fake_matrix_reset_txn) {
         fake_matrix_chip_reset(fake_matrix_reset_addr);
+        fake_matrix_faults++;
     }
     CHECK(i2c == i2c0);
     CHECK(timeout_us == TIMEOUT_US);
@@ -244,9 +247,11 @@ int i2c_write_timeout_us(i2c_inst_t *i2c, uint8_t addr, const uint8_t *src, size
             moved = (size_t)fake_matrix_fail_bytes + 1;
         }
         result = PICO_ERROR_TIMEOUT;
+        fake_matrix_faults++;
     } else if (short_count()) {
         moved = len - 1;
         result = (int)moved;
+        fake_matrix_faults++;
     }
     apply_write(chip, src, moved);
     if (len == 1 && result == 1) pointer_pending = chip;
@@ -263,12 +268,14 @@ int i2c_read_timeout_us(i2c_inst_t *i2c, uint8_t addr, uint8_t *dst, size_t len,
 
     memset(dst, 0, len);
     if (failing() || fake_matrix_fail_reads) {
+        fake_matrix_faults++;
         end(0);
         return PICO_ERROR_TIMEOUT;
     }
     size_t moved = short_count() ? len - 1 : len;
     bool reset_inside = fake_matrix_reset_in_read_txn != 0
                      && fake_matrix_txn == fake_matrix_reset_in_read_txn;
+    if (moved < len || reset_inside) fake_matrix_faults++;
     for (size_t i = 0; i < moved; i++) {
         if (reset_inside && i > 0) {    // the interface restarted: the rest reads high
             dst[i] = 0xFF;

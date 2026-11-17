@@ -123,6 +123,18 @@ lane order.
 - A pad or scene press is decided and written in one critical section
   (`transport_launch()`, playback lock then shared state), so the timer never
   applies a queue between the decision and the write.
+- A clip copy needs a pad that is really held, and the UI does not track that
+  from press and release events alone: the panel layer can forget its keys
+  without a release (panic, flash stall), stop seeing them while the scanner
+  is lost (an I2C error, a chip that reset) and can report a pad down while
+  its press still waits in the event ring. A pad is a
+  copy source only when the UI handled its press and not its release, the
+  panel layer reports it down now (`panel_input_pad_down()`), the panel
+  layer's `panel_input_generation()` is what it was at that press, and 500 ms
+  have passed since the UI handled it. The source is the location its pad
+  stood for at the press. The copy is one `pattern_copy_track()` under the
+  shared lock followed by a playback refresh of the target, and it leaves the
+  transport's current and queued locations alone.
 - Routing (`track_config_t`: type, channel, drum note, output mode, CV channel,
   gate length) belongs to the track: `seq_set_track_config()` writes it to all
   32 locations and refreshes that track's prepared rows. Older saves whose
