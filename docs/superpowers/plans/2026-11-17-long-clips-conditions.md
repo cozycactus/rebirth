@@ -64,7 +64,9 @@ offsets, gesture map, golden hash values).
    plays every other step, and LST never fires (a TRACK LOOP queue applies
    before the next step is evaluated). Test in Task 10.
 3. **A type change on a 64-step clip** (SYNTH → KIT → SYNTH) keeps the notes,
-   the kit words and the conditions of all 64 steps. Test in Task 4.
+   the kit words and the conditions of all 64 steps: the SYNTH conditions in
+   `step_t.cond`, the kit conditions in bits 24-31 of the kit words, neither
+   gating the other kind. Tests in Tasks 4 and 10.
 4. **A last page that is partial** (length 40: page 3 has 8 steps). Buttons
    9-16 there are dark; in the Session view and on a kit they do nothing, in the
    SYNTH/DRUM Pattern view they edit hidden steps as today; the page cycle stops
@@ -174,7 +176,9 @@ keeps its signature and now only updates the clip mask bit.
   sounds at step 3 of this pass); `kind_change_releases_first` (SYNTH note held
   by tie, track switched to KIT: Note Off precedes the kit hits at the next
   boundary); `stored_mute_silences`; `length_read_live` (shortening to 4 at
-  step 6 wraps at the next boundary, as today); `clip_mask_follows_refresh`.
+  step 6 wraps at the next boundary, as today); `step_beyond_length_never_plays`
+  (the length and the step come from the same `seq_lock` section, and a
+  position at or beyond that length is an inactive step); `clip_mask_follows_refresh`.
   The existing playback tests pass unchanged, except ones that inspect prepared
   rows, which move to the public behaviour.
 - [ ] Implement.
@@ -188,7 +192,8 @@ keeps its signature and now only updates the clip mask bit.
 **Files:** Modify `src/flash_storage.c`, `test/test_storage.c`,
 `ARCHITECTURE.md` (the Storage paragraph on the copy buffer).
 
-**Interfaces:** Removes `pattern_buf` and the per-location copy. Produces
+**Interfaces:** Removes `pattern_buf`, `song_buf`, `kit_buf` and the
+per-location copy. Produces
 `static void program_padded(uint32_t offset, const void *data, size_t bytes)`
 using one static `uint8_t page_tail[FLASH_PAGE]` padded with 0xFF.
 
@@ -230,7 +235,7 @@ Task 6. `fake_flash_erase_limit` (sectors) cuts an erase in the fakes.
 - [ ] Tests (`test_storage`): `v7_round_trip` (content in steps 0-63, hidden
   steps beyond the length, kit words at step 64); `v7_rejections` (length 65,
   `track_length` 65, a non-zero `cond` (until Task 10), `ratchet` 1, `micro` 1,
-  flag bit 4, kit bit 24, AC 2, three kit tracks, a bad CRC);
+  flag bit 4, kit bit 24 (until Task 10), AC 2, three kit tracks, a bad CRC);
   `legacy_fixtures` without the skip, in every build (steps 17-64 zero, `cond`
   0, lengths, kit words, song and its STOP end as the README);
   `erase_order_and_span` (the 0x1E0000 sector first, then 42 sectors from
@@ -238,8 +243,10 @@ Task 6. `fake_flash_erase_limit` (sectors) cuts an erase in the fakes.
   erase cut after 0, 1, 31, 32 and 41 sectors and the programming cut before the
   header: neither v7 nor v6 loads); `layout_error_refuses_save`; `pattern_shift`
   of a 16-step clip unchanged with 64 slots; `type_change_keeps_everything`
-  (Review Focus 3: 64 notes, 64 kit words and 64 non-zero conds set in memory
-  survive SYNTH → KIT → SYNTH through `seq_set_track_config()`). On `__arm__`:
+  (Review Focus 3: 64 notes, 64 kit words with bits 24-31 set and 64 non-zero
+  `step_t.cond` set in memory survive SYNTH → KIT → SYNTH through
+  `seq_set_track_config()`). The erase is three calls, as the spec's Save
+  section. On `__arm__`:
   `sizeof(step_t) == 6`, `sizeof(pattern_t) == 5196`,
   `offsetof(pattern_t, kit_steps) == 3148`, `sizeof(song_t) == 2316`.
 - [ ] `device_check.js`: the header at `sim_flash_store()` has version 7; the
@@ -247,8 +254,12 @@ Task 6. `fake_flash_erase_limit` (sectors) cuts an erase in the fakes.
   written at `sim_flash_store() + 128 KiB` loads with LOAD and A1 track 1 step 1
   is note 48.
 - [ ] Implement.
-- [ ] Run everything; record RAM (expect about 190,000 bytes) and the v7 sizes
+- [ ] Run everything; record RAM (expect about 194,000 bytes) and the v7 sizes
   in `HARDWARE_STATUS.md`; commit `feat: 64-step clips in memory, save format v7`.
+- [ ] **Merge gate (the owner, on the board):** time a v7 save and a load with
+  the transport stopped (the spec estimates 1.0-1.3 s typical) and record it in
+  `HARDWARE_STATUS.md`. The pull request that carries this task is not merged
+  without it.
 
 ## Phase 2 — long clips
 
@@ -294,6 +305,9 @@ absolute steps with their cell. `ui.edit_step` is 0-63. `UI_LENGTH_MAX` goes.
   there does nothing in the Session view and on a kit and toggles hidden step
   41-48 in the SYNTH Pattern view — Review Focus 4); `follow_shows_playhead_page`
   (playhead at step 38: LEDs show steps 33-48 with the playhead on button 6);
+  `no_playhead_is_0xff` (a stopped or other location's cell: no button blinks,
+  also for a playhead at step 17; `cell_playhead()` and the display API return
+  and take 0xFF for none);
   `hold_freezes_page`; `press_binds_absolute_step` (page 2 pinned, tap button 1:
   step 17 toggles); `long_press_opens_absolute_step` (button 1 on page 2 in the
   Session view: the editor opens on step 17); `encoder_target_survives_follow`
@@ -380,9 +394,10 @@ score `long` (env `LONG=1`, with the `pads` score's options); artist option
 ### Task 10: conditions in the engine
 
 **Files:** Create `include/condition.h`, `test/test_condition.c`. Modify
-`include/sequencer.h`, `src/sequencer.c`, `src/flash_storage.c`,
-`test/CMakeLists.txt`, `test/test_playback.c`, `test/test_storage.c`,
-`ARCHITECTURE.md` (a Conditions section).
+`include/sequencer.h`, `include/kit.h`, `src/kit.c`, `src/sequencer.c`,
+`src/song.c`, `src/flash_storage.c`, `test/CMakeLists.txt`,
+`test/test_playback.c`, `test/test_song.c`, `test/test_kit.c`,
+`test/test_storage.c`, `ARCHITECTURE.md` (a Conditions section).
 
 **Interfaces:** `condition.h`, pure: the `COND_*` codes of the spec;
 `bool cond_valid(uint8_t code)`; `uint32_t cond_mix32(uint32_t x)`;
@@ -396,7 +411,14 @@ inline ones are not inlined). `sequencer.h`:
 `transport_snapshot_t` gains `bool fill_active`;
 `void sequencer_set_seed(uint32_t seed)` and `void sequencer_clear_seed(void)`
 (tests: a seed set this way survives every Start until cleared; otherwise Start
-takes the timer).
+takes the timer). `kit.h`: `#define KIT_LANES_MASK 0x00FFFFFFu`,
+`uint8_t kit_word_cond(uint32_t word)` and
+`uint32_t kit_word_set_cond(uint32_t word, uint8_t code)`; every reader of lanes
+in `kit.c`, `sequencer.c`, `ui.c`, `display.c` and `led_frame.c` masks with
+`KIT_LANES_MASK` (audit them all in this task). `transport_t` gains
+`uint8_t song_change_bars[NUM_TRACKS]` (spec, LST in Song mode), computed by one
+helper that `advance_song_position()` and every song edit call under their
+locks.
 
 - [ ] Tests (`test_condition`): validity of 0x00, 0x01, 0x63, 0x70-0x75, 0x88
   (1:2), 0x89 (2:2), 0xBF (8:8) and invalidity of 0x64, 0x6F, 0x76, 0x80, 0x8A
@@ -405,7 +427,9 @@ takes the timer).
   spec's 10,000 inputs plays 4,962 times.
 - [ ] Tests (`test_playback`): `cond_1_2_alternates`; `cond_1st_first_pass_only`
   and again after a launch of another location; `cond_fill_pedal`;
-  `cond_fill_every_4` (bars 4, 8, 12); `cond_fill_on`; `cond_lst_track_loop`;
+  `cond_fill_every_4` (bars 4, 8, 12) and `cond_fill_every_4_out_of_phase` (a
+  64-step clip launched in bar 3 fills in its own second bar); `cond_fill_on`;
+  `cond_lst_track_loop`;
   `cond_lst_bar_misaligned` (length 12 under BAR: each LST step plays once more
   before the change); `cond_lst_step_quant_never`; `cond_lst_song` (entry end,
   a 0-repeat entry skipped, LOOP wrap, STOP end, ten 0-repeat entries in a row,
@@ -414,26 +438,43 @@ takes the timer).
   `cond_false_after_slide`, `cond_false_after_tie` (Note Off and gate off at the
   false step, the next true step retriggers, also across a wrap);
   `cond_false_after_kit_flam` (voices released, no new flam);
-  `cond_kit_step_all_lanes`; `cond_probability_fixed_seed` (seed 1234; plays
-  predicted from the golden table's inputs); `cond_muted_track_keeps_counting`.
-- [ ] Tests (`test_storage`): the validator accepts every valid code and
-  rejects the invalid ones above.
+  `cond_kit_step_all_lanes` (the word's own condition); `cond_kinds_independent`
+  (a SYNTH cond at step 5 does not gate the kit hit at step 5 after a type
+  change, and the other way round); `cond_probability_fixed_seed` (seed 1234;
+  plays predicted from the golden table's inputs); `cond_muted_track_keeps_counting`.
+- [ ] Tests (`test_kit`): `kit_set`, `kit_edit` and `kit_press` keep bits 24-31;
+  `kit_cell_has_clip` and the lane glyphs ignore them. (`test_song`):
+  `song_change_bars` after each bar and after insert, remove and move, with
+  0-repeat runs, LOOP, STOP and a 4-bar cap.
+- [ ] Tests (`test_storage`): the validator accepts every valid code in
+  `step_t.cond` and in kit bits 24-31 and rejects the invalid ones above.
 - [ ] Implement; ELF check (RAM, no division helpers) in Debug and Release.
 - [ ] Run everything; commit `feat: trig conditions and FILL in the engine`.
 
 ### Task 11: FILL from the pedal and the selector
 
-**Files:** Modify `include/midi_in.h`, `src/midi_in.c`, `src/ui.c`,
-`src/display.c`, `test/test_midi_in.c`, `test/test_ui.c`, `README.md`.
+**Files:** Modify `include/midi_in.h`, `src/midi_in.c`, `src/midi_out.c` (the
+receive interrupt), `src/ui.c`, `src/display.c`, `sim/core/hal.c` (the UART
+model sets OE on a byte lost to an unread one), `test/fakes/hardware/uart.h`
+and `test/fakes/fake_hardware.c` (error bits in the data register),
+`test/test_midi_in.c`, `test/test_ui.c`, `README.md`.
 
 **Interfaces:** `midi_in_kind_t` gains `MIDI_IN_SUSTAIN` (`velocity` = the CC
-value). Pattern selector button 16 calls `seq_set_fill_mode()`.
+value). The receive interrupt reads `uart_get_hw(MIDI_UART)->dr`; with OE, BE,
+PE or FE set it counts a dropped byte and pushes nothing. Pedal hysteresis:
+down at ≥ 64, up at ≤ 31. Pattern selector button 16 calls
+`seq_set_fill_mode()`.
 
 - [ ] Tests (`test_midi_in`): `B0 40 7F` gives SUSTAIN 127 on any channel, with
-  running status; CC 65 gives nothing; All Notes Off unchanged.
-- [ ] Tests (`test_ui`): `pedal_down_and_up`; the pedal is not passed through
-  and writes no step even with a step held; it goes up on an input gap, All
-  Notes Off, a panic, a save and a load, and stays through Stop and Start;
+  running status; CC 65 gives nothing; All Notes Off unchanged;
+  `uart_error_counts_as_drop` (a byte with OE, then one with FE: two drops,
+  neither byte in the ring).
+- [ ] Tests (`test_ui`): `pedal_down_and_up` and `pedal_hysteresis` (127 → 50:
+  still down; → 31: up; 31 → 63: still up); `pedal_up_on_uart_error` (an
+  overrun while the pedal is down lifts it and shows `FILL OFF`); the pedal is
+  not passed through and writes no step even with a step held; it goes up on an
+  input gap, All Notes Off, a panic, a save and a load, and stays through Stop
+  and Start;
   `selector_16_cycles_fill_mode` (OFF → ON → EVERY 2 → 4 → 8 → 16 → OFF, with
   notices); the transport symbol is inverted while `fill_active`; the selector
   shows the mode.
@@ -458,8 +499,8 @@ list moves to the list's first item on the first detent.
   `tap_after_a_key_does_not_switch`; `tap_other_step_only_selects` (and resets
   to velocity); `opening_and_leaving_reset_layer`; `hold_edited_step_is_keyboard`;
   `long_press_edited_step_toggles`. Kit editor: `kit_cursor_reaches_cond_stop`
-  (after RC; VALUE sets the step's cond; LEDs show the page's conditioned
-  steps). `session_long_press_unchanged`; the screens show `COND 1:4` and which
+  (after RC; VALUE sets bits 24-31 of the step's kit word and leaves
+  `step_t.cond` alone; LEDs show the page's conditioned steps). `session_long_press_unchanged`; the screens show `COND 1:4` and which
   value VALUE turns.
 - [ ] Implement; run everything; commit `feat: edit trig conditions from held steps and the step editors`.
 

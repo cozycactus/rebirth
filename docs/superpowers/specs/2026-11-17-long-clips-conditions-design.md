@@ -5,8 +5,8 @@ project owner (relayed by the session that started this work): a 64-step
 ceiling with dense storage, kit steps kept for all eight tracks, a manual FILL
 from a sustain pedal on the MIDI input, and the pads of the Pattern view
 showing the whole clip. Everything marked "my call" is open to review in the
-pull request. Base: `master` at bcf6871. Revised the same day after an
-independent review of the written spec and plan (see "Review changes").
+pull request. Base: `master` at bcf6871. Revised the same day after two
+independent reviews of the written spec and plan (see "Review changes").
 
 **This design departs from the direction it was started with.** The brief
 proposed a shared pool of steps because "64 steps everywhere is about 114 of
@@ -139,7 +139,7 @@ micro-timing offset (5 bits), so the step is 6 bytes.
   A full pool of 64-step clips costs as much memory as D.
 - C reverses the owner's kit-storage decision.
 - D keeps today's layout, two arrays per location, only longer. RAM after the
-  change is about 197 KB of 256 KiB (see Budget).
+  change is about 194 KB of 256 KiB (see Budget).
 
 **Playback path.** My call: **the timer reads the step it plays directly**, under
 `seq_lock`, at the step boundary. The prepared rows cannot grow: 256 rows of 64
@@ -184,16 +184,29 @@ typedef struct {
     uint8_t velocity;   // 0-127
     uint8_t flags;      // STEP_FLAG_ACTIVE, ACCENT, SLIDE, TIE; bits 4-7 zero
     uint8_t cond;       // trig condition code, 0 = always (see Conditions)
-    uint8_t ratchet;    // reserved, 0 in v7: bits 0-2 count code, 3-4 ramp
-    uint8_t micro;      // reserved, 0 in v7: delay in pulses, 0-23
+    uint8_t ratchet;    // reserved, 0 in v7 (ratchet count and ramp, later)
+    uint8_t micro;      // reserved, 0 in v7 (micro-timing, later)
 } step_t;               // 6 bytes
 ```
 
-`cond`, `ratchet` and `micro` belong to the step **position** of the clip and
-apply to whichever kind the cell plays: a kit cell's step `s` takes its
-condition from `steps[track][s].cond`, as its lanes come from
-`kit_steps[track][s]`. A type change therefore keeps them with the position
-(my call: one place to edit and store, no kit-only copy).
+`step_t.cond` is the condition of a SYNTH or DRUM step. **A kit step keeps its
+own condition in bits 24-31 of its kit word**, which are free today (the
+validator requires them zero, and 12 lanes use bits 0-23). Each kind keeps its
+condition, so a type change still erases nothing and a SYNTH clip's conditions
+never silently gate the kit hits at the same positions, or the other way round
+(changed after the critique; the first draft shared `step_t.cond`). Everything
+that reads lanes masks the word with `0x00FFFFFF` (`kit_cell_has_clip()`
+already masks with `0x00FFFFFC`); `kit_set()`, `kit_edit()` and `kit_press()`
+change only their lane's bits and keep the condition; copy, double and shift
+move whole words.
+
+The reserved bytes avoid a layout change, not a version: the firmware that first
+writes a non-zero `ratchet` or `micro`, or a condition code v7 does not know,
+writes version 8 with this same layout and loads v7 as it is. Their encoding is
+fixed by that feature (a signed `micro` for early hits is possible: the byte is
+not yet defined). A v7 firmware rejects a v8 save whole, as every older firmware
+rejects a newer format today; downgrades stay unsupported. Kit steps have no
+spare bits left for a ratchet or micro-timing; that is decided with the feature.
 
 ### The location
 
@@ -220,14 +233,14 @@ RAM, from today's 117,504 bytes:
 | Change | Bytes |
 |---|---:|
 | patterns 31,104 → 166,272 | +135,168 |
-| `pattern_buf` removed | −31,232 |
+| the save's buffers removed: `pattern_buf`, `song_buf` (2,560), `kit_buf` (256) | −34,048 |
 | prepared rows, rows in play, revisions removed | −31,648 |
-| new state: pass counters and residues, bar counter, FILL, page pins, overview, 256-byte save tail | about +700 |
+| new state: pass counters and residues, bar counter, Song lookahead, FILL, page pins, overview, 256-byte save tail | about +700 |
 | static scratch `pattern_t` for validating a legacy save | +5,196 |
 | code moved to RAM (step read, condition evaluation) | about +1,500 |
-| **Total** | **about 197,200** |
+| **Total** | **about 194,400** |
 
-That leaves about 63 KB of the 256 KiB main SRAM (less the 2 KiB heap). A
+That leaves about 66 KB of the 256 KiB main SRAM (less the 2 KiB heap). A
 later per-step byte (a CC lock, a gate length) costs 16 KB.
 
 Flash: header 256 + patterns 166,400 (page-rounded) + song 2,560 + kit settings
@@ -245,6 +258,10 @@ boundary, for each track, under the playback lock as today and inside one
 - the playing location's `tracks[track]` (7 bytes) and the track's length;
 - the step record at the track's position (6 bytes), and for a kit cell the kit
   word (4 bytes) and `kit_config[track]` (15 bytes).
+
+The length and the step are read in the same section, and a position at or
+beyond that length reads as an inactive step there, so an edit that shortens the
+clip between two sections can never make the timer play a hidden step.
 
 It then releases `seq_lock` and decides, from the copy, what to play, exactly
 as the prepared row did: the drum note for a DRUM cell, velocity 127 for an
@@ -339,7 +356,8 @@ table in `ui.c` and can change without touching the format): ALWAYS, 90%, 75%,
 
 A condition is evaluated in the timer once per step occurrence, at the step
 boundary, for an active step of an audible track (a kit step with any lane set).
-One evaluation covers the whole step: for a kit, all 12 lanes, AC included.
+One evaluation covers the whole step: for a kit, all 12 lanes, AC included,
+with the condition in bits 24-31 of the kit word.
 
 - **False is a rest.** The step plays exactly as an inactive step would: the
   previous output is released at this boundary as for a rest (a slide or tie
@@ -373,7 +391,11 @@ One evaluation covers the whole step: for a kit, all 12 lanes, AC included.
 - **FILL** is one value for all tracks, taken once per step boundary:
   `fill_active = pedal_down || fill_mode == ON || (fill_mode == EVERY_N &&
   (bar_count & (N − 1)) == N − 1)`; N is 2, 4, 8 or 16, so EVERY 4 fills bars
-  4, 8, 12 ... counted from 1.
+  4, 8, 12 ... counted from 1. The phase is the song's, from Start, not each
+  clip's: a 64-step clip launched in bar 3 with EVERY 4 has its fill in its own
+  second bar (global bar 4), as a phrase-long fill should line up with the set's
+  phrases, not with when a clip happened to be launched (my call; the manual
+  says so, and a test launches a clip out of phase).
 - **LST**: the step plays only the last time it comes round before the clip
   changes. At a boundary where the track plays a clip of length `L`, let `D` be
   the number of boundaries until the track's location changes, if a change is
@@ -390,15 +412,17 @@ One evaluation covers the whole step: for a kit, all 12 lanes, AC included.
     change and is no change): BAR, the next global step that is a multiple of
     16 (16 when the current one is); BEAT, of 4; STEP, the next step; TRACK
     LOOP, the wrap (`D = L − s` at position `s`).
-  - Song mode: the end of the current entry (`(repeats left − 1) * 16 +
-    16 − global % 16`), if the next entry played has another location for the
-    track, or the song ends in STOP. "Next entry played" follows the rules of
-    `advance_song_position()` exactly: 0-repeat entries are skipped, LOOP wraps
-    to entry 0, a position past the length is entry 0. If the next entry keeps
-    the location, the walk goes on, adding each played entry's bars, until `D`
-    exceeds `L` (then no change is known within reach) or every entry of the
-    song was visited once. Skipped entries add no bars, so they never use up the
-    horizon. In Song mode at most `L ≤ 64` steps, four bars, are looked ahead.
+  - Song mode: the timer does not walk the song per step. A per-track
+    lookahead, `song_change_bars[track]` (1-4 = the location changes at the end
+    of the current bar or of the 2nd, 3rd or 4th bar from now; 0 = no change
+    within 4 bars), is computed once per bar inside `advance_song_position()`,
+    under the same lock and with the same rules (0-repeat entries skipped, LOOP
+    wrapping to entry 0, a position past the length meaning entry 0, the song's
+    end in STOP counting as a change), and again by every song edit under its
+    lock. The walk visits each entry at most once and stops as soon as 4 bars
+    are covered, so its cost is bounded once per bar, not per step and track.
+    Then `D = (song_change_bars − 1) * 16 + 16 − global % 16`. Four bars cover
+    the longest clip, so `D ≤ L` is decided exactly.
   - No change known: LST false, !LST true. A queue set mid-pass affects only the
     steps after it; a cancelled queue makes LST false again. A queue is applied
     at a boundary before that boundary's step is evaluated, so under STEP, and
@@ -409,11 +433,23 @@ One evaluation covers the whole step: for a kit, all 12 lanes, AC included.
 ### FILL sources
 
 - **Pedal.** The MIDI input parser reports Control Change 64 on any channel as a
-  new event; a value of 64 or more is down, below 64 up. It is not passed
-  through to the MIDI output and never writes a step. An input gap (lost bytes,
-  a flash save or load), All Notes Off, All Sound Off and a panic put the pedal
-  up; Stop and Start leave it as it is (it is the pedal's state, not the
-  transport's).
+  new event. The pedal goes down at a value of 64 or more and up at 31 or less;
+  values between keep its state, so a continuous pedal near the middle does not
+  flicker. It is not passed through to the MIDI output and never writes a step.
+  An input gap, All Notes Off, All Sound Off and a panic put the pedal up; when
+  that lifts a pedal that was down, the OLED shows `FILL OFF`. A pedal still
+  held through a gap stays up until it is released and pressed again, as a
+  switch pedal sends only changes: a lost message may end a fill early, never
+  leave one stuck on. Stop and Start leave the pedal as it is (it is the
+  pedal's state, not the transport's).
+- **Gaps include UART errors** (changed after the critique). Today the receive
+  interrupt reads with `uart_getc()`, which drops the error bits, so a byte lost
+  to a UART overrun (the one-byte holding register, with the FIFO off, unread
+  for more than 320 µs) or a framing or break error goes unnoticed, and a lost
+  `B0 40 00` would leave FILL on. The handler reads `uart_get_hw()->dr` and,
+  when OE, BE, PE or FE is set, counts a lost byte (`midi_in_dropped()`) and
+  drops the byte, so the existing gap rule fires. This also protects today's
+  passed-through notes from a lost Note Off.
 - **FILL mode**, step button 16 in the pattern selector, cycles OFF → ON →
   EVERY 2 → EVERY 4 → EVERY 8 → EVERY 16 → OFF. EVERY N makes the last bar of
   every N bars since Start a fill. Not saved, like the launch quantization (my
@@ -448,7 +484,11 @@ absolute steps bound to their cell, so pressing the same button again on
 another page never retargets them. Buttons beyond the length behave as today
 on every page: the Session view and kit cells ignore them; the SYNTH/DRUM
 Pattern view and the note step editor edit the hidden step; their LEDs stay
-dark. LED masks stay 16 bits, relative to the shown page.
+dark. LED masks stay 16 bits, relative to the shown page: the playhead is
+turned into a button number on the shown page before a mask is built (`1u <<
+40` would be undefined). Every "none" for a step or a playhead becomes 0xFF:
+today `cell_playhead()` and the display API use 16 (`STEPS_PER_PATTERN`) for
+none, which would read as step 17.
 
 - **Pattern view, VALUE short press with no step held** (no action today):
   FOLLOW → page 1 → ... → last page → FOLLOW, with a notice (`PAGE 2/4`,
@@ -535,8 +575,9 @@ Doubling overwrites steps hidden beyond the length; adding one step does not
   The screen shows the condition, and which of velocity and condition VALUE
   turns.
 - **Kit step editor:** TRACK walks the lane cursor AC ... RC and then one more
-  stop, COND, where VALUE turns the step's condition; at that stop the step
-  LEDs show the steps of the page that have a condition.
+  stop, COND, where VALUE turns the kit step's condition (bits 24-31 of its
+  word); at that stop the step LEDs show the steps of the page that have a
+  condition.
 - The Session view does not edit conditions; a long press there opens the step
   editor as now.
 
@@ -601,8 +642,9 @@ legacy readers are layout-independent.
 Before RAM is replaced: everything v6 checks, and lengths 1-64 (`track_length`
 0-64), every one of the 64 steps of every track, hidden ones included (note and
 velocity ≤ 127, flag bits 4-7 zero, a known condition code, `ratchet` and
-`micro` zero), kit words with bits 24-31 zero and AC 0 or 1, at most two kit
-tracks across all locations, a valid song and kit settings, the CRC.
+`micro` zero), kit words with a known condition code in bits 24-31 and AC 0 or
+1, at most two kit tracks across all locations, a valid song and kit settings,
+the CRC.
 
 ### Save
 
@@ -614,17 +656,26 @@ Transport stopped, MIDI output idle, as now. Then:
 3. the sector holding the old header (0x1E0000) is erased first, then the region
    from its start to the end of the payload, rounded up to 4 KiB:
    `STORE_ERASE = round_up_4k(max(payload end, 0x1E0000 + 4 KiB) − 0x1C0000)`,
-   42 sectors (168 KiB) today, in both layouts. A cut at any point of the erase
-   therefore leaves neither the new v7 header nor the old v6 one, so an old save
-   can never come back after a torn v7 save;
+   42 sectors (168 KiB) today, in both layouts, as three calls:
+   `[0x1E0000, 0x1E1000)`, then `[0x1C0000, 0x1E0000)` (two 64 KiB blocks, which
+   the SDK erases as blocks), then `[0x1E1000, 0x1EA000)`. A cut at any point of
+   the erase therefore leaves neither the new v7 header nor the old v6 one, so
+   an old save can never come back after a torn v7 save;
 4. the patterns, song and kit settings are programmed straight from `g_seq`, in
    whole pages, each last partial page through one static 256-byte buffer padded
    with 0xFF (the SDK programs from RAM; `g_seq` is in RAM);
 5. the header is programmed last.
 
-`pattern_buf` goes. The simulator (host layout) erases 42 sectors and programs
-671 pages (662 on the RP2040): about 1.95 s against the artist's 2.6 s wait and
-`device_check.js`'s 2.5 s.
+`pattern_buf`, `song_buf` and `kit_buf` go. The simulator (host layout) erases
+42 sectors at its 40 ms each and programs 671 pages (662 on the RP2040): about
+1.95 s against the artist's 2.6 s wait and `device_check.js`'s 2.5 s.
+
+On the board the stall is not the simulator's figure. With the W25Q16JV's
+typical times (64 KiB block 150 ms, 4 KiB sector 45 ms, page 0.4-0.8 ms) today's
+save (two blocks, 134 pages) takes about 0.35-0.4 s; v7 (two blocks, ten
+sectors, 662 pages) about 1.0-1.3 s; at the datasheet's maxima several seconds.
+The power-loss window grows with it. Measuring the save on the board is a
+condition for merging the format change (plan Task 4).
 
 ### Load and migration
 
@@ -726,12 +777,16 @@ editing gestures in both release orders; a torn save at several erase points.
 
 ## Risks and bench items
 
-- **RAM**: about 197 KB of 256 KiB. Confirm with `arm-none-eabi-size` after each
+- **RAM**: about 194 KB of 256 KiB. Confirm with `arm-none-eabi-size` after each
   phase and record it in HARDWARE_STATUS.md.
 - **ISR time and jitter** with direct reads: measure GPIO 7 and the Clock
   interval, as for the kit.
-- **Erase time on the real chip** for 168 KiB (block erases where aligned):
-  measure; the UI is stalled for it, with the transport stopped.
+- **Save time on the board**: about 1.0-1.3 s typical for 168 KiB and 662
+  pages, several seconds at the datasheet's maxima (see Save); the UI is
+  stalled for it, with the transport stopped. Measured before the format change
+  is merged.
+- **The pedal after a gap** stays up until it is pressed again: a fill can end
+  early, never stick.
 - **Update path**: a SAVE before a LOAD after updating loses a v6 save.
 - **Probability draws** depend on the seed taken at Start: two runs of one set
   differ on the device, not in the simulator.
@@ -768,6 +823,29 @@ start, Gemini was out of credit). Changed after checking each point in the code:
 - The step editor's tap is defined; the pedal's state across Stop, Start,
   panic, save and load; the boot layout check and its notice; `pattern_shift()`
   within the length; the manual is not in git.
+
+A further independent critique (a subagent of the starting session that
+compiled the structs for host and ARM) found, besides points already fixed
+above:
+
+- A kit step's condition moves from the shared `step_t.cond` into its own kit
+  word (bits 24-31), so a type change no longer lets one kind's conditions gate
+  the other's hits.
+- UART overrun, break and framing errors count as an input gap, so a lost pedal
+  release cannot leave FILL on; the pedal gets hysteresis and a `FILL OFF`
+  notice.
+- Song-mode LST no longer walks the song per step in the ISR: a per-track
+  lookahead of up to 4 bars is computed once per bar in
+  `advance_song_position()` and by song edits.
+- The reserved bytes avoid a layout change, not a version: their first use
+  writes v8 with the same layout.
+- "None" for a step or playhead is 0xFF, not 16; the step and the length are
+  read in one lock section.
+- `song_buf` and `kit_buf` go with `pattern_buf` (RAM about 194 KB); the save's
+  time on the board is estimated (1.0-1.3 s typical) and measured before
+  merging the format change.
+- EVERY N stays in the song's phase from Start, now stated and tested with a
+  clip launched out of phase.
 
 ## Left to the builder
 
