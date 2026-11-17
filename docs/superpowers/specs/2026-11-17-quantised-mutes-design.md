@@ -138,8 +138,11 @@ panel's generation is the one of the held key's press; a release applies the
 group only under that same generation; and an end-of-pass sweep drops a held
 key the panel no longer reports down or whose generation changed. Dropping
 the group changes nothing in it, a withdrawn change of the held key included.
-A panic and a flash save or load drop it too. Stop does not: a group released
-after Stop applies at once, as any press while stopped.
+The panic combo (both encoder buttons) and a flash save or load drop it too.
+Stop does not: a group released after Stop applies at once, as any press while
+stopped. The panic the timer raises on a MIDI output overflow does not either
+(the UI does not see it): it acts as Stop, the group is kept and its release
+applies it at once.
 
 The join does not also ask whether the held key is still reported down: the
 panel reports every MUTE key in one column sample, so a member's press and
@@ -163,9 +166,13 @@ waiting change and toggle it at once, in one engine call.
 Twice the rate of the queued pad's blink and white, so it reads neither as the
 eighth-note nor the half-note bank blinks (the track's hue or dim white
 against off), and a waiting unmute of an unfocused muted track (normally dark)
-still shows. A change made in the last sixteenth before its launch point is
-white at once. While a change waits, the bank blinks of that MUTE are not
-shown.
+still shows. Under 1 BAR and 1 BEAT a change made in the last sixteenth
+before its launch point is white at once: their launch points start an even
+sixteenth, so the one before is odd. Under TRACK LOOP a loop end can come
+right after an even sixteenth (the light counts sixteenths from the start of
+the run, not from the track's loop), and a change made in that sixteenth
+shows the track's normal light until it lands; this is stated, not fixed.
+While a change waits, the bank blinks of that MUTE are not shown.
 
 ## How it is built
 

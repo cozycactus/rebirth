@@ -208,7 +208,8 @@ typedef struct {
     volatile uint8_t     launch_quant;       // launch_quant_t; not saved
     volatile uint8_t     track_mutes;        // Bitmask: bit N = track N muted for playback
     // Bit N: a MUTE change of track N waits for the launch point; mute_target holds
-    // the live mute it writes there. Not saved; written under the playback lock.
+    // the live mute it writes there. Not saved; after sequencer_init(), which clears
+    // them before the timer runs, written only under the playback lock.
     volatile uint8_t     mute_pending;
     volatile uint8_t     mute_target;
     // Spinlock index for mutex
@@ -352,11 +353,11 @@ uint8_t seq_kit_tracks(void);
 // An immediate mute toggle, what the MUTE key did before its changes waited for
 // the launch point. Nothing in the firmware calls it now: a MUTE press goes
 // through transport_toggle_mutes() and the selector through
-// transport_toggle_mutes_now(). A track that is muted (live, or stored at the
-// location it plays) becomes audible: the live bit and the stored mute of every
-// location are cleared and its prepared rows refreshed. An audible track gets
-// the live mute. A waiting MUTE change is left as it is. Takes seq_lock: call
-// with none held.
+// transport_toggle_mutes_now(); the host tests still use it. A track that is
+// muted (live, or stored at the location it plays) becomes audible: the live bit
+// and the stored mute of every location are cleared and its prepared rows
+// refreshed. An audible track gets the live mute. A waiting MUTE change is left
+// as it is. Takes seq_lock: call with none held.
 void seq_toggle_track_mute(uint8_t track);
 // The muted tracks, by the rule MUTE uses: bit c set when the live mute is set
 // or the location track c plays has its stored mute. Takes seq_lock: call with

@@ -159,9 +159,11 @@ buttons edit it.
   when their loops end together. A MUTE key pressed less
   than half a second after the first is an ordinary press, so two fingers
   together are two presses. Stop keeps the group, and a release after Stop
-  changes it at once. A hold that the panel may have lost (after a panic, a
-  save or load, or a panel error) is dropped and changes nothing, the first
-  key's taken-back change included.
+  changes it at once. The stop the device makes itself when its MIDI output
+  overflows does the same: the group is kept and its release changes it at
+  once. A hold that the panel may have lost (after the panic combo of both
+  encoder buttons, a save or load, or a panel error) is dropped and changes
+  nothing, the first key's taken-back change included.
 - **PLAY:** starts and stops the transport; it is the only start/stop. Stop
   cancels pending queues and waiting MUTE changes.
 - **Step buttons 1-16:** a short press toggles the step on release; a long

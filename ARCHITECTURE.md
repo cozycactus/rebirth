@@ -20,8 +20,9 @@ are Core 0 APIs. The timer uses internal stop helpers under the playback lock.
 The live mutes `track_mutes` are written under the shared lock: by Core 0, and by
 the timer when it applies a due MUTE change; the timer reads the byte once per
 pulse without it. The two masks of waiting MUTE changes, `mute_pending` and
-`mute_target`, are written only under the playback lock: by Core 0, or by the
-timer, which holds it throughout.
+`mute_target`, are cleared by `sequencer_init()` before the timer runs and from
+then on written only under the playback lock: by Core 0, or by the timer, which
+holds it throughout.
 
 What can delay the timer: Core 0 sections that hold the playback lock, i.e.
 transport commands, pad/scene launches, MUTE changes, Panic and the per-frame transport
@@ -154,8 +155,10 @@ lane order.
   neither the live mute nor the stored mute of the location it plays is set;
   MUTE, the RGB lights, the selector's step LEDs 1-8 and the OLED mute lines
   all show a track as muted by this rule (`seq_get_track_mutes()`).
-  MUTE on a muted track clears the live bit and the stored mute of every
-  location, so it is undone with one press.
+  MUTE on a muted track makes it audible when its change lands: the stored
+  mute of every location is cleared right after the press, the live bit when
+  the change lands, and until then the live bit keeps the track silent
+  (below).
 - A MUTE change gives a track a target live mute: `transport_toggle_mutes()`
   (a press) the opposite of its state by the rule above, `transport_set_mutes()`
   the bit it is given; a track already in that state gets none and only loses a
@@ -299,28 +302,36 @@ none), the time the UI handled its press and the panel generation then, and the
 group (`ui.mute_group`) with each member's target (`ui.mute_group_target`, bit set
 = muted). A MUTE press with no key held is an ordinary press
 (`transport_toggle_mutes()`) and becomes the held key. Another key pressed less
-than `PAD_COPY_HOLD_MS` (500 ms) after it, or after the panel generation changed,
-is an ordinary press as well. A later one joins: a member pressed again leaves, a
-key with a waiting change only has it cancelled, and any other key joins with the
-opposite of its state then as its target. While the group is empty a join first
-withdraws the held key's waiting change with `transport_cancel_mutes()`; the held
-key is in the group, with that change's target, only when the call returns its bit.
-The join checks the generation only, not whether the held key is still reported
-down: the panel samples every MUTE key in one column, so a member's press and the
-held key's release can arrive in one pass, and the panel already reports the key up
-while its release waits behind the press; the pass's events are taken in order. The
-held key's release sets the group to its targets in one `transport_set_mutes()`
-call, if the group is not empty and the generation is the one of its press; then no
-key is held. A press of the held key itself means its release was lost: the hold
-and its group are dropped, and the press is an ordinary one that starts a new hold.
-After the pass's events, a held key that `panel_input_mute_down()` no longer
-reports, or whose generation changed (in the pass of its press too), is dropped
-with its group. A panic and a flash save or load drop it where they drop the pad holds; Stop does
-not, so a group let go after Stop changes at once. A drop changes nothing in the
-transport, a withdrawn change included. The selector's buttons 1-8 take their track
-out of the group before `transport_toggle_mutes_now()`, and `led_state_t.mute_group`
-lights the group steady white. All of it runs on Core 0 between transport calls that
-take the locks themselves; nothing runs in the timer interrupt and no lock is added.
+than `PAD_COPY_HOLD_MS` (500 ms) after it, or when the panel generation is no
+longer the one of its press, is an ordinary press as well. A later one joins: a
+member pressed again leaves, a key with a waiting change only has it cancelled,
+and any other key joins with the opposite of its state then as its target. While
+the group is empty a join first withdraws the held key's waiting change with
+`transport_cancel_mutes()`; the held key is in the group, with that change's
+target, only when the call returns its bit. The join checks the generation only,
+not whether the held key is still reported down: the panel samples every MUTE key
+in one column, so a member's press and the held key's release can arrive in one
+pass, and the panel already reports the key up while its release waits behind the
+press; the pass's events are taken in order. The held key's release sets the
+group to its targets in one `transport_set_mutes()` call, if the group is not
+empty and the generation is the one of its press. Only that call is conditional:
+every release of the held key ends the hold, and then no key is held. A press of the
+held key itself means its release was lost: the hold and its group are dropped,
+and the press is an ordinary one that starts a new hold. After the pass's events,
+a held key that `panel_input_mute_down()` no longer reports, or whose generation
+changed (in the pass of its press too), is dropped with its group. The panic
+combo (both encoder buttons) and a flash save or load drop it where they drop the
+pad holds. Stop does not, so a group let go after Stop changes at once, and
+neither does the stop the timer makes itself on a MIDI output overflow: the UI
+does not see that panic, so the group is kept and its release changes it at once,
+as after Stop. A drop changes nothing in the transport, a withdrawn change
+included. The selector's buttons 1-8 take their track out of the group before
+`transport_toggle_mutes_now()`, and `led_state_t.mute_group` lights the group
+steady white. The hold and the group are UI state on Core 0, kept between
+transport calls that take the locks themselves: the hold adds no lock and nothing
+to the timer interrupt. The MUTE calls do lock: each holds the playback lock, and
+the shared lock inside it, for one short section, and the timer takes the shared
+lock at a step boundary where a change waits (Playback Rules).
 
 ## Storage
 
