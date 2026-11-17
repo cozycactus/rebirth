@@ -41,7 +41,10 @@ web() {
         echo "  sim/emsdk/emsdk install $EMSDK_VERSION && sim/emsdk/emsdk activate $EMSDK_VERSION" >&2
         exit 1
     fi
-    . sim/emsdk/emsdk_env.sh >/dev/null 2>&1
+    # emsdk_env.sh cannot find its own folder when sourced by a plain POSIX sh
+    # (dash, the /bin/sh of Linux), so take the environment from emsdk itself.
+    eval "$(EMSDK_BASH=1 sim/emsdk/emsdk construct_env 2>/dev/null)"
+    command -v emcc >/dev/null || { echo "emcc is not on PATH after activating sim/emsdk" >&2; exit 1; }
     EXPORTS=$(grep -o 'sim_[a-z0-9_]*(' sim/core/sim_api.h | sort -u | sed 's/(//; s/^/_/' | paste -sd, -)
     emcc -std=c11 -O2 $INCLUDES $FIRMWARE $CORE \
         -sEXPORTED_FUNCTIONS="$EXPORTS,_malloc,_free" \
