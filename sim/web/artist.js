@@ -150,6 +150,9 @@
       // fw2: the firmware starts a new step at the track's last note and can
       // copy a clip (hold a pad, press another pad of the track).
       this.fw2 = !!(options && options.fw2);
+      // keys: the firmware also reads a MIDI keyboard, and the artist has one:
+      // a held step takes its pitch from a key instead of an encoder turn.
+      this.keys = this.fw2 && !!(options && options.keys);
       this.t = 0;                 // cursor, microseconds of device time
       this.actions = [];
       this.model = new Model();
@@ -182,6 +185,13 @@
       this.wait(620);
       this.up(ctl);
       this.wait(this.human(140));
+    }
+    // One key of the MIDI keyboard, pressed and let go.
+    key(note) {
+      this.push({ op: 'key', note, velocity: 100, down: true });
+      this.wait(this.human(90));
+      this.push({ op: 'key', note, velocity: 0, down: false });
+      this.wait(this.human(50));
     }
     click(enc, dir) {
       for (let e = 0; e < 4; e++) {
@@ -270,7 +280,8 @@
     } else {
       for (const st of steps0) { s.down(STEP(st + 1)); s.wait(30); }
       s.wait(80);
-      if (delta) s.turnNumber(TRACK_ENC, delta);
+      if (delta && s.keys && !drum) s.key(target);
+      else if (delta) s.turnNumber(TRACK_ENC, delta);
       if (flipAccent) s.tap(TRACK_SW, 90, 90);
       if (flipSlide) s.long(TRACK_SW);
       for (const st of steps0) { s.up(STEP(st + 1)); s.wait(25); }
@@ -408,7 +419,9 @@
 
   function prepare(s) {
     s.say('info', 'ПОДГОТОВКА. Прибор только что включён: в памяти заводская бочка и хэты. ' +
-      'Копирования клипов на приборе нет, поэтому каждый клип набирается руками.');
+      (s.keys ? 'К входу MIDI подключена клавиатура: высоту нот артист берёт с неё, держа шаг.'
+        : s.fw2 ? 'Клипы копируются удержанием пэда, новый шаг берёт последнюю ноту дорожки.'
+        : 'Копирования клипов на приборе нет, поэтому каждый клип набирается руками.'));
     s.say('rig', 'На синтезаторах: фильтры кислот прикрыты, чтобы было что открывать');
     s.rig('acid1.cutoff', 0.22);
     s.rig('acid1.resonance', 0.72);
@@ -670,6 +683,9 @@
         case 'play': device.play(action.down, action.t); break;
         case 'encsw': device.encoderSwitch(action.enc, action.down, action.t); break;
         case 'edge': device.encoderEdge(action.enc, action.dir, action.t); break;
+        case 'key':
+          device.midiIn(action.down ? [0x90, action.note, action.velocity] : [0x80, action.note, 0], action.t);
+          break;
       }
       if (!io) continue;
       if (action.op === 'rig') { if (io.rig) hands.at(action.t, () => io.rig(action.id, action.value, action.ramp)); }

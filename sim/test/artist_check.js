@@ -22,7 +22,9 @@ RebirthCore().then(core => {
   const device = new Device(core);
   const hands = new Hands(device);
   // FW2=1: the firmware under test starts new steps at the last note and copies clips.
-  const show = Artist.buildShow(undefined, { fw2: process.env.FW2 === '1' });
+  // KEYS=1 (with FW2=1): the firmware reads a MIDI keyboard and the artist enters pitches from one.
+  const keys = process.env.KEYS === '1';
+  const show = Artist.buildShow(undefined, { fw2: process.env.FW2 === '1' || keys, keys });
   const said = [];
   const io = { say: (kind, text) => said.push({ t: device.now(), kind, text }), rig: () => {} };
   Artist.schedule(show, device, hands, io);
@@ -88,7 +90,24 @@ RebirthCore().then(core => {
     return checked;
   };
   console.log('after preparation: ' + verifyPatterns('prep', show.prepModel) + ' programmed steps match; tempo ' + info.bpm.toFixed(1));
-  check(midi.length === 0, 'MIDI was sent while stopped: ' + midi.length);
+  if (keys) {
+    // The keys are passed through to the synths while the artist programs:
+    // every one of them must have been released again.
+    const down = new Map();
+    for (const m of midi) {
+      const key = (m.status & 15) + ':' + m.d1;
+      if ((m.status & 0xF0) === 0x90 && m.d2 > 0) down.set(key, (down.get(key) || 0) + 1);
+      else if ((m.status & 0xF0) === 0x80 || (m.status & 0xF0) === 0x90) down.set(key, (down.get(key) || 0) - 1);
+    }
+    const stuck = [...down].filter(([, n]) => n !== 0);
+    check(stuck.length === 0, 'keys left sounding after the preparation: ' + JSON.stringify(stuck));
+    check(midi.length > 0, 'no key was passed through');
+    check(device.inspect().midiInOverruns === 0, 'bytes lost at the MIDI input: ' + device.inspect().midiInOverruns);
+    console.log('keyboard: ' + midi.filter(m => (m.status & 0xF0) === 0x90 && m.d2 > 0).length + ' keys passed through, all released');
+    midi.length = 0;
+  } else {
+    check(midi.length === 0, 'MIDI was sent while stopped: ' + midi.length);
+  }
   check(device.inspect().mutes === 0b1110, 'mutes before the set: ' + device.inspect().mutes.toString(2));
   // The flash save stalls both cores for about 1.3 s, so the timer misses its
   // alarm once. Nothing may be late after that.

@@ -127,6 +127,7 @@
     el.addEventListener('pointercancel', up);
   }
   function releaseAll() {
+    releaseKeys();      // a MIDI key left down would keep its step held on a device about to restart
     for (const release of [...held.values()]) release();
     for (let t = 0; t < 8; t++) {
       device.mute(t, false);
@@ -359,6 +360,140 @@
     }
   }
 
+  // ─── MIDI keyboard: on-screen, computer keys and Web MIDI → the device's MIDI IN ───
+  const down = { mouse: new Map(), kbd: new Map(), midi: new Map() };   // source -> key -> Note Off bytes
+  const KBD_CODES = ['KeyZ', 'KeyS', 'KeyX', 'KeyD', 'KeyC', 'KeyV', 'KeyG', 'KeyB', 'KeyH', 'KeyN', 'KeyJ', 'KeyM',
+                     'KeyQ', 'Digit2', 'KeyW', 'Digit3', 'KeyE', 'KeyR', 'Digit5', 'KeyT', 'Digit6', 'KeyY', 'Digit7', 'KeyU', 'KeyI'];
+  const NO_MIDI = 'Web MIDI недоступен в этом браузере или для страницы, открытой с диска';
+  let kbdBase = 48, kbdKeyEls = [], lampTimer = 0, mousePointer = -1;
+
+  // The one place bytes reach the device, so an older core without midiIn just does nothing.
+  // The device wrapper may be older than this page, and the firmware inside
+  // may be one that never reads its DIN input.
+  const hasMidiIn = () => !!device && typeof device.midiIn === 'function' &&
+    (typeof device.midiInListening !== 'function' || device.midiInListening());
+  function sendMidiIn(bytes) {
+    if (!hasMidiIn()) return false;
+    device.midiIn(bytes);
+    $('kbd-lamp').classList.add('on');
+    clearTimeout(lampTimer);
+    lampTimer = setTimeout(() => $('kbd-lamp').classList.remove('on'), 120);
+    return true;
+  }
+  function press(src, key, on, off) {
+    takeOver();         // before the note is registered: it may release everything held
+    down[src].set(key, off);
+    sendMidiIn(on);
+    repaintKeys();
+  }
+  function release(src, key) {
+    const off = down[src].get(key);
+    if (!off) return;
+    down[src].delete(key);
+    sendMidiIn(off);
+    repaintKeys();
+  }
+  function releaseSrc(src) { for (const key of [...down[src].keys()]) release(src, key); }
+  function releaseKeys() { for (const src in down) releaseSrc(src); }
+  function repaintKeys() {
+    const on = new Set();
+    for (const m of Object.values(down)) for (const off of m.values()) on.add(off[1]);
+    for (const el of kbdKeyEls) el.classList.toggle('kdown', on.has(+el.dataset.n));
+  }
+  const velocity = () => +$('kbd-vel').value;
+
+  function buildKeys() {
+    const box = $('kbd-keys'), c = Math.floor(kbdBase / 12) - 1;
+    box.replaceChildren();
+    kbdKeyEls = [];
+    let whites = 0;
+    for (let i = 0; i <= 24; i++) {         // two octaves and the C above
+      const n = kbdBase + i, white = [0, 2, 4, 5, 7, 9, 11].includes(i % 12);
+      const el = document.createElement('div');
+      el.className = white ? 'kw' : 'kb';
+      el.dataset.n = n;
+      Object.assign(el.style, white ? { left: whites * 100 / 15 + '%', width: 100 / 15 + '%' }
+                                    : { left: whites * 100 / 15 - 2.2 + '%', width: '4.4%' });
+      if (n % 12 === 0) el.textContent = 'C' + (n / 12 - 1);
+      if (white) whites++;
+      box.appendChild(el);
+      kbdKeyEls.push(el);
+    }
+    $('kbd-range').textContent = 'C' + c + ' – C' + (c + 2);
+    $('kbd-down').disabled = kbdBase <= 12;
+    $('kbd-up').disabled = kbdBase >= 84;   // the top C of the range stays within C8
+  }
+  function shiftOctave(by) {
+    releaseKeys();      // the keys' notes change under a held finger
+    kbdBase = Math.max(12, Math.min(84, kbdBase + 12 * by));
+    buildKeys();
+  }
+  function fromPort(e) {
+    const d = e.data;
+    if (!d || !d.length || d[0] === 0xF0 || d[0] >= 0xF8) return;    // no SysEx, no real-time
+    const bytes = Array.from(d), kind = d[0] & 0xF0, key = (d[0] & 15) * 128 + d[1];
+    if (kind === 0x90 && d[2] > 0) { press('midi', key, bytes, [0x80 | (d[0] & 15), d[1], 0]); return; }
+    if (kind === 0x80 || kind === 0x90) { down.midi.delete(key); repaintKeys(); }
+    sendMidiIn(bytes);
+  }
+  function connectMidi() {
+    const status = $('kbd-status');
+    let request;
+    try { request = navigator.requestMIDIAccess && navigator.requestMIDIAccess(); } catch (error) { request = null; }
+    if (!request) { status.textContent = NO_MIDI; return; }
+    request.then(access => {
+      const refresh = () => {
+        const names = [];
+        for (const port of access.inputs.values()) {
+          port.onmidimessage = fromPort;      // also for inputs plugged in later
+          if (port.state === 'connected') names.push(port.name);
+        }
+        status.textContent = names.length ? 'Подключено: ' + names.join(', ') : 'Нет подключённых MIDI-входов';
+      };
+      access.onstatechange = e => {
+        if (e.port.type === 'input' && e.port.state !== 'connected') releaseSrc('midi');   // its Note Offs will never come
+        refresh();
+      };
+      refresh();
+    }, () => { status.textContent = NO_MIDI; });
+  }
+  function initKeyboard() {
+    buildKeys();
+    $('kbd-nofw').hidden = hasMidiIn();
+    const box = $('kbd-keys');
+    const glide = e => {
+      const el = document.elementFromPoint(e.clientX, e.clientY), k = el && el.closest('[data-n]');
+      const n = k && box.contains(k) ? +k.dataset.n : -1;
+      if (down.mouse.has(n)) return;
+      releaseSrc('mouse');
+      if (n >= 0) press('mouse', n, [0x90, n, velocity()], [0x80, n, 0]);
+    };
+    box.addEventListener('pointerdown', e => {
+      e.preventDefault();
+      mousePointer = e.pointerId;
+      box.setPointerCapture(e.pointerId);
+      glide(e);
+    });
+    box.addEventListener('pointermove', e => { if (e.pointerId === mousePointer) glide(e); });
+    const up = e => { if (e.pointerId === mousePointer) { mousePointer = -1; releaseSrc('mouse'); } };
+    box.addEventListener('pointerup', up);
+    box.addEventListener('pointercancel', up);
+    $('kbd-down').addEventListener('click', e => { shiftOctave(-1); e.target.blur(); });
+    $('kbd-up').addEventListener('click', e => { shiftOctave(1); e.target.blur(); });
+    $('kbd-vel').addEventListener('input', () => { $('kbd-vel-n').textContent = velocity(); });
+    $('kbd-vel').addEventListener('change', e => e.target.blur());   // else the slider keeps the keys from playing
+    $('kbd-connect').addEventListener('click', connectMidi);
+    document.addEventListener('keydown', e => {
+      const off = KBD_CODES.indexOf(e.code);
+      if (off < 0 || e.repeat || e.ctrlKey || e.metaKey || e.altKey || down.kbd.has(e.code) ||
+          /^(INPUT|SELECT|TEXTAREA|BUTTON)$/.test(e.target.tagName)) return;
+      const n = kbdBase + off;
+      press('kbd', e.code, [0x90, n, velocity()], [0x80, n, 0]);
+    });
+    document.addEventListener('keyup', e => release('kbd', e.code));
+    window.addEventListener('blur', releaseKeys);
+  }
+
   // ─── Clock and main loop ──────────────────────────────────────
   function wall() {
     const audio = !!ctx && ctx.state === 'running';
@@ -506,6 +641,7 @@
       console.error(error);
     }
     buildRigPanel();
+    initKeyboard();
 
     $('show-start').addEventListener('click', startShow);
     $('show-stop').addEventListener('click', () => {
@@ -541,6 +677,6 @@
     setInterval(tick, 10);
     requestAnimationFrame(frame);
     window.sim = { device, hands, get rig() { return rig; }, get ctx() { return ctx; }, get phase() { return phase; },
-                   get show() { return show; }, startShow, endShow };
+                   get show() { return show; }, startShow, endShow, sendMidiIn };
   });
 })();

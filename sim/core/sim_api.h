@@ -28,7 +28,9 @@ void sim_gpio_in(int pin, int level);           // PLAY 28; encoders 18,19,20 / 
 #define SIM_IN_KEY  0       // a = row, b = column
 #define SIM_IN_STEP 1       // a = index
 #define SIM_IN_GPIO 2       // a = pin
+#define SIM_IN_MIDI 3       // a = one byte arriving on the DIN input; t = when its stop bit ends
 void sim_input_at(double t_us, int kind, int a, int b, int level);
+int sim_midi_in_listening(void);                // 0 for a firmware that never reads its DIN input
 void sim_inputs_clear(void);
 int sim_inputs_pending(void);
 
@@ -81,6 +83,7 @@ uint32_t sim_dbg_track_config(int track);       // type | channel<<8 | gate%<<16
 int sim_dbg_mutes(void);
 uint32_t sim_dbg_overruns(void);
 int sim_dbg_midi_overflow(void);
+uint32_t sim_dbg_midi_in_overruns(void);         // bytes lost in the UART's one-byte receiver
 uint32_t sim_dbg_lock_errors(void);
 const char *sim_dbg_fatal(void);                // NULL while healthy
 

@@ -13,7 +13,8 @@
   const COL_SCENE = 8;
   const COL_MUTE = 9;
   const EV_MIDI = 0, EV_GATE = 1, EV_DAC = 2;
-  const IN_KEY = 0, IN_STEP = 1, IN_GPIO = 2;
+  const IN_KEY = 0, IN_STEP = 1, IN_GPIO = 2, IN_MIDI = 3;
+  const MIDI_BYTE_US = 320;       // 10 bits at 31,250 baud
 
   class Device {
     constructor(core) {
@@ -28,6 +29,7 @@
       this.status = 0;
       this.data = [];
       this.encPhase = [0, 0];   // position in the quadrature cycle, 0 = detent (A and B high)
+      this.midiInFreeAt = 0;
     }
 
     now() { return this.core._sim_now(); }
@@ -57,10 +59,28 @@
       this.input(IN_GPIO, PIN.ENC[enc].a, 0, phase === 1 || phase === 2 ? 0 : 1, at);
       this.input(IN_GPIO, PIN.ENC[enc].b, 0, phase === 2 || phase === 3 ? 0 : 1, at);
     }
+    // Whether this firmware reads its DIN input at all (older builds do not).
+    midiInListening() {
+      return !!(this.core._sim_midi_in_listening && this.core._sim_midi_in_listening());
+    }
+    // Raw bytes on the DIN input, one every 320 us, the first starting at
+    // `at` (now when omitted) or when the wire is free. Returns when the last
+    // one has arrived.
+    midiIn(bytes, at) {
+      let t = Math.max(at === undefined ? this.now() : at, this.midiInFreeAt || 0);
+      for (const byte of bytes) {
+        t += MIDI_BYTE_US;
+        this.input(IN_MIDI, byte & 0xFF, 0, 0, t);
+      }
+      this.midiInFreeAt = t;
+      return t;
+    }
+
     // Drops every input still scheduled and reads the encoder phases back
     // from the pins, which may have been left between detents.
     clearInputs() {
       this.core._sim_inputs_clear();
+      this.midiInFreeAt = 0;
       const levels = this.core._sim_gpio_levels();
       this.encPhase = PIN.ENC.map(pins => {
         const a = (levels >>> pins.a) & 1, b = (levels >>> pins.b) & 1;
@@ -135,6 +155,7 @@
         lockErrors: c._sim_dbg_lock_errors(),
         ledsSkipped: c._sim_leds_skipped(),
         eventsDropped: c._sim_events_dropped(),
+        midiInOverruns: c._sim_dbg_midi_in_overruns ? c._sim_dbg_midi_in_overruns() : 0,   // absent in an older core
         fatal: fatal ? c.UTF8ToString(fatal) : null,
       };
     }

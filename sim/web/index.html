@@ -91,6 +91,17 @@
   #midi { font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); height: 66px; overflow: hidden;
     margin-top: 8px; white-space: pre; }
   .hint { color: var(--dim); font-size: 12px; margin-top: 8px; }
+  #kbd-keys { position: relative; height: 104px; margin: 10px 0 6px; user-select: none; -webkit-user-select: none; touch-action: none; cursor: pointer; }
+  #kbd-keys .kw, #kbd-keys .kb { position: absolute; top: 0; display: flex; align-items: flex-end; justify-content: center;
+    font-size: 10px; padding-bottom: 3px; border-radius: 0 0 4px 4px; }
+  #kbd-keys .kw { bottom: 0; background: #d9dbe2; color: #3a3d48; border: 1px solid var(--bg); }
+  #kbd-keys .kb { height: 62%; z-index: 1; background: #0d0e12; border: 1px solid #000; }
+  #kbd-keys .kw.kdown { background: var(--accent); }
+  #kbd-keys .kb.kdown { background: #3f8a4c; }
+  #kbd-vel { width: 110px; accent-color: var(--accent); }
+  .klamp { font-size: 11px; padding: 3px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
+  .klamp.on { color: #111; background: var(--accent); border-color: var(--accent); }
+  #kbd-nofw { color: var(--warn); }
   kbd { background: #2b2e39; border: 1px solid #3b3f4d; border-radius: 4px; padding: 0 4px; font: inherit; font-size: 11px; }
 </style>
 </head>
@@ -127,6 +138,25 @@
       <div id="progress"><i></i></div>
       <div class="sub" id="phase">Прибор включён и ждёт. Можно играть самому или запустить артиста.</div>
       <div id="log"></div>
+    </div>
+
+    <div class="card">
+      <h2>MIDI-клавиатура (вход прибора)</h2>
+      <div class="row">
+        <button class="btn" id="kbd-down" title="Октава ниже">−</button>
+        <span class="sub" id="kbd-range">C3 – C5</span>
+        <button class="btn" id="kbd-up" title="Октава выше">+</button>
+        <label class="sub">Скорость <input type="range" id="kbd-vel" min="1" max="127" value="100"> <b id="kbd-vel-n">100</b></label>
+        <span class="klamp" id="kbd-lamp">MIDI IN</span>
+      </div>
+      <div id="kbd-keys"></div>
+      <div class="row">
+        <button class="btn" id="kbd-connect">Подключить MIDI-клавиатуру</button>
+        <span class="sub" id="kbd-status"></span>
+      </div>
+      <div class="hint">Удержите кнопку шага на экране паттерна (Shift+клик фиксирует её) и нажмите клавишу: шаг получит ноту. Без удержанного шага клавиша звучит через выбранную дорожку.
+        Компьютерная клавиатура: <kbd>Z</kbd> <kbd>S</kbd> <kbd>X</kbd> … и <kbd>Q</kbd> <kbd>2</kbd> <kbd>W</kbd> … <kbd>I</kbd>.</div>
+      <div class="hint" id="kbd-nofw" hidden>Эта сборка прошивки не принимает MIDI.</div>
     </div>
 
     <div class="card">

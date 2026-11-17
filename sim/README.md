@@ -27,6 +27,7 @@ scripts and the WebAssembly is embedded in `core.js`.
 | Timer | One virtual microsecond clock; alarm 0 fires the real `sequencer_timer_isr` |
 | OLED | The 1024 bytes of each `ssd1309_flush()` |
 | Encoders, PLAY, gates, tempo LED | GPIO levels; an encoder detent is four quadrature edges |
+| MIDI IN | Bytes arrive on the UART's one-byte receiver, 320 us apart; a byte that finds the last one unread is lost, as when a flash erase keeps interrupts off |
 | MCP4822 | Decoded SPI words |
 | Flash | A 2 MiB array; erase and program take typical (not measured) times and stall both cores |
 
@@ -53,3 +54,15 @@ program, plays the clips each section expects, and sends well-formed MIDI.
 
 Everything the artist does on the synths (filter sweeps, delay, reverb) is
 labelled as such on the page: the sequencer sends no CC.
+
+The score has three variants, chosen by what the firmware under test can do
+(`Artist.buildShow(seed, options)`; the checks read `FW2=1` and `KEYS=1`):
+
+- default: every note dialled from C4, every clip typed in every row;
+- `fw2`: a new step starts at the track's last note, and clips are copied by
+  holding a pad and pressing another pad of the track;
+- `keys` (with `fw2`): a MIDI keyboard on the input gives a held step its
+  pitch.
+
+The page has an on-screen keyboard, computer keys and Web MIDI for the same
+input. With a firmware that does not listen on its DIN input it says so.

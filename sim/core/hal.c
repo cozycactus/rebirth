@@ -316,6 +316,10 @@ const uint16_t *sim_dac(void) { return dac_codes; }
 
 static uint64_t wire_free_at;       // when the last byte written leaves the line
 static bool uart_tx_irq;
+static bool uart_rx_irq;
+static bool uart_rx_full;
+static uint8_t uart_rx_byte;
+static uint32_t uart_rx_overruns;
 static uint64_t spin_time;
 static unsigned spins;
 
@@ -328,7 +332,28 @@ void uart_set_format(void *uart, int bits, int stop, int parity) {
     (void)uart; (void)bits; (void)stop; (void)parity;
 }
 void uart_set_fifo_enabled(void *uart, bool enabled) { (void)uart; (void)enabled; }
-void uart_set_irq_enables(void *uart, bool rx, bool tx) { (void)uart; (void)rx; uart_tx_irq = tx; }
+void uart_set_irq_enables(void *uart, bool rx, bool tx) { (void)uart; uart_rx_irq = rx; uart_tx_irq = tx; }
+
+// Receive side, FIFO off: one holding register. A byte that arrives while the
+// last one is still unread overwrites nothing and is lost (overrun), as when
+// the firmware keeps interrupts off through a flash erase.
+static void uart_receive(uint8_t byte) {
+    if (uart_rx_full) {
+        uart_rx_overruns++;
+        return;
+    }
+    uart_rx_byte = byte;
+    uart_rx_full = true;
+}
+bool uart_is_readable(void *uart) { (void)uart; return uart_rx_full; }
+uint8_t uart_getc(void *uart) {
+    (void)uart;
+    uart_rx_full = false;
+    return uart_rx_byte;
+}
+uint32_t sim_dbg_midi_in_overruns(void) { return uart_rx_overruns; }
+// The firmware listens once it has enabled the receive interrupt.
+int sim_midi_in_listening(void) { return uart_rx_irq; }
 
 bool uart_is_writable(void *uart) {
     (void)uart;
@@ -362,7 +387,10 @@ void uart_tx_wait_blocking(void *uart) {
 }
 
 uint64_t hal_uart_irq_due(void) {
-    if (!uart_tx_irq || !irq_handlers[UART0_IRQ] || !irq_enabled[UART0_IRQ]) return UINT64_MAX;
+    if (!irq_handlers[UART0_IRQ] || !irq_enabled[UART0_IRQ]) return UINT64_MAX;
+    // A received byte keeps the interrupt asserted until it is read.
+    if (uart_rx_irq && uart_rx_full) return sim_now_us;
+    if (!uart_tx_irq) return UINT64_MAX;
     uint64_t writable = uart_writable_at();
     return writable > sim_now_us ? writable : sim_now_us;
 }
@@ -549,6 +577,7 @@ static void apply_input(const input_t *in) {
     if (in->kind == SIM_IN_KEY) sim_key(in->a, in->b, in->level);
     else if (in->kind == SIM_IN_STEP) sim_step_button(in->a, in->level);
     else if (in->kind == SIM_IN_GPIO) sim_gpio_in(in->a, in->level);
+    else if (in->kind == SIM_IN_MIDI) uart_receive((uint8_t)in->a);
 }
 static void apply_inputs_until(uint64_t t_us) {
     while (input_count && inputs[input_head].t <= t_us) {
@@ -689,6 +718,9 @@ void hal_reset(bool keep_flash) {
     memset(dac_codes, 0, sizeof(dac_codes));
     wire_free_at = 0;
     uart_tx_irq = false;
+    uart_rx_irq = false;
+    uart_rx_full = false;
+    uart_rx_overruns = 0;
     spins = 0;
     if (!keep_flash) memset(fake_flash, 0xFF, sizeof(fake_flash));
     fake_flash_erases = 0;
