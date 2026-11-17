@@ -5,7 +5,8 @@ project owner (relayed by the session that started this work): a 64-step
 ceiling with dense storage, kit steps kept for all eight tracks, a manual FILL
 from a sustain pedal on the MIDI input, and the pads of the Pattern view
 showing the whole clip. Everything marked "my call" is open to review in the
-pull request. Base: `master` at bcf6871.
+pull request. Base: `master` at bcf6871. Revised the same day after an
+independent review of the written spec and plan (see "Review changes").
 
 **This design departs from the direction it was started with.** The brief
 proposed a shared pool of steps because "64 steps everywhere is about 114 of
@@ -97,6 +98,21 @@ format, so they share one format version.
   cannot be reached from the panel.
 - The MIDI input parser already decodes Control Change (for All Notes Off and
   All Sound Off).
+- Host builds differ from the RP2040 in enum size: CI runs the host suite with
+  and without `-fshort-enums`; the default preset has neither flag, and the
+  simulator builds without it. `song_t` holds an enum (`end_mode`), so its
+  layout differs too (2,316 bytes on the RP2040, 2,324 on the host).
+- The longest live `seq_lock` writer today is a song edit: `song_insert_patterns()`,
+  `song_remove()` and `song_move()` move up to 2,295 bytes while playing.
+- In the SYNTH/DRUM Pattern view and the note step editor a step button beyond
+  the clip's length still edits that (hidden) step; the Session view and kit
+  cells ignore it.
+- A pad held 500 ms and another pad of its track copy the clip on every screen
+  (`handle_pad_press()` does not look at the mode).
+- `queue_patterns()` queues even the location already playing; the queue then
+  applies without a change.
+- The Russian manual, `docs/manual-ru.md`, is in the main checkout but not in
+  git, like the research report.
 
 ## Approaches considered
 
@@ -232,8 +248,9 @@ boundary, for each track, under the playback lock as today and inside one
 It then releases `seq_lock` and decides, from the copy, what to play, exactly
 as the prepared row did: the drum note for a DRUM cell, velocity 127 for an
 accent, nothing for a stored mute or a step at or beyond the length, the kit's
-note and velocity tables for a kit. Gate pulses are computed from
-`gate_length_pct` with the same rounding as today.
+note and velocity tables for a kit. Gate pulses are `gate_length_pct * 24 / 100`
+as today, computed without a division as `(pct * 24 * 5243) >> 19` (exact for
+10-100, checked over the whole range in a test).
 
 - **Kind change.** The timer remembers the kind it last played per track. When
   the copy has the other kind, it first releases what the old kind left
@@ -245,12 +262,18 @@ note and velocity tables for a kit. Gate pulses are computed from
 - **`sequencer_refresh_track_playback()`** stays, with the same callers, and now
   only recomputes the clip mask bit of that cell (any active step, or for a kit
   any voice lane, within the length). It scans up to 64 steps on core 0.
-- **Placement.** The step read and the condition evaluation run from RAM
-  (`__not_in_flash_func` or inlined into the ISR), like the kit path today.
-- **Lock hold.** The longest `seq_lock` writer becomes a clip copy (64 steps of
-  both kinds, 640 bytes) and a location load (5,196 bytes, transport stopped).
-  The bench check of the ISR time and Clock interval (HARDWARE_STATUS.md) is
-  repeated after this change.
+- **Placement.** Everything the timer calls for this runs from RAM: the step
+  read, the length and kind tests (not `pattern_get_track_length()` or
+  `kit_is_cell()`, which live in flash), the condition evaluation and the LST
+  distance. Fields are copied one by one, not by struct assignment, which may
+  call `memcpy` in flash. `static inline` does not guarantee inlining, so the
+  check is the ELF: in Debug and Release builds the ISR's call graph reaches no
+  flash address and no `__aeabi_uidiv`, `__aeabi_uidivmod` or `__aeabi_idiv*`.
+- **Lock hold.** A song edit (up to 2,295 bytes moved) stays the longest live
+  `seq_lock` writer; a clip copy becomes 640 bytes, a location load 5,196 bytes
+  (transport stopped). The bench check of the ISR time and Clock interval
+  (HARDWARE_STATUS.md) is repeated after this change, with a song edit near the
+  start of a full song, a clip copy and a doubling while playing.
 
 ### Counters
 
@@ -265,8 +288,13 @@ Two counters are added to the transport, reset by Start:
   clears the queue and leaves the counter, as it leaves the playhead. A clip
   that joins mid-clip after a quantised launch is in pass 0 until it first
   wraps. Edits and live mutes do not touch it.
-- **`bar_count`**: whole 16-step bars since Start. Song mode resets
-  `pulse_count` every bar; this counter is not reset.
+  With it, for each track, the residues `pass_mod[B]` = `pass % B` for B = 2..8,
+  each reset with `pass` and stepped (wrapping at B) when `pass` grows, so A:B
+  needs no division.
+- **`bar_count`**: completed 16-step bars since Start: 0 throughout the first
+  bar, increased at every later bar boundary before FILL is computed for that
+  boundary. Song mode resets `pulse_count` every bar; this counter is not
+  reset.
 
 Phase alignment is unchanged: under BAR, BEAT and STEP a new clip starts at
 `(global step % 16) % length`, so a long clip launched on a bar starts at its
@@ -312,14 +340,31 @@ One evaluation covers the whole step: for a kit, all 12 lanes, AC included.
   afresh.
 - **Probability.** The draw is a hash, not a stateful generator, so it does not
   depend on how many steps were evaluated before (my call, after the poll):
-  `h = mix32(seed ^ track << 24 ^ location << 16 ^ pass << 6 ^ step)`; the step
-  plays when `((h & 0xFFFF) * 100) >> 16 < X`. No division in the ISR. The
+
+  ```c
+  static inline uint32_t mix32(uint32_t x) {   // "lowbias32"
+      x ^= x >> 16; x *= 0x7FEB352Du; x ^= x >> 15; x *= 0x846CA68Bu; x ^= x >> 16;
+      return x;
+  }
+  h = mix32(mix32(seed ^ pass) ^ (track << 24) ^ (location << 16) ^ step);
+  roll = ((h & 0xFFFF) * 100) >> 16;            // 0-99; the step plays when roll < X
+  ```
+
+  Golden values, computed outside the firmware (seed, track, location, pass,
+  step → h, roll): (1234, 0, 0, 0, 0) → 0x707A0DC2, 5; (1234, 0, 0, 0, 1) →
+  0x67FC9E59, 61; (1234, 0, 0, 1, 0) → 0x659059AB, 35; (1234, 3, 5, 2, 17) →
+  0x850D1A07, 10; (1234, 7, 31, 1000, 63) → 0xBDBCE268, 88; (1, 0, 0, 0, 0) →
+  0x58F54975, 28. Over the 10,000 inputs `i` = 0..9,999 with seed 1, track
+  `i % 8`, location `(i / 8) % 32`, pass `i / 256` and step `i % 64`, X = 50
+  plays 4,962 times. The
   seed is taken from the timer at Start on the device (so runs differ); host
   tests set it through a test hook; in the simulator the virtual clock makes it
   reproducible for a given score.
+- **A:B** reads `pass_mod[B] == A − 1`; 1ST and !1ST read `pass == 0`.
 - **FILL** is one value for all tracks, taken once per step boundary:
   `fill_active = pedal_down || fill_mode == ON || (fill_mode == EVERY_N &&
-  bar_count % N == N − 1)`.
+  (bar_count & (N − 1)) == N − 1)`; N is 2, 4, 8 or 16, so EVERY 4 fills bars
+  4, 8, 12 ... counted from 1.
 - **LST**: the step plays only the last time it comes round before the clip
   changes. At a boundary where the track plays a clip of length `L`, let `D` be
   the number of boundaries until the track's location changes, if a change is
@@ -331,27 +376,35 @@ One evaluation covers the whole step: for a kit, all 12 lanes, AC included.
   change, some in the full pass and the rest in the cut one. (The three
   reviewers defined it per pass, `D ≤ L − s`; that silences LST steps that come
   after the cut point of a misaligned clip. My call.)
-  - Pattern mode, a queue pending: BAR, the next global step that is a multiple
-    of 16 (16 when the current one is); BEAT, of 4; STEP, the next step; TRACK
+  - Pattern mode, a queue pending **to another location** (`queued !=
+    current`; a queue to the location already playing applies without a
+    change and is no change): BAR, the next global step that is a multiple of
+    16 (16 when the current one is); BEAT, of 4; STEP, the next step; TRACK
     LOOP, the wrap (`D = L − s` at position `s`).
   - Song mode: the end of the current entry (`(repeats left − 1) * 16 +
-    16 − global % 16`), if the next entry played (skipping 0-repeat entries,
-    wrapping on LOOP) has another location for the track, or the song ends in
-    STOP. If it keeps the location, the walk goes on to the entry after it,
-    adding its bars, until `D` exceeds `L` or 8 entries were looked at; then no
-    change is known.
+    16 − global % 16`), if the next entry played has another location for the
+    track, or the song ends in STOP. "Next entry played" follows the rules of
+    `advance_song_position()` exactly: 0-repeat entries are skipped, LOOP wraps
+    to entry 0, a position past the length is entry 0. If the next entry keeps
+    the location, the walk goes on, adding each played entry's bars, until `D`
+    exceeds `L` (then no change is known within reach) or every entry of the
+    song was visited once. Skipped entries add no bars, so they never use up the
+    horizon. In Song mode at most `L ≤ 64` steps, four bars, are looked ahead.
   - No change known: LST false, !LST true. A queue set mid-pass affects only the
-    steps after it; a cancelled queue makes LST false again. Under STEP a queue
-    applies at the very next boundary, so an LST step plays only if the queue
-    was set before its boundary. Stop, Panic and a manual Stop cannot be
-    foreseen.
+    steps after it; a cancelled queue makes LST false again. A queue is applied
+    at a boundary before that boundary's step is evaluated, so under STEP, and
+    with a 1-step clip under TRACK LOOP, no step of the old clip is evaluated
+    after the queue is set: LST then never fires. Stop, Panic and a manual Stop
+    cannot be foreseen.
 
 ### FILL sources
 
 - **Pedal.** The MIDI input parser reports Control Change 64 on any channel as a
-  new event; a value of 64 or more is down, below 64 up. Not passed through. An
-  input gap (lost bytes, a flash save or load), All Notes Off, All Sound Off and
-  a panic put the pedal up.
+  new event; a value of 64 or more is down, below 64 up. It is not passed
+  through to the MIDI output and never writes a step. An input gap (lost bytes,
+  a flash save or load), All Notes Off, All Sound Off and a panic put the pedal
+  up; Stop and Start leave it as it is (it is the pedal's state, not the
+  transport's).
 - **FILL mode**, step button 16 in the pattern selector, cycles OFF → ON →
   EVERY 2 → EVERY 4 → EVERY 8 → EVERY 16 → OFF. EVERY N makes the last bar of
   every N bars since Start a fill. Not saved, like the launch quantization (my
@@ -372,10 +425,21 @@ Each track has a page pin in UI RAM: FOLLOW (the default) or a page 0-3. The
    playhead;
 4. else page 0.
 
-Every step press binds to the absolute step `page * 16 + button` at the press,
-as a press already binds to its cell and lane. Taps, holds, encoder edits, keys
-from the MIDI keyboard and from the pad keyboard all address absolute steps. A
-button beyond the clip's length does nothing, as now.
+The frozen page is one per screen, not per track, and it also holds while an
+encoder button that joined a hold is down.
+
+Every step press binds, at the press, to its cell (track, location, lane) and
+to the absolute step `page * 16 + button`, on every kind of cell (today only
+kit presses are bound to a cell; SYNTH and DRUM presses read the selected
+track when they act). Taps, holds, long presses (the editor opens on the
+absolute step), encoder edits, keys from the MIDI keyboard and from the pad
+keyboard all address absolute steps. The encoder targets that outlive a step's
+release today (`grid_enc_target`, `grid_enc_long_done`) become 64-bit masks of
+absolute steps bound to their cell, so pressing the same button again on
+another page never retargets them. Buttons beyond the length behave as today
+on every page: the Session view and kit cells ignore them; the SYNTH/DRUM
+Pattern view and the note step editor edit the hidden step; their LEDs stay
+dark. LED masks stay 16 bits, relative to the shown page.
 
 - **Pattern view, VALUE short press with no step held** (no action today):
   FOLLOW → page 1 → ... → last page → FOLLOW, with a notice (`PAGE 2/4`,
@@ -403,16 +467,21 @@ editing one clip), while the pad keyboard is not on, the pads show the clip:
 - pad (column `c`, row `r`, row 0 at the top) is step `r * 8 + c`; page `p` is
   rows `2p` and `2p + 1`;
 - beyond the length: off; an empty step: dim in the track's hue, dim white on the
-  shown page; an active step (a kit lane value): half in the hue, an accent (or a
-  kit accent or flam) full; the playhead: white, full;
-- a pad press pins the track's page to the pad's page; in a step editor it also
-  selects that step for editing (within the length). It never launches, queues
-  or copies a clip, and is never a copy source. Its release does nothing.
+  shown page; an active step: half in the hue, an accent full; the playhead:
+  white, full. On a kit cell the overview shows the lane the step LEDs show (the
+  remembered lane; the cursor lane in the kit editor): a note half, an accent or
+  flam full;
+- a pad press within the length pins the track's page to the pad's page; in a
+  step editor it also selects that step for editing. A press beyond the length
+  does nothing. It never launches, queues or copies a clip, and is never a copy
+  source. Its release does nothing.
 
 Routing of a pad press, in order: the pad keyboard (a SYNTH step held, as today),
 the overview (Pattern view and step editors), else launch or copy as today (the
-Session view, the selector, track config, song edit). SCENE, MUTE and PLAY are
-unchanged everywhere.
+Session view, the selector, track config, song edit). So the copy by pad hold,
+which today works on every screen, no longer works in the Pattern view and the
+step editors (part of the owner's choice for the pads there). SCENE, MUTE and
+PLAY are unchanged everywhere.
 
 ### Length
 
@@ -433,19 +502,26 @@ Doubling overwrites steps hidden beyond the length; adding one step does not
 ### Editing a condition
 
 - **Pattern view, SYNTH or DRUM cell, steps held:** VALUE short press (no
-  action today) switches what VALUE turns between velocity and condition. In
+  action today) switches what VALUE turns between velocity and condition. It
+  counts as "with steps held" when the VALUE button joined a hold (its targets
+  are not empty when the press arrives, which is at the button's release), in
+  whichever order the step and VALUE are let go; the page cycle runs only with
+  no hold and no encoder targets, as navigation does today. In
   condition mode a VALUE detent moves every held step one item along the list
   (an inactive held step is switched on first, as with any encoder edit). TRACK
   still turns the note, TRACK press and long and VALUE long still toggle accent,
   slide and tie. The mode returns to velocity when every held step is released
   (my call: no hidden mode). The info line shows the lowest held step's
   condition in condition mode (`S17 COND 1:4`).
-- **Note step editor:** a short tap (released before the long press, nothing
-  typed on a key meanwhile) on the button of the step already being edited
+- **Note step editor:** a tap on the button of the step already being edited
   switches VALUE between velocity and condition; today that press only selects
-  the same step. Holding that button still makes the pads a keyboard, and its
-  long press still toggles the step. The screen shows the condition, and which
-  of velocity and condition VALUE turns.
+  the same step. It is a tap when, at its press, the button was the edited
+  step, and it is released before the long press with no encoder turned or
+  pressed and no key (MIDI or pad) played meanwhile. Holding that button still
+  makes the pads a keyboard, and its long press still toggles the step. Opening
+  the editor, leaving it and selecting another step put VALUE back on velocity.
+  The screen shows the condition, and which of velocity and condition VALUE
+  turns.
 - **Kit step editor:** TRACK walks the lane cursor AC ... RC and then one more
   stop, COND, where VALUE turns the step's condition; at that stop the step
   LEDs show the steps of the page that have a condition.
@@ -460,7 +536,7 @@ What changes, against `src/ui.c` at bcf6871:
 |---|---|---|---|---|
 | Pattern view, no hold | VALUE short | nothing | page cycle | free gesture |
 | Pattern view, steps held | VALUE short | nothing (cancels the taps) | velocity ↔ condition | free gesture |
-| Pattern view, step editors | pad (no keyboard) | launch or copy | overview: pin page / pick step | **owner-approved change** |
+| Pattern view, step editors | pad (no keyboard) | launch, or copy with a pad held | overview: pin page / pick step; no launch, no copy | **owner-approved change** |
 | Note step editor | tap on the edited step | selects it again | velocity ↔ condition | no-op becomes an action |
 | Kit step editor | TRACK past RC | clamped at RC | COND stop | new stop |
 | Pattern selector | 14, 15, 16 | nothing | halve, double, FILL mode | free buttons |
@@ -470,8 +546,12 @@ What changes, against `src/ui.c` at bcf6871:
 Unchanged on purpose: PLAY, SCENE and MUTE act on press; TRACK long (bank in
 Session, back to Session in the Pattern view); VALUE long (selector; tie on held
 steps); VALUE short in Session (launch quantization); both encoders long
-(panic); a pad held 500 ms then another pad of the track (copy, Session view);
-held SYNTH step plus pad (keyboard); step taps and long presses in Session.
+(panic); a pad held 500 ms then another pad of the track (copy, on every screen
+but the Pattern view and the step editors); held SYNTH step plus pad
+(keyboard); step taps and long presses in Session; buttons beyond the length
+(as today, per screen). `pattern_shift()` and `pattern_shift_track()`, which no
+control calls, rotate within the clip's length (both kinds), so a 16-step
+clip shifts as today.
 
 ## Save format v7
 
@@ -479,8 +559,12 @@ held SYNTH step plus pad (keyboard); step taps and long presses in Session.
 
 `STORE_RESERVED` becomes 256 KiB, the last 256 KiB of flash (offset 0x1C0000).
 Versions 4-6 were written at the old offset 0x1E0000 (the last 128 KiB), which
-lies inside the new region. A boot check refuses saving (`SAVE FAILED`, and the
-reason on the OLED) if the firmware image reaches the region start.
+lies inside the new region. At boot and before every save the firmware checks
+that its image (`__flash_binary_end`) ends below the region; if not, saving is
+refused and the notice reads `FLASH LAYOUT` (at boot and on SAVE) instead of
+`SAVE FAILED`. `flash_storage.h` gains
+`typedef enum { FLASH_OK, FLASH_ERR_LAYOUT, FLASH_ERR_PLAYING, FLASH_ERR_INVALID, FLASH_ERR_VERIFY } flash_storage_error_t;`
+and `flash_storage_error_t flash_storage_last_error(void)`.
 
 ### Layout
 
@@ -492,9 +576,12 @@ reason on the OLED) if the firmware image reaches the region start.
 | then | kit settings `kit_config[NUM_TRACKS]`, page-rounded (256) |
 
 The CRC covers the three payloads at their unpadded lengths. Records are the
-RP2040's `pattern_t`, `song_t` and `kit_config_t`, as in v6, with
-`_Static_assert`s on `__arm__` for every size and the offset of `kit_steps`; the
-host tests build with `-fshort-enums` as now.
+build's own `pattern_t`, `song_t` and `kit_config_t`, as in v6, with
+`_Static_assert`s on `__arm__` for every size and the offset of `kit_steps`
+(5,196, 2,316, 15, 3,148). A v7 image is therefore only portable between builds
+with the same enum size; host builds without short enums and the simulator
+make their own (5,268 bytes per location, a 171,776-byte payload). Only the
+legacy readers are layout-independent.
 
 ### Validation
 
@@ -511,17 +598,20 @@ Transport stopped, MIDI output idle, as now. Then:
 1. the CRC is computed over the RAM data in place (nothing writes it while the
    transport is stopped and core 0 is in the save);
 2. core 1 is parked, interrupts go off;
-3. the erase covers the region from its start to the end of the payload or the
-   old header page at 0x1E0000, whichever is further, rounded up to 4 KiB
-   (42 sectors, 168 KiB, today), so a stale v6 header can never come back after
-   a torn v7 save;
+3. the sector holding the old header (0x1E0000) is erased first, then the region
+   from its start to the end of the payload, rounded up to 4 KiB:
+   `STORE_ERASE = round_up_4k(max(payload end, 0x1E0000 + 4 KiB) − 0x1C0000)`,
+   42 sectors (168 KiB) today, in both layouts. A cut at any point of the erase
+   therefore leaves neither the new v7 header nor the old v6 one, so an old save
+   can never come back after a torn v7 save;
 4. the patterns, song and kit settings are programmed straight from `g_seq`, in
    whole pages, each last partial page through one static 256-byte buffer padded
    with 0xFF (the SDK programs from RAM; `g_seq` is in RAM);
 5. the header is programmed last.
 
-`pattern_buf` goes. The simulator's cost: 42 sectors and 662 pages, about
-1.95 s against the artist's 2.6 s wait.
+`pattern_buf` goes. The simulator (host layout) erases 42 sectors and programs
+671 pages (662 on the RP2040): about 1.95 s against the artist's 2.6 s wait and
+`device_check.js`'s 2.5 s.
 
 ### Load and migration
 
@@ -536,11 +626,24 @@ it probes the old offset for a v4, v5 or v6 header and migrates:
 - the song and (v6) the kit settings are copied; v4 and v5 get default kit
   settings.
 
-Legacy records are read field by field at the byte offsets the RP2040 wrote
-them at (a v5 record is 459 bytes, a v6 record 972, kit words at offset 460,
-`track_config_t` 7 bytes with one-byte enums), from constants that use the
-literal 16 and never the live `step_t`, `track_config_t` or step constants. On
-`__arm__` the constants are asserted against frozen copies of the old structs.
+Legacy images are read field by field at the byte offsets the RP2040 wrote them
+at, from constants that use the literal 16 and never the live `step_t`,
+`track_config_t`, `song_t` or step constants:
+
+| | v4, v5 | v6 |
+|---|---:|---:|
+| pattern record | 459 bytes (steps 0, tracks 384, length 440, track_length 441, swing 449, name 450) | 972 (the same, kit words at 460) |
+| patterns at | 256 | 256 |
+| song at | 15,104 | 31,488 |
+| kit settings at | — | 34,048 (8 x 15 bytes) |
+| CRC over | patterns 14,688 + song 2,316 (v5; v4 has none) | patterns 31,104 + song 2,316 + kit settings 120 |
+
+A legacy song is 2,316 bytes: entries (8 locations + repeats each) at 0, length
+(16-bit little-endian) at 2,304, end mode (one byte) at 2,306, name at 2,307.
+Raw bytes are range-checked before they become an enum or a `bool`. On
+`__arm__` the constants are asserted against frozen copies of the old structs
+(`legacy_step_t` of 3 bytes, `legacy_track_config_t` of 7, `pattern_v5_t`,
+`pattern_v6_t`, `song_v6_t`), which nothing else uses.
 Today `pattern_v5_t` embeds the live `step_t`, so growing the step without this
 would break v4 and v5 loads. Reading by offsets, rather than casting to a host
 struct, lets the committed fixtures (below) load in every host build, with and
@@ -548,7 +651,8 @@ without `-fshort-enums`, and in the simulator.
 
 After an update the user must LOAD before the first SAVE: the save erases the
 old header. Older firmware cannot read a v7 save (it finds no header at its
-offset). Both go into the manual.
+offset). Both go into `README.md` and the manual (`docs/manual-ru.md`, which is
+not in git: the pull request lists the manual's changes for the owner).
 
 ## Simulator and CI
 
@@ -559,9 +663,12 @@ offset). Both go into the manual.
   `sim_dbg_fill()`.
 - `sim/build.sh`: feature bit 8 when the firmware has long clips and conditions;
   `sim/check.sh` and the page offer a `long` score on such firmware.
-- The four existing scores do not change and stay green after every phase: with
-  lengths up to 16, page 1 and no conditions the device behaves as today. Their
-  `verifyPatterns` keeps checking 16 steps.
+- The scores this firmware takes today (`fw2`, `keys`, `pads`; `base` runs only
+  on firmware without the last-note rule) do not change and stay green after
+  every phase: with lengths up to 16, page 1 and no conditions the device
+  behaves as today. Their `verifyPatterns` keeps checking 16 steps. The
+  artist's model (`Model.copy()` and the step tables) grows to 64 steps for the
+  new score.
 - **The `long` score** (built on `pads`) adds to one song's preparation and set:
   - a lead clip doubled 16 → 32 with button 15, then page 2 opened with VALUE
     short and steps 17-32 edited;
@@ -593,10 +700,13 @@ validation rule; the three legacy fixtures migrating; the save erasing through
 the old header page; playback of 17-64 step clips, lengths changed while
 playing, phase join of long clips, Song entries running a long clip on; kind
 changes with direct reads; every condition code, with `pass`, FILL, LST under
-each quantization and in Song mode, false-condition rests with slide and tie,
-kit steps; the probability hash with a fixed seed; the pedal events and gaps;
-page pinning, hold pinning, absolute binding, the overview routing and lights,
-halve and double, the condition editing gestures.
+each quantization and in Song mode (a queue to the playing location, a long run
+of 0-repeat entries), false-condition rests after a slide, after a tie and after
+a kit flam; the probability hash against the golden values; no division and no
+flash call on the ISR path (ELF check); the pedal events and gaps; page
+pinning, hold pinning, absolute binding (long presses and encoder targets
+included), the overview routing and lights, halve and double, the condition
+editing gestures in both release orders; a torn save at several erase points.
 
 ## Risks and bench items
 
@@ -604,11 +714,44 @@ halve and double, the condition editing gestures.
   phase and record it in HARDWARE_STATUS.md.
 - **ISR time and jitter** with direct reads: measure GPIO 7 and the Clock
   interval, as for the kit.
-- **Erase time on the real chip** for 172 KiB (block erases where aligned):
+- **Erase time on the real chip** for 168 KiB (block erases where aligned):
   measure; the UI is stalled for it, with the transport stopped.
 - **Update path**: a SAVE before a LOAD after updating loses a v6 save.
 - **Probability draws** depend on the seed taken at Start: two runs of one set
   differ on the device, not in the simulator.
+
+## Review changes
+
+Codex and DeepSeek reviewed the first draft against the code (Grok failed to
+start, Gemini was out of credit). Changed after checking each point in the code:
+
+- The legacy song and kit settings are read by byte offsets too (`song_t` holds
+  an enum), with a table of every legacy offset; the frozen structs no longer
+  embed live types.
+- The erase starts with the old header's sector, so a torn v7 save cannot bring
+  a v6 save back; the erase span is an explicit expression.
+- A:B, FILL EVERY N and the gate length need no division (residue counters, a
+  mask, a multiply-shift); the ISR path is checked in the ELF for flash calls and
+  divisions, as `static inline` proves nothing.
+- `mix32` is defined, with golden values computed outside the firmware; the
+  first draft's input packing let `(location 1, pass 0)` collide with
+  `(location 0, pass 1024)`.
+- LST: a queue to the playing location is no change; under STEP and with a
+  1-step clip LST cannot fire; the Song walk follows `advance_song_position()`
+  and skipped entries no longer use up the horizon.
+- `bar_count` counts completed bars; EVERY 4 fills bars 4, 8, 12.
+- Encoder targets that outlive a step's release become absolute 64-bit masks;
+  every press binds its cell and absolute step; the VALUE short press is judged
+  by the encoder's targets, so the release order does not matter; the hold page
+  is one per screen.
+- Buttons beyond the length keep today's per-screen behaviour (the first draft
+  wrongly said they do nothing everywhere); the copy by pad hold, which works on
+  every screen today, is gone only where the pads are the overview.
+- Sizes and timings for the simulator's layout (5,268 bytes per location,
+  671 pages); the longest live `seq_lock` writer is a song edit (2,295 bytes).
+- The step editor's tap is defined; the pedal's state across Stop, Start,
+  panic, save and load; the boot layout check and its notice; `pattern_shift()`
+  within the length; the manual is not in git.
 
 ## Left to the builder
 
