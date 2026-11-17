@@ -9,6 +9,8 @@ void uart_set_format(void *uart, int bits, int stop, int parity);
 void uart_set_fifo_enabled(void *uart, bool enabled);
 void uart_set_irq_enables(void *uart, bool rx, bool tx);
 bool uart_is_writable(void *uart);
+bool uart_is_readable(void *uart);
+uint8_t uart_getc(void *uart);
 void uart_putc_raw(void *uart, uint8_t value);
 void uart_tx_wait_blocking(void *uart);
 #endif

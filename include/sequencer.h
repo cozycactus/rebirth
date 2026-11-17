@@ -359,6 +359,12 @@ void midi_buf_clear(void);
 void midi_buf_flush(void);
 void midi_buf_note_on(uint8_t channel, uint8_t note, uint8_t velocity);
 void midi_buf_note_off(uint8_t channel, uint8_t note);
+// The DIN input. The UART interrupt (core 0) pushes every byte it receives into a ring;
+// the main loop on core 0 takes them out. No lock. Under MOCK_HARDWARE there is no input.
+#define MIDI_IN_RING_SIZE 64    // a power of two
+bool midi_in_read(uint8_t *byte);       // false when the ring is empty
+uint32_t midi_in_dropped(void);         // bytes that found the ring full, counted since boot
+void midi_in_flush(void);               // empties the ring, leaves the dropped count
 
 // cv_gate.c
 void cv_gate_init(void);
