@@ -1068,13 +1068,13 @@
       const lowSteps = rig => hold(rig, aims('step', 'index', [['pinky', 1], ['ring', 3], ['middle', 5], ['index', 7]]));
       const FRAMES = [
         () => [press(R, 'index', top({ op: 'pad', track: 6, row: 4 }))],
-        () => [lowSteps(L), grip(R, 0, 35)],
+        () => [lowSteps(L), grip(R, 0, 20)],
         () => [lowSteps(L), press(R, 'index', top({ op: 'pad', track: 6, row: 5 }))],
         () => [hold(R, aims('step', 'index', [['index', 8], ['middle', 10], ['ring', 11], ['pinky', 14]])), grip(L, 0, 0)],
         () => [hold(R, { index: top({ op: 'pad', track: 2, row: 0 }), thumb: top({ op: 'pad', track: 2, row: 3 }) },
           { freeYaw: true })],
         () => [hold(R, aims('mute', 'track', [['index', 0], ['ring', 2]]))],
-        () => [grip(R, 0, -35)],
+        () => [grip(R, 0, -20)],
       ];
       const showFrame = () => {
         const m = /hands-poses=(\d+)/.exec(location.hash), n = m ? +m[1] : 0;

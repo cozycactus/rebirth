@@ -375,7 +375,7 @@ section('fit', () => {
   }
   assert.ok(flat.contact('index', new T.Vector3(0, 1, 0)).y > flat.contact('index').y - 1e-9, 'a contact ahead');
 
-  // The pose library: the prototype's, and the pinch.
+  // The pose library: the prototype's, and the pinch (the pinch fit's seed).
   const P = HandRig.POSES;
   assert.deepStrictEqual(P.point,
     { thumb: [12, 14, 12], index: [0, 6, 14, 8], middle: [3, 62, 78, 38], ring: [4, 68, 80, 38], pinky: [5, 72, 80, 38] });
@@ -386,7 +386,7 @@ section('fit', () => {
   assert.deepStrictEqual(P.relax,
     { thumb: [5, 8, 10], index: [0, 18, 26, 14], middle: [1, 22, 30, 16], ring: [2, 25, 32, 16], pinky: [3, 28, 32, 16] });
   assert.deepStrictEqual(P.pinch,
-    { thumb: [20, 20, 10], index: [0, 25, 30, 15], middle: [5, 85, 95, 55], ring: [6, 88, 95, 55], pinky: [8, 90, 95, 55] });
+    { thumb: [8.75, 4.5, 4.5], index: [0, 3, 26, 17], middle: [5, 85, 95, 55], ring: [6, 88, 95, 55], pinky: [8, 90, 95, 55] });
 
   // armDir(): from the side's shoulder toward the target, pitched 20° down.
   const right = HandRig.create('right'), left = HandRig.create('left');
@@ -414,8 +414,8 @@ section('fit', () => {
   const held = aims('step', 'index', [['pinky', 1], ['ring', 3], ['middle', 5], ['index', 7]]);
   settle('left hand on steps 1 3 5 7', left, held, left.fit(held, { dir: left.armDir(centre(held)) }), 1);
   const track = PANEL.control({ op: 'encsw', enc: 0 });
-  const pinched = right.pinch(0, 35);
-  settle('right pinch on TRACK at 35°', right, pinched.targets, pinched, 2, knob(0));
+  const pinched = right.pinch(0, 20);
+  settle('right pinch on TRACK at 20°', right, pinched.targets, pinched, 2, knob(0));
   for (const f of ['thumb', 'index']) {
     const p = pinched.targets[f];
     assert.ok(Math.abs(Math.hypot(p.x - track.u, p.y + track.v) / MM - 10) < 1e-6 && Math.abs(p.z / MM - 12) < 1e-6,
@@ -424,18 +424,19 @@ section('fit', () => {
   apart('left steps, right pinch', left, right);
 
   // The twist turns the grip and the hand with it, clockwise seen from
-  // above as the knob turns up: -35° and +35° are 70° apart.
+  // above as the knob turns up: -20° and +20°, the ends of the twist
+  // window, are 40° apart.
   const grip = t => Math.atan2(t.index.y - t.thumb.y, t.index.x - t.thumb.x) / D2R;
-  const rig0 = HandRig.create('right'), rig35 = HandRig.create('right');
-  const straight = rig0.pinch(0, 0), back35 = rig35.pinch(0, -35);
+  const rig0 = HandRig.create('right'), rig20 = HandRig.create('right');
+  const straight = rig0.pinch(0, 0), back20 = rig20.pinch(0, -20);
   // At twist 0 the thumb is nearer the player than the index, and for a
   // right hand to its left (the grip turned toward the little finger's side).
   assert.ok(straight.targets.thumb.y < straight.targets.index.y && straight.targets.thumb.x < straight.targets.index.x,
     'right pinch: thumb near and left');
-  assert.ok(Math.abs(grip(straight.targets) - grip(pinched.targets) - 35) < 1e-6, 'pinch: twist 35° is clockwise');
-  settle('right pinch on TRACK at -35°', rig35, back35.targets, back35, 2, knob(0));
-  const twist = yawOf(back35.dir) - yawOf(pinched.dir);
-  assert.ok(Math.abs(twist - 70) <= 5, 'pinch: the roots at -35° and 35° are ' + fmt(twist) + '° apart');
+  assert.ok(Math.abs(grip(straight.targets) - grip(pinched.targets) - 20) < 1e-6, 'pinch: twist 20° is clockwise');
+  settle('right pinch on TRACK at -20°', rig20, back20.targets, back20, 2, knob(0));
+  const twist = yawOf(back20.dir) - yawOf(pinched.dir);
+  assert.ok(Math.abs(twist - 40) <= 5, 'pinch: the roots at -20° and 20° are ' + fmt(twist) + '° apart');
 
   // The left hand still on its steps, the right index presses pad (6, 5).
   const pad65 = top({ op: 'pad', track: 6, row: 5 });
@@ -464,30 +465,34 @@ section('fit', () => {
   assert.ok(value.targets.thumb.y < value.targets.index.y && value.targets.thumb.x > value.targets.index.x,
     'left pinch: thumb near and right (the mirror image)');
 
-  // A natural pinch, both hands on both knobs at the edges and the middle
-  // of the twist window: the hand comes from the player's side, so the
-  // wrist is at least 40 mm nearer the player than the knob's centre and at
-  // most 80 mm above the plate (after clear(), as drawn); the fit's yaw
-  // (from armDir, the twist taken out) and pitch stay 2° inside their
-  // windows (±30° about armDir; 20° ± 30° down); the roll is 0° to 20°
-  // thumb side up; at twist 0, seen from above, the right thumb's contact
-  // is left of the index's (the left hand's right of it).
+  // A natural pinch, both hands on both knobs at the edges (±20°) and the
+  // middle of the twist window: the hand comes from the player's side, so
+  // the wrist is at least 40 mm nearer the player than the knob's centre
+  // and at most 85 mm above the plate (after clear(), as drawn; a pinch
+  // from the side of a knob 14.5 mm tall holds the hand higher than a
+  // press: the fitted grips put it 68 to 81 mm up); the fit's yaw (from
+  // armDir, the twist taken out) is within 5° of the arm's direction, so
+  // the forearm swings no further than the twist, and with the pitch it
+  // stays 2° inside its window (±30° about armDir; 20° ± 30° down); the
+  // roll is 0° to 20° thumb side up; at twist 0, seen from above, the right
+  // thumb's contact is left of the index's (the left hand's right of it).
   for (const side of ['right', 'left']) {
     for (const enc of [0, 1]) {
       const k = PANEL.control({ op: 'encsw', enc }), axis = knob(enc);
-      for (const twistDeg of [-35, 0, 35]) {
+      for (const twistDeg of [-20, 0, 20]) {
         const what = side + ' pinch(' + enc + ', ' + twistDeg + ')';
         const rig = HandRig.create(side), res = rig.pinch(enc, twistDeg);
         settle(what, rig, res.targets, res, 2, axis);
         assert.ok(res.rollDeg >= 0 && res.rollDeg <= 20, what + ': roll ' + fmt(res.rollDeg) + '°');
         const yawDeg = res.yawDeg + twistDeg;
         assert.ok(Math.abs(yawDeg) <= 30 - 2, what + ': yaw ' + fmt(yawDeg) + '° at the ±30° window');
+        assert.ok(Math.abs(yawDeg) <= 5, what + ': the hand turned ' + fmt(yawDeg) + '° off the arm');
         const pitch0 = Math.asin(-rig.armDir(new T.Vector3(k.u, -k.v, 0)).z) / D2R;
         assert.ok(Math.abs(res.pitchDeg - pitch0) <= 30 - 2, what + ': pitch ' + fmt(res.pitchDeg) + '° at the window ' +
           fmt(pitch0) + '° ± 30°');
         const w = at(rig, 'Wrist');
         assert.ok(w.y <= -k.v - 40 * MM, what + ': the wrist is ' + fmt((-k.v - w.y) / MM) + ' mm nearer the player than the knob');
-        assert.ok(w.z <= 80 * MM, what + ': the wrist is ' + fmt(w.z / MM) + ' mm up');
+        assert.ok(w.z <= 85 * MM, what + ': the wrist is ' + fmt(w.z / MM) + ' mm up');
         if (twistDeg === 0) {
           const thumb = rig.contact('thumb', axis), index = rig.contact('index', axis);
           assert.ok(side === 'right' ? thumb.x < index.x : thumb.x > index.x,
