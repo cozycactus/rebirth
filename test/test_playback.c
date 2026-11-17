@@ -2588,6 +2588,30 @@ static void test_mute_track_loop_lands_at_loop_end(void) {
     CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
 }
 
+// A group's release under TRACK LOOP: track 0 (length 12) and track 1 (16) to muted,
+// track 2 (length 8, live-muted) to audible; each lands at its own loop end.
+static void test_set_mutes_track_loop_lands_at_each_loop_end(void) {
+    set_length(0, 0, 12);
+    set_length(0, 2, 8);
+    seq_set_track_mute(2, true);
+    transport_start();                      // TRACK LOOP
+    run_through_step(3);
+    transport_set_mutes(0x07, 0x03);
+    CHECK(g_seq.mute_pending == 0x07 && (g_seq.mute_target & 0x07) == 0x03);
+    run_to(8 * PULSES_PER_STEP);
+    CHECK(g_seq.track_mutes == 0x04 && g_seq.mute_pending == 0x07);
+    tick();                                 // track 2's loop end
+    CHECK(g_seq.track_mutes == 0x00 && g_seq.mute_pending == 0x03);
+    run_to(12 * PULSES_PER_STEP);
+    CHECK(g_seq.track_mutes == 0x00);
+    tick();                                 // track 0's loop end
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0x02);
+    run_to(BAR_PULSE);
+    CHECK(g_seq.track_mutes == 0x01);
+    tick();                                 // track 1's loop end
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+}
+
 static void test_mute_track_loop_after_shortening(void) {
     transport_start();
     run_through_step(9);
@@ -2874,6 +2898,26 @@ static void test_press_after_boundary_waits_for_next(void) {
     CHECK(count_note_hits(0, 60) == 32);    // bar 2 played in full
     tick();
     CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
+}
+
+// A second press handled after the first change landed is a new change, not a
+// cancel: the timer runs through the bar just before the press takes its lock.
+static void test_second_press_races_with_landing(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1);              // waits, to muted
+    run_to(BAR_PULSE);                      // the pulse before the bar ran
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 1);
+    fake_before_lock = bar_before_playback_lock;
+    transport_toggle_mutes(1);
+    CHECK(fake_before_lock == NULL);        // the bar ran first
+    CHECK(g_seq.transport.pulse_count == BAR_PULSE + 1);
+    CHECK(g_seq.track_mutes == 1);          // the first change landed
+    CHECK(g_seq.mute_pending == 1 && (g_seq.mute_target & 1) == 0);    // an unmute waits
+    run_to(2 * BAR_PULSE);
+    CHECK(g_seq.track_mutes == 1);
+    tick();
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
 }
 
 // Each path cancels a waiting change; the next run's first bar changes nothing. Song
@@ -3188,6 +3232,7 @@ int main(void) {
     RUN(test_mute_cuts_sounding_note_on_the_boundary);
     RUN(test_mute_waits_for_the_beat);
     RUN(test_mute_track_loop_lands_at_loop_end);
+    RUN(test_set_mutes_track_loop_lands_at_each_loop_end);
     RUN(test_mute_track_loop_after_shortening);
     RUN(test_mute_and_pad_same_loop_end);
     RUN(test_mute_and_pad_decide_on_one_row);
@@ -3208,6 +3253,7 @@ int main(void) {
     RUN(test_mute_calls_leave_other_tracks);
     RUN(test_waiting_mute_follows_quant_change);
     RUN(test_press_after_boundary_waits_for_next);
+    RUN(test_second_press_races_with_landing);
     RUN(test_stop_start_mode_panic_cancel_waiting_mutes);
     RUN(test_overflow_panic_cancels_waiting_mutes);
     RUN(test_clear_queue_keeps_waiting_mutes);

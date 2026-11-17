@@ -4693,9 +4693,17 @@ static bool white_full(rgb_t c) {
     return rgb_is(c, LED_LEVEL_FULL, LED_LEVEL_FULL, LED_LEVEL_FULL);
 }
 
-// The MUTE keys at full white in a frame rendered now. On an even sixteenth,
-// or with nothing waiting, they are the group.
+// The MUTE keys at full white in a frame rendered now: the group. A waiting
+// change is white too, on the odd sixteenths, so while one waits the frame must
+// fall on an even sixteenth of the running transport, where a waiting change
+// shows the track's own light (never full white). The tests that call this
+// render on such a pulse (pulse 1, or the first pulses of a bar); a test moved
+// to an odd one fails here instead of reading a waiting change as a member.
 static uint8_t white_mutes(void) {
+    if (g_seq.mute_pending) {
+        CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+        CHECK((g_seq.transport.pulse_count / (PPQN / 4)) % 2 == 0);
+    }
     ui_render();
     uint8_t mask = 0;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
@@ -4997,6 +5005,47 @@ static void test_mute_group_unmutes_stored_mute(void) {
     CHECK(g_seq.track_mutes == 0x02 && seq_get_track_mutes() == 0x02);
 }
 
+// One group release unmutes track 1, muted by its stored mutes (where it plays
+// and in slot 5), and mutes track 2, audible with a stored mute in slot 7, where
+// it does not play. With the held key 0's withdrawn change all three land on the
+// bar's pulse; the release clears track 1's stored mutes and leaves track 2's.
+static void test_mute_group_unmutes_stored_and_mutes_audible_together(void) {
+    pattern_set_step(&g_seq.patterns[0], 1, 0, 64, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[0], 2, 0, 65, 100, STEP_FLAG_ACTIVE);
+    g_seq.patterns[0].tracks[1].muted = true;
+    g_seq.patterns[5].tracks[1].muted = true;
+    g_seq.patterns[7].tracks[2].muted = true;
+    sequencer_refresh_track_playback(1, 0);
+    sequencer_refresh_track_playback(1, 5);
+    sequencer_refresh_track_playback(2, 0);
+    sequencer_refresh_track_playback(2, 7);
+    play_under_bar();
+    CHECK(seq_get_track_mutes() == 0x02);
+    mute_down(0);                           // a change to muted waits
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // muted: joins to be audible
+    mute_up(1);
+    mute_down(2);                           // audible: joins to be muted
+    mute_up(2);
+    CHECK(white_mutes() == 0x07);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    CHECK(g_seq.patterns[0].tracks[1].muted && g_seq.patterns[5].tracks[1].muted);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x07 && (g_seq.mute_target & 0x07) == 0x05);
+    CHECK(g_seq.track_mutes == 0x02);       // 1 is silent by its live bit until the bar
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) CHECK(!g_seq.patterns[p].tracks[1].muted);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) CHECK(g_seq.patterns[p].tracks[2].muted == (p == 7));
+    run_to_bar();
+    CHECK(g_seq.track_mutes == 0x02 && g_seq.mute_pending == 0x07);
+    fake_midi_length = 0;
+    tick();                                 // the bar: all three on this pulse
+    CHECK(g_seq.track_mutes == 0x05 && g_seq.mute_pending == 0);
+    CHECK(seq_get_track_mutes() == 0x05);
+    CHECK(count_channel_note_on(1, 64, 100) == 1);      // 1's downbeat plays
+    CHECK(count_channel_note_on(2, 65, 100) == 0);      // 2's does not
+    CHECK(g_seq.patterns[7].tracks[2].muted);
+}
+
 static void test_mute_group_lands_as_targets(void) {
     hold_group_of_0_and_1();
     mute_up(0);
@@ -5064,6 +5113,29 @@ static void test_mute_group_after_stop_cancelled_the_held_change(void) {
     mute_up(0);
     CHECK(g_seq.track_mutes == 0x02 && g_seq.mute_pending == 0);
     CHECK(white_mutes() == 0);
+}
+
+// A group collected while stopped and let go after PLAY: its changes wait for
+// the launch point after the release, as any change made while playing does.
+static void test_mute_group_collected_while_stopped_waits_after_play(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    mute_down(0);                           // stopped: at once
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // audible: joins to be muted
+    mute_up(1);
+    CHECK(white_mutes() == 0x02);
+    CHECK(g_seq.track_mutes == 0x01);
+    panel(PANEL_PLAY, 0, 0);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    tick();                                 // pulse 0, a launch point, has run
+    CHECK(white_mutes() == 0x02);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x02 && g_seq.track_mutes == 0x01);
+    run_to_bar();
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0x02);
+    tick();                                 // the bar
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
 }
 
 static void test_mute_lost_hold_drops_group(void) {
@@ -5135,6 +5207,27 @@ static void test_mute_hold_dropped_by_panic(void) {
     CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
 }
 
+// The stop the timer makes when the MIDI output overflows is not the panic
+// combo: the UI does not see it, so the hold survives it as it survives Stop,
+// and the release changes the group at once.
+static void test_mute_hold_kept_by_overflow_panic(void) {
+    hold_group_of_0_and_1();
+    fake_uart_writable = false;             // a stuck output: the queue overflows
+    for (unsigned n = 0; n <= (MIDI_TX_QUEUE_SIZE - 1u) / 3u; n++) midi_send_note_on(1, 10, 100);
+    CHECK(midi_output_overflowed());
+    tick();                                 // the timer raises the panic
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    CHECK(!midi_output_overflowed());
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    ui_update();                            // a pass: its sweep keeps the hold
+    CHECK(white_mutes() == 0x03);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+    mute_up(0);
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+    CHECK(white_mutes() == 0);
+}
+
 static void test_mute_hold_dropped_by_save(void) {
     hold_group_of_0_and_1();
     panel(PANEL_PLAY, 0, 0);                // a save needs the transport stopped
@@ -5189,6 +5282,29 @@ static void test_selector_mute_acts_now_and_leaves_group(void) {
     run_to_bar();
     tick();
     CHECK(g_seq.track_mutes == 0x01);       // 2 stays audible
+}
+
+// The selector's button on a track muted by its stored mutes (where it plays and
+// in slot 5), while playing under 1 BAR: audible at once, and no slot keeps a
+// stored mute; its next step plays.
+static void test_selector_mute_clears_stored_mutes_at_once(void) {
+    pattern_set_step(&g_seq.patterns[0], 2, 1, 66, 100, STEP_FLAG_ACTIVE);
+    g_seq.patterns[0].tracks[2].muted = true;
+    g_seq.patterns[5].tracks[2].muted = true;
+    sequencer_refresh_track_playback(2, 0);
+    sequencer_refresh_track_playback(2, 5);
+    play_under_bar();
+    CHECK(seq_get_track_mutes() == 0x04 && g_seq.track_mutes == 0);
+    press_encoder(1, BTN_LONG_PRESS);       // the selector
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    press_step(2);
+    release_step(2);                        // button 3: track 2
+    CHECK(seq_get_track_mutes() == 0);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) CHECK(!g_seq.patterns[p].tracks[2].muted);
+    fake_midi_length = 0;
+    pulses(PULSES_PER_STEP);                // through step 1
+    CHECK(count_channel_note_on(2, 66, 100) == 1);
 }
 
 static void test_pending_mute_light_in_frame(void) {
@@ -5439,19 +5555,23 @@ int main(int argc, char **argv) {
     RUN(test_mute_group_without_landed_held_key);
     RUN(test_mute_group_immediate_mode);
     RUN(test_mute_group_unmutes_stored_mute);
+    RUN(test_mute_group_unmutes_stored_and_mutes_audible_together);
     RUN(test_mute_group_lands_as_targets);
     RUN(test_mute_sweep_drops_hold_not_reported_down);
     RUN(test_mute_held_key_pressed_again_drops_the_group);
     RUN(test_mute_group_released_after_stop_applies_now);
     RUN(test_mute_group_after_stop_cancelled_the_held_change);
+    RUN(test_mute_group_collected_while_stopped_waits_after_play);
     RUN(test_mute_lost_hold_drops_group);
     RUN(test_mute_release_after_lost_generation_in_one_pass);
     RUN(test_mute_join_in_a_pass_that_lost_the_hold);
     RUN(test_mute_press_in_a_pass_that_lost_sync_holds_nothing);
     RUN(test_mute_hold_dropped_by_panic);
+    RUN(test_mute_hold_kept_by_overflow_panic);
     RUN(test_mute_hold_dropped_by_save);
     RUN(test_mute_hold_dropped_by_load);
     RUN(test_selector_mute_acts_now_and_leaves_group);
+    RUN(test_selector_mute_clears_stored_mutes_at_once);
     RUN(test_pending_mute_light_in_frame);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
