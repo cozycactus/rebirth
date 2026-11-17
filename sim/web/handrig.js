@@ -1,6 +1,8 @@
 // handrig.js: one hand of the simulator page's hands, as HandRig.create(side).
 // The model's skeleton and skinned mesh (HAND_MODEL), posed by curls, placed
 // by its root, and skinned on the CPU wherever vertex positions are needed.
+// At the end, the driver (HandRig.Driver, HandRig.peakSpeed): both hands
+// posed from the plan of handplan.js at a device time.
 //
 // The model: a bone's local +Y runs along the bone toward the fingertip, X
 // and Z are across it. Which way X points (to the palm or to the back of the
@@ -544,6 +546,7 @@
       TIP_VERTS[f] = list;
       TIP_SET[f] = new Set(list);
     }
+    const ALL_TIPS = [].concat(...FINGERS.map(f => TIP_VERTS[f])), tipsAt = new Float64Array(3 * ALL_TIPS.length);
     const DOWN = Object.freeze({ x: 0, y: 0, z: -1 });
     // The deepest vertex of finger f's last two segments along the contact
     // direction `toward`: a unit vector (default −z, onto a top) or
@@ -1007,18 +1010,31 @@
     // the pivot kept no lower (≤ 3 rounds). touching as touchingOf takes it:
     // given, the refit starts from the hand's own root (wherever setRoot,
     // setPose or a fit left it); given nothing, from the last fit's, and a
-    // hand moved by hand does not rise. Returns { ok, residualMm }: the
-    // touching fingers' contacts (mm), ok iff each is on its target (within
-    // 1 mm; 2 mm on a knob's side).
-    function clear(active, touching) {
+    // hand moved by hand does not rise. With opts.free (a hand moving
+    // between its keyframes, nothing held) any vertex left in a control,
+    // and any vertex of a fingertip (its last two segments, whose sides the
+    // clearance vertices do not all cover) under the plate, raises the
+    // root, and nothing is refitted. Returns { ok, residualMm,
+    // clean }: the touching fingers' contacts (mm), ok iff each is on its
+    // target (within 1 mm; 2 mm on a knob's side), and clean iff
+    // violations() is left empty (an active finger is never curled, so one
+    // may stay in a control).
+    function clear(active, touching, opts) {
       active = [].concat(active || []);
-      const touch = touchingOf(touching);
+      const touch = touchingOf(touching), free = !!(opts && opts.free);
+      let all;
       for (let round = 0; ; round++) {
         for (const f of FINGERS) if (!active.includes(f)) curlAway(f);
-        const left = violationsUp(touch).filter(v => PALM.includes(v.vertex));
-        if (!left.length || round === 3 || !touch) break;
-        const fingers = active.filter(f => f in touch.targets);
-        pose.pivot.z += (Math.max(...left.map(v => v.upMm)) + 0.25) * MM;
+        all = violationsUp(touch);
+        const left = free ? all : all.filter(v => PALM.includes(v.vertex));
+        let upMm = left.length ? Math.max(...left.map(v => v.upMm)) : 0;
+        if (free) {
+          skinInto(ALL_TIPS, tipsAt);
+          for (let k = 2; k < tipsAt.length; k += 3) upMm = Math.max(upMm, -tipsAt[k] / MM);
+        }
+        if (upMm <= 0 || round === 3 || !touch) break;
+        const fingers = free ? [] : active.filter(f => f in touch.targets);
+        pose.pivot.z += (upMm + 0.25) * MM;
         writeRoot();
         if (fingers.length) {
           const from = touch.given ? { targets: touch.targets, toward: touch.toward, seed: seedOf(fingers), yaw0: pose.yaw,
@@ -1028,15 +1044,17 @@
         group.updateMatrixWorld(true);
       }
       const residualMm = touch ? residualsOf(touch.targets, touch.toward) : {};
-      return { ok: !touch || settledOf(touch, residualMm), residualMm };
+      return { ok: !touch || settledOf(touch, residualMm), residualMm, clean: !all.length };
     }
 
     // The touching fingers' contacts (touching as touchingOf takes it)
     // re-solved from the hand's current pose, its root held: only when one
     // is more than opts.toleranceMm (default 1) off its target, then by at
     // most opts.iterations (default 8) steps of the fit's solve over the
-    // touching fingers' angles, from the angles they have. Returns { ok,
-    // residualMm, solved }, ok as clear() says it.
+    // touching fingers' angles, from the angles they have (with opts.root
+    // over the root's position, yaw and pitch too, within the fit's windows
+    // about where it is). Returns { ok, residualMm, solved }, ok as clear()
+    // says it.
     function refit(touching, opts) {
       opts = opts || {};
       const touch = touchingOf(touching), fingers = touch ? Object.keys(touch.targets) : [];
@@ -1047,7 +1065,7 @@
       const verts = {};
       for (const f of fingers) verts[f] = contactVertex(f, touch.toward[f]);
       solve({ fingers, targets: touch.targets, toward: touch.toward, verts, seed: seedOf(fingers), yaw0: pose.yaw,
-        pitch0: pose.pitch, yawWindow: YAW, fixRoot: true, iterations: opts.iterations || 8, doneMm: 0.05 });
+        pitch0: pose.pitch, yawWindow: YAW, fixRoot: !opts.root, iterations: opts.iterations || 8, doneMm: 0.05 });
       residualMm = residualsOf(touch.targets, touch.toward);
       return { ok: settledOf(touch, residualMm), residualMm, solved: true };
     }
@@ -1057,9 +1075,512 @@
       FINGER_CLEARANCE, armDir, contact, place, fit, pinch, clear, refit, violations };
   }
 
+  // ─── The driver: the plan's keyframes as poses ─────────────────
+  // new Driver({left, right}, plan) poses the two rigs (at page scale) at a
+  // device time from the keyframes of HandPlan.build:
+  // - a keyframe's pose is the rig's fit of its aims, each raised by its
+  //   liftMm: no fingers, the hand away (the driver's own pose, out of the
+  //   panel toward the player); a finger on a turn, the pinch of that knob
+  //   at twist 0 raised by the lift; the index alone, place(); else fit().
+  //   Then clear(), the aimed fingers held to their (raised) targets. A
+  //   keyframe pressing some of the controls its neighbour presses takes
+  //   that one's pose instead, its other fingers let go (derivedShapes).
+  //   Each is fitted on first use and cached by its geometry (side, how it
+  //   is fitted, the aims, freeYaw; a derived one by its fingers and its
+  //   root's key) in one LRU for every driver, so equal situations in later
+  //   shows reuse it;
+  // - between two keyframes the root and the curls blend with minimum-jerk
+  //   easing: the rotation by slerp, the position by lerp of the pivot, or,
+  //   while fingers stay in contact across the two keyframes, of the
+  //   contacts' centre (in the world and in the hand), so they stay put;
+  // - a finger in contact across the two keyframes is re-solved by the rig
+  //   (refit) when its contact is more than 1 mm off: its angles from the
+  //   blended root, at most 8 steps; failing that, the root too;
+  // - between two keyframes that pinch the same turn the grip follows the
+  //   knob (twistTable below), turned about the knob's axis and lifted to
+  //   regrip; a pinch keyframe elsewhere takes the twist at its time; a
+  //   grip is left and taken straight up and down (GRIP_LIFT_MM);
+  // - then clear(): the free fingers (a finger not aimed at by the later
+  //   keyframe nor touching is let go) curled out of the controls; a hand
+  //   that holds nothing rises out of any control it would pass through.
+  // pose(t) depends on t alone. opts.windowUs > 0 (fast preparation): the
+  // root is the average of 5 samples over [t − windowUs/2, t + windowUs/2]
+  // and the contacts held at t are re-solved from it by the fingers alone,
+  // kept only within reach. Times are device µs.
+  const SIDES = ['left', 'right'];
+  const CACHE_SIZE = 4000;
+  const RESOLVE_MM = 1, RESOLVE_ITERATIONS = 8;
+  const WINDOW_SAMPLES = 5;
+  // Away: the hand in front of the panel's front edge (page v 1400), its
+  // fingers relaxed; every clearance vertex this far in front (beyond the
+  // other hand's palm, which hangs some 110 mm past the edge when it
+  // presses the MUTE keys on this hand's side) and its lowest this high
+  // above the plate.
+  const FRONT_V = 1400, AWAY_CLEAR_MM = 120, AWAY_LOW_MM = 10;
+  // On a knob: an edge turns it 3.75° (app.js; 15° a detent of four edges),
+  // the hand follows within ±20°.
+  const EDGE_DEG = 15 / 4, TWIST_DEG = 20;
+  // An edge's turn spread over 16 ms (a burst's click is 25 ms); at the
+  // window's edge the twist eases back to the middle over 60 ms; tabled
+  // every 1 ms. A pause of 100 ms or more between two edges is a regrip:
+  // the hand grips until 20 ms after the last edge and from 20 ms before
+  // the next, and lifts 3 mm in between.
+  const TWIST_RAMP_US = 16000, TWIST_SLIDE_US = 60000, TWIST_STEP_US = 1000;
+  const REGRIP_US = 100000, REGRIP_MARGIN_US = 20000, REGRIP_MM = 3;
+  // Off a knob's side to anything but the plan's own lift (the press that
+  // continues a turn, a direct move), and onto it from anything but its
+  // approach: the grip straight up or down 15 mm (the plan's lift, enough
+  // for a thumb that reaches nearly to the plate to clear the knob's top)
+  // over the first or last third of the time, at most 20 ms, the move
+  // overlapping half of it (so it is hurried by at most 10 ms).
+  const GRIP_LIFT_MM = 15, GRIP_SPLIT = 1 / 3, GRIP_MAX_US = 20000;
+  // A finger let go while others of its gesture press (see derivedShapes),
+  // lifted 20° at its knuckle, which may take it past the fit's flex floor
+  // of 0 into a slight hyperextension (as a lifted finger does): held at 0,
+  // a finger pressing with its knuckle nearly straight barely lifts, the
+  // derived pose is left in a control, and the hand falls back to fits of
+  // its own that swing it between presses.
+  const LET_GO_DEG = 20;
+  const minJerk = u => u * u * u * (10 + u * (6 * u - 15));
+  const NO_CONTACTS = Object.freeze([]);
+
+  // The keyframes' poses, by geometry, least recently used dropped first.
+  const cache = {
+    map: new Map(),
+    get(key) {
+      const e = this.map.get(key);
+      if (e !== undefined) { this.map.delete(key); this.map.set(key, e); }
+      return e;
+    },
+    set(key, e) {
+      this.map.set(key, e);
+      if (this.map.size > CACHE_SIZE) this.map.delete(this.map.keys().next().value);
+    },
+    clear() { this.map.clear(); },
+    get size() { return this.map.size; },
+  };
+
+  // How keyframe k of a hand is fitted, and its cache key.
+  function shapeOf(plan, side, k) {
+    const list = Object.keys(k.fingers).sort();
+    if (!list.length) return { how: 'away', key: side + ' away' };
+    const onTurn = list.find(f => k.fingers[f].ref && k.fingers[f].ref.type === 'turn');
+    if (onTurn) {
+      const x = k.fingers[onTurn], turn = plan.turns[x.ref.id];
+      if (!turn || turn.id !== x.ref.id) throw new Error('HandRig.Driver: no turn ' + x.ref.id);
+      return { how: 'pinch', turn, enc: turn.enc, liftMm: x.liftMm, key: side + ' pinch ' + turn.enc + ' +' + x.liftMm };
+    }
+    const how = list.length === 1 && list[0] === 'index' ? 'place' : 'fit';
+    const aims = list.map(f => {
+      const x = k.fingers[f];
+      return f + '@' + x.aim.u + ',' + x.aim.v + ',' + (x.aim.topMm + x.liftMm);
+    });
+    return { how, fingers: list, liftMm: k.fingers[list[0]].liftMm,
+      key: side + ' ' + how + ' ' + aims.join(' ') + (how === 'fit' && k.freeYaw ? ' freeYaw' : '') };
+  }
+
+  // The hand away: relaxed, pointing from its shoulder straight at the
+  // panel, 20° down, every clearance vertex AWAY_CLEAR_MM in front of the
+  // panel's front edge, the lowest AWAY_LOW_MM above the plate.
+  function awayPose(rig, T, MM) {
+    const s = SHOULDER[rig.side], dir = rig.armDir(new T.Vector3(s[0], -FRONT_V, 0));
+    const pivot = new T.Vector3(s[0], -FRONT_V - 60 * MM, 60 * MM);
+    rig.setPose({ pivot, dir, curls: POSES.relax, spread: {} });
+    const p = rig.skinned(rig.CLEARANCE);
+    let front = -Infinity, low = Infinity;
+    for (let k = 0; k < p.length; k += 3) { front = Math.max(front, p[k + 1]); low = Math.min(low, p[k + 2]); }
+    pivot.y += -FRONT_V - AWAY_CLEAR_MM * MM - front;
+    pivot.z += AWAY_LOW_MM * MM - low;
+    rig.setPose({ pivot, dir, curls: POSES.relax, spread: {} });
+    return rig.getPose();
+  }
+
+  // A keyframe's pose on its rig: { how, state (rig.getPose() after clear),
+  // aimed (its fingers), touching (its contacts, [{finger, target,
+  // toward}], when its lift is 0), ok (fitted and cleared) }.
+  function fitShape(rig, k, shape, T, PANEL) {
+    const MM = PANEL.UNITS_PER_MM;
+    if (shape.how === 'away') {
+      return { how: 'away', state: awayPose(rig, T, MM), aimed: NO_CONTACTS, touching: NO_CONTACTS, ok: true, clean: true };
+    }
+    const raised = f => {
+      const x = k.fingers[f], p = PANEL.onPanel(x.aim.u, x.aim.v, x.aim.topMm + x.liftMm);
+      return new T.Vector3(p.x, p.y, p.z);
+    };
+    let res, targets;
+    if (shape.how === 'pinch') {
+      const c = PANEL.control({ op: 'encsw', enc: shape.enc }), axis = { axis: new T.Vector3(c.u, -c.v, 0) };
+      res = rig.pinch(shape.enc, 0);
+      if (shape.liftMm) {
+        const p = rig.getPose();
+        p.pivot.z += shape.liftMm * MM;
+        rig.setPose(p);
+      }
+      targets = ['thumb', 'index'].map(finger => ({ finger, toward: axis,
+        target: res.targets[finger].clone().setZ(res.targets[finger].z + shape.liftMm * MM) }));
+    } else if (shape.how === 'place') {
+      const target = raised('index');
+      res = rig.place('index', target, rig.armDir(target));
+      targets = [{ finger: 'index', target }];
+    } else {
+      const aims = {}, centre = new T.Vector3();
+      for (const f of shape.fingers) centre.add(aims[f] = raised(f));
+      res = rig.fit(aims, { dir: rig.armDir(centre.multiplyScalar(1 / shape.fingers.length)), freeYaw: k.freeYaw });
+      targets = shape.fingers.map(finger => ({ finger, target: aims[finger] }));
+    }
+    const aimed = targets.map(c => c.finger), cleared = rig.clear(aimed, targets);
+    return { how: shape.how, state: rig.getPose(), aimed, touching: shape.liftMm ? NO_CONTACTS : targets,
+      ok: res.ok && cleared.ok && cleared.clean, clean: cleared.clean };
+  }
+
+  // The fingers of keyframe k pressing controls (every finger it aims at,
+  // none on a knob's side), sorted; null if it is not such a keyframe.
+  function pressingOf(k) {
+    const list = Object.keys(k.fingers).sort();
+    return list.length && list.every(f => k.fingers[f].liftMm === 0 && k.fingers[f].ref.type !== 'turn') ? list : null;
+  }
+  // A keyframe whose pressing fingers are some of a neighbour's (on the
+  // same controls) takes the pose of the largest such keyframe around it
+  // (its `root`), the other fingers let go: fitted alone, a lone index or
+  // a pair would put the root elsewhere (two MUTE keys a track apart turn
+  // the pair's hand 30° from the index's alone), and the hand would swing
+  // between presses milliseconds apart.
+  function derivedShapes(side, frames, shapes) {
+    const sets = frames.map(pressingOf);
+    const within = (i, j) => j >= 0 && j < frames.length && sets[i] && sets[j] && sets[j].length > sets[i].length &&
+      sets[i].every(f => {
+        const x = frames[i].fingers[f].ref, y = frames[j].fingers[f];
+        return y && y.liftMm === 0 && y.ref.type === x.type && y.ref.id === x.id;
+      });
+    const from = frames.map((k, i) => {
+      const p = within(i, i - 1), n = within(i, i + 1);
+      return p && n ? (sets[i + 1].length >= sets[i - 1].length ? i + 1 : i - 1) : n ? i + 1 : p ? i - 1 : -1;
+    });
+    return shapes.map((shape, i) => {
+      if (from[i] < 0) return shape;
+      let root = i;
+      while (from[root] >= 0) root = from[root];
+      return { how: 'derive', root, fingers: sets[i], own: shape, key: side + ' ' + sets[i].join(',') + ' of ' + shapes[root].key };
+    });
+  }
+  // A derived keyframe's pose: its root's, the fingers it does not press
+  // let go: lifted LET_GO_DEG at the knuckle (the thumb at its base), as a
+  // finger leaves a key (curled toward the fist from a press, a fingertip
+  // sweeps under the plate). ok also when nothing is left in a control.
+  function deriveShape(rig, root, shape) {
+    const curls = {};
+    for (const f of FINGERS) {
+      curls[f] = root.state.curls[f].slice();
+      if (root.aimed.includes(f) && !shape.fingers.includes(f)) curls[f][f === 'thumb' ? 0 : 1] -= LET_GO_DEG;
+    }
+    rig.setPose({ pivot: root.state.pivot, quaternion: root.state.quaternion, curls, spread: root.state.spread });
+    const touching = root.touching.filter(c => shape.fingers.includes(c.finger)), cleared = rig.clear(shape.fingers, touching);
+    return { how: 'derive', state: rig.getPose(), aimed: shape.fingers, touching, ok: root.ok && cleared.ok && cleared.clean,
+      clean: cleared.clean };
+  }
+
+  // The hand's twist on a knob through a turn (degrees, clockwise seen
+  // from above, as the knob turns up) and its lift to regrip (mm), every
+  // TWIST_STEP_US from the turn's start to its end: the twist follows the
+  // knob's turn up to ±TWIST_DEG; there the fingers slide on the knob and
+  // the twist eases back to the middle (TWIST_SLIDE_US, the knob's turn
+  // meanwhile let slip), then follows again; in a regrip the hand lifts
+  // and turns back to the middle.
+  function twistTable(turn) {
+    const t0 = turn.tStart, n = Math.max(1, Math.ceil((turn.tEnd - t0) / TWIST_STEP_US)) + 1, edges = turn.edges;
+    const deg = new Float64Array(n), lift = new Float64Array(n), regrips = [];
+    for (let i = 1; i < edges.length; i++) {
+      if (edges[i].t - edges[i - 1].t >= REGRIP_US) regrips.push([edges[i - 1].t + REGRIP_MARGIN_US, edges[i].t - REGRIP_MARGIN_US]);
+    }
+    let w = 0, from = 0, r = 0, held = null, slide = null;
+    for (let k = 1; k < n; k++) {
+      const a = t0 + (k - 1) * TWIST_STEP_US, b = a + TWIST_STEP_US;
+      while (r < regrips.length && regrips[r][1] <= a) { r++; held = null; slide = null; w = 0; }
+      if (r < regrips.length && b > regrips[r][0]) {
+        const [g0, g1] = regrips[r], u = Math.min(1, Math.max(0, (b - g0) / (g1 - g0)));
+        if (held === null) held = w;
+        deg[k] = w = held * (1 - minJerk(u));
+        lift[k] = REGRIP_MM * Math.sin(Math.PI * u) ** 2;
+        continue;
+      }
+      let turned = 0;
+      while (from < edges.length && edges[from].t + TWIST_RAMP_US <= a) from++;
+      for (let i = from; i < edges.length && edges[i].t < b; i++) {
+        const lo = Math.max(a, edges[i].t), hi = Math.min(b, edges[i].t + TWIST_RAMP_US);
+        if (hi > lo) turned += Math.sign(edges[i].dir) * EDGE_DEG * (hi - lo) / TWIST_RAMP_US;
+      }
+      if (slide) {
+        const u = (b - slide.t) / TWIST_SLIDE_US;
+        w = u >= 1 ? 0 : slide.w * (1 - minJerk(u));
+        if (u >= 1) slide = null;
+      } else {
+        w = Math.max(-TWIST_DEG, Math.min(TWIST_DEG, w + turned));
+        if (Math.abs(w) >= TWIST_DEG) slide = { t: b, w };
+      }
+      deg[k] = w;
+    }
+    return { t0, deg, lift };
+  }
+
+  function Driver(rigs, plan) {
+    const { T, PANEL } = deps();
+    const MM = PANEL.UNITS_PER_MM, Z = new T.Vector3(0, 0, 1);
+    for (const side of SIDES) if (!rigs[side] || rigs[side].side !== side) throw new Error('HandRig.Driver: no ' + side + ' rig');
+    const knobs = [0, 1].map(enc => PANEL.control({ op: 'encsw', enc }));
+    const hands = {};
+    for (const side of SIDES) {
+      const frames = plan.hands[side];
+      if (!frames || !frames.length) throw new Error('HandRig.Driver: no keyframes for the ' + side + ' hand');
+      hands[side] = { frames, times: frames.map(k => k.t), shapes: derivedShapes(side, frames, frames.map(k => shapeOf(plan, side, k))),
+        entries: [] };
+    }
+    const twists = new Map();
+    const self = { rigs, plan, failures: 0, pose, drawTime };
+
+    // Keyframe i's pose, from the cache or fitted (a derived one that does
+    // not settle is the keyframe's own fit, marked `fallback`).
+    function entry(side, i) {
+      const h = hands[side];
+      let e = h.entries[i];
+      if (e) return e;
+      const shape = h.shapes[i];
+      e = cache.get(shape.key);
+      if (!e) {
+        if (shape.how !== 'derive') e = fitShape(rigs[side], h.frames[i], shape, T, PANEL);
+        else {
+          e = deriveShape(rigs[side], entry(side, shape.root), shape);
+          if (!e.ok) {
+            e = cache.get(shape.own.key);
+            if (!e) cache.set(shape.own.key, e = fitShape(rigs[side], h.frames[i], shape.own, T, PANEL));
+            e = Object.assign({ fallback: true }, e);
+          }
+        }
+        cache.set(shape.key, e);
+      }
+      return (h.entries[i] = e);
+    }
+    // The twist (degrees) and the regrip lift (mm) of a turn at t, held at
+    // its ends outside it.
+    function twistAt(turn, t) {
+      let tab = twists.get(turn.id);
+      if (!tab) twists.set(turn.id, tab = twistTable(turn));
+      const n = tab.deg.length, x = Math.max(0, Math.min(n - 1, (t - tab.t0) / TWIST_STEP_US));
+      const k = Math.min(n - 2, Math.floor(x)), f = x - k;
+      return { deg: tab.deg[k] + (tab.deg[k + 1] - tab.deg[k]) * f, liftMm: tab.lift[k] + (tab.lift[k + 1] - tab.lift[k]) * f };
+    }
+    // A pose turned clockwise (seen from above) by deg about the vertical
+    // through point c, and raised by upMm; a contact turned likewise.
+    function turned(state, c, deg, upMm) {
+      const a = -deg * D2R, cs = Math.cos(a), sn = Math.sin(a), dx = state.pivot.x - c.x, dy = state.pivot.y - c.y;
+      return { pivot: new T.Vector3(c.x + cs * dx - sn * dy, c.y + sn * dx + cs * dy, state.pivot.z + upMm * MM),
+        quaternion: new T.Quaternion().setFromAxisAngle(Z, a).multiply(state.quaternion), curls: state.curls, spread: state.spread };
+    }
+    function turnedContact(contact, c, deg, upMm) {
+      const a = -deg * D2R, cs = Math.cos(a), sn = Math.sin(a), p = contact.target, dx = p.x - c.x, dy = p.y - c.y;
+      return { finger: contact.finger, toward: contact.toward,
+        target: new T.Vector3(c.x + cs * dx - sn * dy, c.y + sn * dx + cs * dy, p.z + upMm * MM) };
+    }
+    const knobAxis = enc => ({ x: knobs[enc].u, y: -knobs[enc].v });
+    // A keyframe's pose: a pinch at the twist of its time.
+    const stateOf = (shape, e, t) => (shape.how === 'pinch' ? turned(e.state, knobAxis(shape.enc), twistAt(shape.turn, t).deg, 0) : e.state);
+    // The contacts of keyframe A held across to B: the same finger on the
+    // same control (ref), touching in both.
+    function heldAcross(A, B, ea) {
+      if (!ea.touching.length) return NO_CONTACTS;
+      const out = [];
+      for (const c of ea.touching) {
+        const x = A.fingers[c.finger], y = B.fingers[c.finger];
+        if (x && y && x.liftMm === 0 && y.liftMm === 0 && x.ref.type === y.ref.type && x.ref.id === y.ref.id) out.push(c);
+      }
+      return out;
+    }
+    // Poses a and b blended at s (see the section's header).
+    function blend(a, b, s, held) {
+      const quaternion = new T.Quaternion().slerpQuaternions(a.quaternion, b.quaternion, s), pivot = new T.Vector3();
+      if (held.length) {
+        const anchor = new T.Vector3();
+        for (const c of held) anchor.add(c.target);
+        anchor.multiplyScalar(1 / held.length);
+        const inA = anchor.clone().sub(a.pivot).applyQuaternion(a.quaternion.clone().invert());
+        const inB = anchor.clone().sub(b.pivot).applyQuaternion(b.quaternion.clone().invert());
+        pivot.copy(anchor).sub(inA.lerp(inB, s).applyQuaternion(quaternion));
+      } else {
+        pivot.lerpVectors(a.pivot, b.pivot, s);
+      }
+      const curls = {}, spread = {};
+      for (const f of FINGERS) {
+        const ca = a.curls[f], cb = b.curls[f];
+        curls[f] = ca.map((x, j) => x + (cb[j] - x) * s);
+        spread[f] = a.spread[f] + (b.spread[f] - a.spread[f]) * s;
+      }
+      return { pivot, quaternion, curls, spread };
+    }
+    // A grip on a knob's side (a pinch keyframe at lift 0), turned by deg
+    // and raised by upMm, with its contacts turned and raised alike (the
+    // fingertips slide along the knob's side).
+    function gripAt(shape, e, deg, upMm) {
+      const c = knobAxis(shape.enc);
+      return { state: turned(e.state, c, deg, upMm), touching: e.touching.map(x => turnedContact(x, c, deg, upMm)) };
+    }
+    const grips = shape => shape.how === 'pinch' && !shape.liftMm;
+    // The pose of a hand at t from its keyframes A and B around t, before
+    // the rig re-solves or clears it: { state, held (the contacts held
+    // across A and B, on their targets), touching (those and the fingers
+    // pressing at A or B alone, leaving or reaching their controls: exempt
+    // from violations), aimed (the fingers not to curl: B's and those
+    // touching; A's others are let go), away, ok (A and B fitted), exact (a
+    // cached pose as it is, with its clean), rigid (a fitted pose moved as
+    // a whole: nothing to re-solve) }.
+    function frame(side, t) {
+      const h = hands[side], n = h.times.length;
+      let lo = 0, hi = n;
+      while (lo < hi) {
+        const m = (lo + hi) >> 1;
+        if (h.times[m] <= t) lo = m + 1; else hi = m;
+      }
+      const ia = Math.max(0, lo - 1), ib = Math.min(lo, n - 1);
+      const A = h.frames[ia], B = h.frames[ib], sa = h.shapes[ia], sb = h.shapes[ib], ea = entry(side, ia);
+      // At a keyframe's time (or outside them all), the keyframe as it is.
+      if (ia === ib || t <= A.t) {
+        if (grips(sa)) {
+          const g = gripAt(sa, ea, twistAt(sa.turn, A.t).deg, 0);
+          return { state: g.state, held: g.touching, touching: g.touching, aimed: ea.aimed, away: false, ok: ea.ok, rigid: true };
+        }
+        return { state: stateOf(sa, ea, A.t), held: ea.touching, touching: ea.touching, aimed: ea.aimed, away: ea.how === 'away',
+          ok: ea.ok, clean: ea.clean, exact: sa.how !== 'pinch', rigid: sa.how === 'pinch' };
+      }
+      const eb = entry(side, ib), away = ea.how === 'away' && eb.how === 'away', ok = ea.ok && eb.ok;
+      // Both grip the same turn's knob: the grip follows the knob.
+      if (grips(sa) && grips(sb) && sa.turn === sb.turn) {
+        const tw = twistAt(sa.turn, t), g = gripAt(sa, ea, tw.deg, tw.liftMm);
+        return { state: g.state, held: g.touching, touching: g.touching, aimed: ea.aimed, away, ok, rigid: true };
+      }
+      const held = heldAcross(A, B, ea);
+      if (ea === eb && sa.how !== 'pinch') {
+        return { state: ea.state, held, touching: ea.touching, aimed: ea.aimed, away, ok, clean: ea.clean, exact: true };
+      }
+      // Off or onto a knob's side, unless the plan lifts there: the grip
+      // straight up or down GRIP_LIFT_MM over a fraction `lead` of the time
+      // at the start or the end; the move takes the rest and half of that
+      // (the grip half up by then, the fingertips over the knob's top).
+      const u = (t - A.t) / (B.t - A.t), lead = Math.min(GRIP_SPLIT, GRIP_MAX_US / (B.t - A.t));
+      const leaves = grips(sa) && !(sb.how === 'pinch' && sb.turn === sa.turn);
+      const enters = grips(sb) && !(sa.how === 'pinch' && sa.turn === sb.turn);
+      const upAt = w => GRIP_LIFT_MM * minJerk(Math.min(1, w / lead));
+      const u0 = leaves ? lead / 2 : 0, u1 = enters ? 1 - lead / 2 : 1;
+      if ((leaves && u <= u0) || (enters && u >= u1)) {
+        const off = leaves && u <= u0, shape = off ? sa : sb, e = off ? ea : eb;
+        const g = gripAt(shape, e, twistAt(shape.turn, off ? A.t : B.t).deg, upAt(off ? u : 1 - u));
+        return { state: g.state, held: g.touching, touching: g.touching, aimed: e.aimed, away, ok, rigid: true };
+      }
+      const touching = held.slice();
+      if (!leaves) for (const c of ea.touching) if (!held.includes(c)) touching.push(c);
+      if (!enters) for (const c of eb.touching) if (!touching.some(x => x.finger === c.finger)) touching.push(c);
+      const aimed = eb.aimed.concat(touching.map(c => c.finger).filter(f => !eb.aimed.includes(f)));
+      const pa = leaves ? gripAt(sa, ea, twistAt(sa.turn, A.t).deg, upAt(u)).state : stateOf(sa, ea, A.t);
+      const pb = enters ? gripAt(sb, eb, twistAt(sb.turn, B.t).deg, upAt(1 - u)).state : stateOf(sb, eb, B.t);
+      const s = minJerk((u - u0) / (u1 - u0));
+      return { state: blend(pa, pb, s, held), held, touching, aimed, away, ok };
+    }
+    // Whether the contacts `held` are on their targets in clear()'s result.
+    const onTarget = (held, cleared) => held.every(c => cleared.residualMm[c.finger] <= limitOf(c));
+    const limitOf = c => (c.toward && c.toward.axis ? 2 : 1);
+
+    function poseAt(side, t) {
+      const rig = rigs[side], f = frame(side, t);
+      rig.setPose(f.state);
+      let ok = f.ok, clean = f.exact ? f.clean : true;
+      if (!f.exact) {
+        if (f.held.length && !f.rigid) {
+          const opts = { toleranceMm: RESOLVE_MM, iterations: RESOLVE_ITERATIONS };
+          if (!rig.refit(f.held, opts).ok) rig.refit(f.held, Object.assign({ root: true }, opts));
+        }
+        const cleared = rig.clear(f.aimed, f.touching, { free: !f.held.length });
+        ok = onTarget(f.held, cleared) && ok;
+        clean = cleared.clean;
+      }
+      if (!ok) self.failures++;
+      return { away: f.away, ok, clean, touching: f.touching };
+    }
+    function poseWindow(side, t, windowUs) {
+      const rig = rigs[side], mid = (WINDOW_SAMPLES - 1) / 2, c = frame(side, t);
+      const pivot = new T.Vector3(), sum = new T.Quaternion(0, 0, 0, 0);
+      let away = true, ok = true, first = null;
+      for (let i = 0; i < WINDOW_SAMPLES; i++) {
+        const f = i === mid ? c : frame(side, t + windowUs * (i / (WINDOW_SAMPLES - 1) - 0.5)), q = f.state.quaternion;
+        if (!first) first = q;
+        const sign = first.dot(q) < 0 ? -1 : 1;
+        pivot.add(f.state.pivot);
+        sum.set(sum.x + sign * q.x, sum.y + sign * q.y, sum.z + sign * q.z, sum.w + sign * q.w);
+        away = away && f.away;
+        ok = ok && f.ok;
+      }
+      rig.setPose({ pivot: pivot.multiplyScalar(1 / WINDOW_SAMPLES), quaternion: sum.normalize(), curls: c.state.curls, spread: c.state.spread });
+      let held = c.held, touching = c.touching;
+      if (held.length) {
+        const res = rig.refit(held, { toleranceMm: RESOLVE_MM, iterations: RESOLVE_ITERATIONS });
+        if (!res.ok) {
+          // Out of reach from the averaged root: those fingers as blended.
+          const reached = held.filter(x => res.residualMm[x.finger] <= limitOf(x)), p = rig.getPose();
+          for (const x of held) {
+            if (reached.includes(x)) continue;
+            p.curls[x.finger] = c.state.curls[x.finger];
+            p.spread[x.finger] = c.state.spread[x.finger];
+          }
+          rig.setPose(p);
+          touching = touching.filter(x => !held.includes(x) || reached.includes(x));
+          held = reached;
+        }
+      }
+      const cleared = rig.clear(c.aimed, touching, { free: !held.length });
+      return { away, ok: onTarget(held, cleared) && ok, clean: cleared.clean, touching };
+    }
+
+    // Poses both rigs at t: { left: {away, ok, clean, touching}, right: … }:
+    // away when the hand is out of the panel; ok when its keyframes were
+    // fitted (on target, nothing in a control) and every contact held is on
+    // its target (else counted in driver.failures; not with a window, where
+    // a touch may be missed); clean when nothing of it is in a control;
+    // touching, the fingertips on (or leaving or reaching) their controls,
+    // as violations() and clear() take them.
+    function pose(t, opts) {
+      const windowUs = (opts && opts.windowUs) || 0, out = {};
+      for (const side of SIDES) out[side] = windowUs > 0 ? poseWindow(side, t, windowUs) : poseAt(side, t);
+      return out;
+    }
+    // The time to draw at: never at or past the next down or up the device
+    // has not processed (the first of plan.events after now).
+    function drawTime(now, extrapolated) {
+      const ev = plan.events;
+      let lo = 0, hi = ev.length;
+      while (lo < hi) {
+        const m = (lo + hi) >> 1;
+        if (ev[m] > now) hi = m; else lo = m + 1;
+      }
+      return lo === ev.length ? extrapolated : Math.max(now, Math.min(extrapolated, ev[lo] - 1));
+    }
+    return self;
+  }
+  Driver.cache = cache;
+
+  // The hands' peak speeds (m/s) between t0 and t1: the wrists posed by the
+  // driver every stepUs.
+  function peakSpeed(driver, t0, t1, stepUs) {
+    const { T, PANEL } = deps(), MM = PANEL.UNITS_PER_MM, out = { left: 0, right: 0 }, prev = {};
+    for (let t = t0; t <= t1; t += stepUs) {
+      driver.pose(t);
+      for (const side of SIDES) {
+        const w = driver.rigs[side].bone('Wrist').getWorldPosition(new T.Vector3());
+        if (prev[side]) out[side] = Math.max(out[side], w.distanceTo(prev[side]) / MM / 1000 / (stepUs / 1e6));
+        prev[side] = w;
+      }
+    }
+    return out;
+  }
+
   for (const f in STRAIGHT) Object.freeze(STRAIGHT[f]);
   Object.freeze(STRAIGHT);
-  const api = { create, POSES, STRAIGHT };
+  const api = { create, POSES, STRAIGHT, Driver, peakSpeed };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.HandRig = api;
 })(typeof window !== 'undefined' ? window : globalThis);

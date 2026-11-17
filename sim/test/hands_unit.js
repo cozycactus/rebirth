@@ -619,6 +619,43 @@ section('fit', () => {
     'refit() leaves the root where it was');
 });
 
+// ─── Action builders, as artist.js pushes them (times in µs) ───────
+// Shared by the sections that plan and drive synthetic shows.
+const press = (list, op, o, tDown, tUp) => {
+  list.push(Object.assign({ op, down: true, t: tDown }, o), Object.assign({ op, down: false, t: tUp }, o));
+};
+const sorted = list => list.slice().sort((a, b) => a.t - b.t);
+// A click is four edges 3 000 apart; a burst's clicks are 16 000 apart
+// (last edge to next first edge). Both return the last edge's time.
+const click = (list, enc, dir, t) => {
+  for (let e = 0; e < 4; e++) list.push({ op: 'edge', enc, dir, t: t + 3000 * e });
+  return t + 9000;
+};
+const burst = (list, enc, dir, t, n) => {
+  let last = t;
+  for (let i = 0; i < n; i++) { last = click(list, enc, dir, t); t = last + 16000; }
+  return last;
+};
+const touchOf = (p, key) => p.touches.find(x => x.key === key);
+const who = (p, key) => p.assign['touch:' + touchOf(p, key).id];
+
+// holdEdit (artist.js:647-657): steps down 30 000 apart, after 80 000 and
+// turnNumber's pause of 110 000 two bursts of TRACK clicks, an encoder
+// press 96 000 after the last edge, the steps up 25 000 apart.
+const holdEdit = (steps, burstGap) => {
+  const list = [];
+  let t = 1000000;
+  steps.forEach((index, i) => list.push({ op: 'step', index, down: true, t: t + 30000 * i }));
+  t += 30000 * steps.length + 80000 + 110000;
+  let last = burst(list, 0, 1, t, 2);
+  last = burst(list, 0, 1, last + burstGap, 4);
+  const push = last + 96000;
+  press(list, 'encsw', { enc: 0 }, push, push + 90000);
+  t = push + 90000 + 90000;
+  steps.forEach((index, i) => list.push({ op: 'step', index, down: false, t: t + 25000 * i }));
+  return { list: sorted(list), last, push };
+};
+
 // ─── plan: touches, groups, turns, hands, fingers, timing ────────
 // Synthetic action lists in the score's shapes (times in µs), then a whole
 // show. Every plan also passes the plan's invariants (valid() below).
@@ -690,25 +727,6 @@ section('plan', () => {
   };
   const plan = actions => valid(HandPlan.build(actions), actions);
 
-  // Action builders, as artist.js pushes them.
-  const press = (list, op, o, tDown, tUp) => {
-    list.push(Object.assign({ op, down: true, t: tDown }, o), Object.assign({ op, down: false, t: tUp }, o));
-  };
-  const sorted = list => list.slice().sort((a, b) => a.t - b.t);
-  // A click is four edges 3 000 apart; a burst's clicks are 16 000 apart
-  // (last edge to next first edge). Both return the last edge's time.
-  const click = (list, enc, dir, t) => {
-    for (let e = 0; e < 4; e++) list.push({ op: 'edge', enc, dir, t: t + 3000 * e });
-    return t + 9000;
-  };
-  const burst = (list, enc, dir, t, n) => {
-    let last = t;
-    for (let i = 0; i < n; i++) { last = click(list, enc, dir, t); t = last + 16000; }
-    return last;
-  };
-  const touchOf = (p, key) => p.touches.find(x => x.key === key);
-  const who = (p, key) => p.assign['touch:' + touchOf(p, key).id];
-
   // One tap on pad (6, 4): the right index; it approaches 15 mm up about
   // 80 ms before, is in contact from down to up, lifts, and leaves when
   // nothing follows.
@@ -735,22 +753,6 @@ section('plan', () => {
     assert.ok(p.hands.left.every(k => k.kind === 'away'), 'tap: the left hand stays away');
   }
 
-  // holdEdit (artist.js:647-657): steps down 30 000 apart, after 80 000 and
-  // turnNumber's pause of 110 000 two bursts of TRACK clicks, an encoder
-  // press 96 000 after the last edge, the steps up 25 000 apart.
-  const holdEdit = (steps, burstGap) => {
-    const list = [];
-    let t = 1000000;
-    steps.forEach((index, i) => list.push({ op: 'step', index, down: true, t: t + 30000 * i }));
-    t += 30000 * steps.length + 80000 + 110000;
-    let last = burst(list, 0, 1, t, 2);
-    last = burst(list, 0, 1, last + burstGap, 4);
-    const push = last + 96000;
-    press(list, 'encsw', { enc: 0 }, push, push + 90000);
-    t = push + 90000 + 90000;
-    steps.forEach((index, i) => list.push({ op: 'step', index, down: false, t: t + 25000 * i }));
-    return { list: sorted(list), last, push };
-  };
   {
     const { list, last, push } = holdEdit([0, 1, 2], 126000);
     const p = plan(list);
@@ -954,6 +956,354 @@ section('plan', () => {
       p.turns.length + ' turns');
     assert.strictEqual(p.turns.reduce((n, x) => n + x.edges.length, 0), s.actions.filter(a => a.op === 'edge').length,
       'song 0: every edge in a turn');
+  }
+});
+
+// ─── drive: the plan's keyframes as poses ────────────────────────
+// The driver poses both rigs at a device time: each keyframe fitted once
+// (cached by its geometry), blended between them, contacts held, the pinch
+// following the knob, clear() after; drawTime and peakSpeed. HANDS_TIMING=1
+// prints the timing of song 0.
+section('drive', () => {
+  require(path.join(web, 'three.js'));
+  const T = globalThis.THREE;
+  const HandRig = require(path.join(web, 'handrig.js'));
+  const HandPlan = require(path.join(web, 'handplan.js'));
+  const Artist = require(path.join(web, 'artist.js'));
+  const { PANEL } = HandPlan, MM = PANEL.UNITS_PER_MM, D2R = Math.PI / 180;
+  const fmt = o => JSON.stringify(o, (k, x) => (typeof x === 'number' ? +x.toFixed(2) : x));
+  assert.strictEqual(typeof HandRig.Driver, 'function', 'HandRig.Driver');
+  assert.strictEqual(typeof HandRig.peakSpeed, 'function', 'HandRig.peakSpeed');
+  // A press lands on the control's centre raised to its top along the eye ray.
+  const top = a => {
+    const c = PANEL.control(a), p = PANEL.onPanel(c.u, c.v, c.topMm);
+    return new T.Vector3(p.x, p.y, p.z);
+  };
+  const rigs = { left: HandRig.create('left'), right: HandRig.create('right') };
+  const drive = list => {
+    const plan = HandPlan.build(list);
+    return { plan, driver: new HandRig.Driver(rigs, plan) };
+  };
+  const offMm = (side, finger, target, toward) => rigs[side].contact(finger, toward).distanceTo(target) / MM;
+  const wrist = side => rigs[side].bone('Wrist').getWorldPosition(new T.Vector3());
+  const fingersOf = touching => touching.map(c => c.finger).sort().join(' ');
+  // Nothing of either hand in a control, the touching fingertips (as pose()
+  // lists them) exempt.
+  const clean = (what, res) => {
+    for (const side of ['left', 'right']) {
+      const left = rigs[side].violations(res[side].touching);
+      assert.deepStrictEqual(left, [], what + ': the ' + side + ' hand is in a control: ' + fmt(left.slice(0, 3)));
+    }
+  };
+
+  // The Task 5 tap on pad (6, 4), the right index: on its target at the
+  // down, the middle and 1 000 before the up; at least 5 mm above it
+  // 40 000 before the down; away after, every clearance vertex out of the
+  // panel toward the player. The hand travels in from away.
+  const tapList = [];
+  press(tapList, 'pad', { track: 6, row: 4 }, 1000000, 1070000);
+  {
+    const { plan, driver } = drive(tapList), target = top({ op: 'pad', track: 6, row: 4 });
+    for (const t of [1000000, 1035000, 1069000]) {
+      const res = driver.pose(t);
+      assert.ok(!res.right.away && res.right.ok && res.left.away, 'tap at ' + t + ': ' + fmt(res));
+      assert.strictEqual(fingersOf(res.right.touching), 'index', 'tap at ' + t + ': the index touches');
+      const d = offMm('right', 'index', target);
+      assert.ok(d <= 1.5, 'tap at ' + t + ': the index is ' + fmt(d) + ' mm off');
+      clean('tap at ' + t, res);
+    }
+    driver.pose(960000);
+    const above = (rigs.right.contact('index').z - target.z) / MM;
+    assert.ok(above >= 5, 'tap: 40 000 before the down the index is ' + fmt(above) + ' mm above');
+    const gone = plan.hands.right.find(k => k.kind === 'away' && k.t > 1070000);
+    const res = driver.pose(gone.t);
+    assert.ok(res.right.away && res.left.away, 'tap: both away at ' + gone.t + ': ' + fmt(res));
+    for (const side of ['left', 'right']) {
+      const p = rigs[side].skinned(rigs[side].CLEARANCE);
+      let most = -Infinity;
+      for (let k = 1; k < p.length; k += 3) most = Math.max(most, p[k]);
+      assert.ok(most < -1400, 'tap: away, a ' + side + ' clearance vertex is at y ' + fmt(most));
+    }
+    const v = HandRig.peakSpeed(driver, 0, gone.t, 10000);
+    assert.ok(v.right > 0.5 && v.left < 1e-9, 'tap: peak speeds ' + fmt(v) + ' m/s');
+    assert.strictEqual(driver.failures, 0, 'tap: failures');
+  }
+
+  // drawTime never reaches an unprocessed event: no finger on a control
+  // before the device shows it down, nor off it before it shows it up.
+  {
+    const { driver } = drive(tapList);
+    assert.strictEqual(driver.drawTime(1000000 - 5000, 1000000 + 20000), 1000000 - 1, 'drawTime: before the down');
+    assert.ok(driver.drawTime(1000000, 1000000 + 20000) >= 1000000, 'drawTime: the down processed');
+    assert.strictEqual(driver.drawTime(1000000, 1100000), 1070000 - 1, 'drawTime: before the up');
+    assert.strictEqual(driver.drawTime(1070000, 1090000), 1090000, 'drawTime: no later event');
+    assert.strictEqual(driver.drawTime(1000000 - 5000, 1000000 - 9000), 1000000 - 5000, 'drawTime: never before now');
+  }
+
+  // holdEdit: the left hand holds steps 0 1 2 (pinky, ring, middle) while
+  // the right one turns TRACK in two bursts 126 000 apart and presses it.
+  // The held contacts stay on their steps; at every edge both pinch
+  // contacts are on the knob's rim (10 mm from its axis, 12 mm up), the
+  // hand turned clockwise with the knob (it turns up) and never past the
+  // ±20° window; in the gap between the bursts the hand lifts 3 mm and
+  // regrips at the middle of the window; the press puts the index on the
+  // knob's top. A pose depends on its time alone.
+  {
+    const { list, push } = holdEdit([0, 1, 2], 126000);
+    const { plan, driver } = drive(list);
+    const steps = [0, 1, 2].map(i => touchOf(plan, 'step:' + i)), fingers = ['pinky', 'ring', 'middle'];
+    assert.deepStrictEqual(steps.map(x => plan.assign['touch:' + x.id]), fingers.map(finger => ({ hand: 'left', finger })),
+      'holdEdit: the left pinky, ring and middle hold');
+    const from = Math.max(...steps.map(x => x.tDown)), to = Math.min(...steps.map(x => x.tUp));
+    for (let t = from; t <= to + 9999; t += 10000) {
+      const at = Math.min(t, to), res = driver.pose(at);
+      assert.ok(res.left.ok && fingersOf(res.left.touching) === 'middle pinky ring', 'holdEdit at ' + at + ': ' + fmt(res.left));
+      steps.forEach((x, i) => {
+        const d = offMm('left', fingers[i], top({ op: 'step', index: i }));
+        assert.ok(d <= 1.5, 'holdEdit at ' + at + ': the ' + fingers[i] + ' is ' + fmt(d) + ' mm off step ' + i);
+      });
+      clean('holdEdit at ' + at, res);
+    }
+    const knob = PANEL.control({ op: 'encsw', enc: 0 }), axis = { axis: new T.Vector3(knob.u, -knob.v, 0) };
+    const rimMm = f => {
+      const c = rigs.right.contact(f, axis);
+      return Math.hypot(Math.hypot(c.x - knob.u, c.y + knob.v) / MM - 10, c.z / MM - 12);
+    };
+    const grip = () => {
+      const a = rigs.right.contact('thumb', axis), b = rigs.right.contact('index', axis);
+      return Math.atan2(b.y - a.y, b.x - a.x) / D2R;
+    };
+    const turn = plan.turns[0];
+    assert.deepStrictEqual(plan.assign['turn:' + turn.id], { hand: 'right' }, 'holdEdit: the right hand turns');
+    driver.pose(turn.tStart);
+    const grip0 = grip(), twist = () => ((grip0 - grip()) % 360 + 540) % 360 - 180;
+    let most = 0;
+    for (const e of turn.edges) {
+      const res = driver.pose(e.t);
+      assert.ok(res.right.ok && fingersOf(res.right.touching) === 'index thumb', 'holdEdit: pinched at the edge at ' + e.t +
+        ': ' + fmt(res.right));
+      for (const f of ['thumb', 'index']) {
+        assert.ok(rimMm(f) <= 2, 'holdEdit: at the edge at ' + e.t + ' the ' + f + ' is ' + fmt(rimMm(f)) + ' mm off the rim');
+      }
+      assert.ok(Math.abs(twist()) <= 20.5, 'holdEdit: twisted ' + fmt(twist()) + '° at ' + e.t);
+      most = Math.max(most, twist());
+      clean('holdEdit at the edge at ' + e.t, res);
+    }
+    assert.ok(most >= 10, 'holdEdit: the hand turns with the knob, at most ' + fmt(most) + '°');
+    // The second burst turns the knob 60°: the hand turns with it to the
+    // window's edge, then eases back toward the middle while the fingers
+    // slide on the knob, inside the burst.
+    const second = turn.edges.slice(turn.edges.findIndex((e, i) => i > 0 && e.t - turn.edges[i - 1].t >= 100000));
+    const twists = second.map(e => (driver.pose(e.t), twist())), peak = twists.indexOf(Math.max(...twists));
+    assert.ok(twists[peak] >= 15 && Math.min(...twists.slice(peak)) <= 10, 'holdEdit: in the second burst the twist goes ' +
+      fmt(twists) + '°');
+    const k = turn.edges.findIndex((e, i) => i > 0 && e.t - turn.edges[i - 1].t >= 100000);
+    const before = turn.edges[k - 1].t, after = turn.edges[k].t;
+    driver.pose(before);
+    const zGrip = rigs.right.contact('index', axis).z;
+    const mid = driver.pose((before + after) / 2), rise = (rigs.right.contact('index', axis).z - zGrip) / MM;
+    assert.ok(rise > 2.5 && rise < 3.5, 'holdEdit: between the bursts the hand lifts ' + fmt(rise) + ' mm');
+    clean('holdEdit between the bursts', mid);
+    driver.pose(after);
+    assert.ok(Math.abs(twist()) < 0.5, 'holdEdit: regripped at ' + fmt(twist()) + '°');
+    // From the grip to the press the plan does not lift: the hand leaves
+    // the knob's side straight up before it moves over the top.
+    const zEnd = (driver.pose(turn.tEnd), rigs.right.contact('index', axis).z);
+    driver.pose(turn.tEnd + 5000);
+    for (const f of ['thumb', 'index']) {
+      const c = rigs.right.contact(f, axis), r = Math.hypot(c.x - knob.u, c.y + knob.v) / MM;
+      assert.ok(Math.abs(r - 10) <= 2, 'holdEdit: leaving the grip, the ' + f + ' is ' + fmt(r) + ' mm from the axis');
+    }
+    const up = (rigs.right.contact('index', axis).z - zEnd) / MM;
+    assert.ok(up >= 3, 'holdEdit: 5 000 after the grip the hand is ' + fmt(up) + ' mm up');
+    driver.pose(push);
+    const d = offMm('right', 'index', top({ op: 'encsw', enc: 0 }));
+    assert.ok(d <= 1.5, 'holdEdit: at the press the index is ' + fmt(d) + ' mm off the knob top');
+    const t1 = turn.edges[5].t + 1234;
+    driver.pose(t1);
+    const once = [wrist('left'), wrist('right')];
+    driver.pose(push);
+    driver.pose(from);
+    driver.pose(t1);
+    assert.ok(wrist('left').distanceTo(once[0]) < 1e-9 && wrist('right').distanceTo(once[1]) < 1e-9, 'holdEdit: pose(t) depends on t alone');
+    assert.strictEqual(driver.failures, 0, 'holdEdit: failures');
+  }
+
+  // Every touch on its target (its finger's contact within 1.5 mm) at its
+  // down, its middle and 1 000 before its up; nothing of either hand in a
+  // control then, nor more than 0.5 mm under the plate.
+  const vertices = {};
+  for (const side of ['left', 'right']) {
+    vertices[side] = Array.from({ length: rigs[side].mesh.geometry.attributes.position.count }, (_, v) => v);
+  }
+  const played = (what, plan, driver) => {
+    for (const x of plan.touches) {
+      const who = plan.assign['touch:' + x.id], c = x.control, p = PANEL.onPanel(c.u, c.v, c.topMm);
+      const target = new T.Vector3(p.x, p.y, p.z);
+      for (const t of [x.tDown, Math.round((x.tDown + x.tUp) / 2), x.tUp - 1000]) {
+        const res = driver.pose(t), d = offMm(who.hand, who.finger, target), at = what + ': ' + x.key + ' at ' + t;
+        assert.ok(d <= 1.5, at + ': the ' + who.hand + ' ' + who.finger + ' is ' + fmt(d) + ' mm off');
+        clean(at, res);
+        for (const side of ['left', 'right']) {
+          const mesh = rigs[side].skinned(vertices[side]);
+          let lowest = Infinity;
+          for (let k = 2; k < mesh.length; k += 3) lowest = Math.min(lowest, mesh[k]);
+          assert.ok(lowest >= -0.5 * MM, at + ': the ' + side + ' hand is ' + fmt(-lowest / MM) + ' mm under the plate');
+        }
+      }
+    }
+    assert.strictEqual(driver.failures, 0, what + ': failures');
+  };
+  // A group, a MUTE pair and a clip copy: the hand stays where the whole
+  // gesture puts it while its fingers come and go (a lone index fitted
+  // alone would turn the hand 30° from the pair's 12 000 earlier); a finger
+  // let go lifts off its control. mutePair (artist.js:896-902): downs
+  // 12 000 apart, ups 10 000 apart.
+  for (const steps of [[0, 1, 2], [0, 2, 3, 5]]) {
+    const { plan, driver } = drive(holdEdit(steps, 126000).list);
+    played('holdEdit steps ' + steps.join(' '), plan, driver);
+  }
+  for (const [a, b] of [[3, 2], [4, 6]]) {
+    const list = [];
+    press(list, 'mute', { track: a }, 1000000, 1092000);
+    press(list, 'mute', { track: b }, 1012000, 1102000);
+    const { plan, driver } = drive(sorted(list));
+    assert.strictEqual(who(plan, 'mute:' + a).hand, who(plan, 'mute:' + b).hand, 'mutePair(' + a + ', ' + b + '): one hand');
+    played('mutePair(' + a + ', ' + b + ')', plan, driver);
+    const v = HandRig.peakSpeed(driver, 900000, 1300000, 5000);
+    assert.ok(v.left < 4 && v.right < 4, 'mutePair(' + a + ', ' + b + '): peak speeds ' + fmt(v) + ' m/s');
+  }
+  {
+    const list = [];
+    press(list, 'pad', { track: 2, row: 0 }, 1000000, 1720000);
+    press(list, 'pad', { track: 2, row: 3 }, 1620000, 1690000);
+    const { plan, driver } = drive(sorted(list));
+    played('copy', plan, driver);
+    const v = HandRig.peakSpeed(driver, 1000000, 1720000, 5000);
+    assert.ok(v.left < 4 && v.right < 4, 'copy: while the index holds, peak speeds ' + fmt(v) + ' m/s');
+  }
+
+  // Between its keyframes a hand that holds nothing passes over the panel:
+  // every 5 000, nothing of either hand in a control (the fingertips
+  // touching exempt) nor more than 0.5 mm under the plate. The left hand
+  // goes from a pair of steps to TRACK, its grip seen from the steps' lift
+  // dipping its fingertips under the plate on the way; holdEdit.
+  const everywhere = (what, list) => {
+    const { driver } = drive(list), end = list[list.length - 1].t + 1000000;
+    for (let t = 0; t <= end; t += 5000) {
+      const res = driver.pose(t);
+      clean(what + ' at ' + t, res);
+      for (const side of ['left', 'right']) {
+        const mesh = rigs[side].skinned(vertices[side]);
+        let lowest = Infinity;
+        for (let k = 2; k < mesh.length; k += 3) lowest = Math.min(lowest, mesh[k]);
+        assert.ok(lowest >= -0.5 * MM, what + ' at ' + t + ': the ' + side + ' hand is ' + fmt(-lowest / MM) + ' mm under the plate');
+      }
+    }
+    assert.strictEqual(driver.failures, 0, what + ': failures');
+  };
+  {
+    const list = [];
+    press(list, 'step', { index: 1 }, 1000000, 1200000);
+    press(list, 'step', { index: 2 }, 1010000, 1200000);
+    burst(list, 0, 1, 2000000, 3);
+    everywhere('steps 1 2, then TRACK', sorted(list));
+    everywhere('holdEdit', holdEdit([0, 1, 2], 126000).list);
+  }
+
+  // The away hand is out of the other hand's way: the right hand on MUTE 0
+  // and 2 (its palm past the panel's front edge), the left one away, their
+  // palms apart.
+  {
+    const aim = a => { const c = PANEL.control(a); return { u: c.u, v: c.v, topMm: c.topMm }; };
+    const plan = { touches: [], turns: [], keys: [], assign: {}, events: [], hands: {
+      left: [{ t: 0, kind: 'away', fingers: {}, freeYaw: false }],
+      right: [{ t: 0, kind: 'contact', freeYaw: false, fingers: {
+        index: { aim: aim({ op: 'mute', track: 0 }), ref: { type: 'touch', id: 0 }, liftMm: 0 },
+        ring: { aim: aim({ op: 'mute', track: 2 }), ref: { type: 'touch', id: 1 }, liftMm: 0 } } }] } };
+    const res = new HandRig.Driver(rigs, plan).pose(0);
+    const box = side => new T.Box3().setFromArray(rigs[side].skinned(rigs[side].PALM));
+    assert.ok(res.left.away && !res.right.away && res.right.ok, 'away: ' + fmt(res));
+    assert.ok(!box('left').intersectsBox(box('right')), 'away: the left palm is in the way of the right hand on MUTE 0 and 2');
+  }
+
+  // A contact held across two keyframes fitted apart (index and middle on
+  // pads, then index and thumb with the hand turned, as a copy turns it)
+  // is re-solved from the blended root: the index stays on its pad.
+  {
+    const aim = a => { const c = PANEL.control(a); return { u: c.u, v: c.v, topMm: c.topMm }; };
+    const on = (a, id) => ({ aim: aim(a), ref: { type: 'touch', id }, liftMm: 0 });
+    const index = on({ op: 'pad', track: 2, row: 0 }, 0);
+    const plan = { touches: [], turns: [], keys: [], assign: {}, events: [], hands: {
+      left: [{ t: 0, kind: 'away', fingers: {}, freeYaw: false }],
+      right: [{ t: 1000000, kind: 'contact', fingers: { index, middle: on({ op: 'pad', track: 3, row: 0 }, 1) }, freeYaw: true },
+        { t: 1100000, kind: 'contact', fingers: { index, thumb: on({ op: 'pad', track: 2, row: 3 }, 2) }, freeYaw: true }] } };
+    const driver = new HandRig.Driver(rigs, plan), target = top({ op: 'pad', track: 2, row: 0 });
+    for (let t = 1000000; t <= 1100000; t += 5000) {
+      const res = driver.pose(t), d = offMm('right', 'index', target);
+      assert.ok(res.right.ok && d <= 1, 'held across two fits at ' + t + ': the index is ' + fmt(d) + ' mm off');
+    }
+    assert.strictEqual(driver.failures, 0, 'held across two fits: failures');
+  }
+
+  // The window: the left hand holds step 0 while the right one taps steps 3
+  // and 15 in turn, 160 000 apart. With windowUs = 160000 (prep at about
+  // x5) the root is an average over the window: the right wrist moves less
+  // than 25 mm between samples 5 000 apart, and less than half as far as
+  // without the window.
+  {
+    const list = [];
+    press(list, 'step', { index: 0 }, 800000, 2500000);
+    for (let i = 0; i < 8; i++) press(list, 'step', { index: i % 2 ? 15 : 3 }, 1000000 + 160000 * i, 1030000 + 160000 * i);
+    const { plan, driver } = drive(sorted(list));
+    assert.ok(plan.touches.every(x => plan.assign['touch:' + x.id].hand === (x.key === 'step:0' ? 'left' : 'right')),
+      'window: the left hand holds, the right one taps');
+    const worst = windowUs => {
+      let prev = null, most = 0;
+      for (let t = 700000; t <= 2600000; t += 5000) {
+        driver.pose(t, { windowUs });
+        const w = wrist('right');
+        if (prev) most = Math.max(most, w.distanceTo(prev) / MM);
+        prev = w;
+      }
+      return most;
+    };
+    const exact = worst(0), smooth = worst(160000);
+    assert.ok(smooth < 25 && smooth < exact / 2, 'window: the wrist moves up to ' + fmt(smooth) + ' mm in 5 000 (' +
+      fmt(exact) + ' mm without the window)');
+  }
+
+  // peakSpeed catches an impossible move: the left hand holds step 0, the
+  // right one taps pad (0, 0) and then pad (7, 7), 193 mm away, 20 000
+  // after the first one's up.
+  {
+    const list = [];
+    press(list, 'step', { index: 0 }, 1000000, 1600000);
+    press(list, 'pad', { track: 0, row: 0 }, 1200000, 1210000);
+    press(list, 'pad', { track: 7, row: 7 }, 1230000, 1240000);
+    const { plan, driver } = drive(sorted(list));
+    assert.deepStrictEqual(['step:0', 'pad:0:0', 'pad:7:7'].map(key => who(plan, key).hand), ['left', 'right', 'right'],
+      'speed: the left hand holds, the right one plays both pads');
+    const v = HandRig.peakSpeed(driver, 1100000, 1300000, 5000);
+    assert.ok(v.right > 4, 'speed: peak ' + fmt(v) + ' m/s');
+  }
+
+  // 1 000 poses over song 0 (fw2, pads), 50 000 apart: under 2 s from an
+  // empty cache, under 0.5 s again with a new driver on the same show (the
+  // fits from the cache), and no failures.
+  {
+    const show = Artist.buildShow(undefined, { song: 0, fw2: true, pads: true });
+    const pass = () => {
+      const driver = new HandRig.Driver(rigs, HandPlan.build(show.actions)), t0 = process.hrtime.bigint();
+      for (let i = 0; i < 1000; i++) driver.pose(i * 50000);
+      return { ms: Number(process.hrtime.bigint() - t0) / 1e6, failures: driver.failures };
+    };
+    HandRig.Driver.cache.clear();
+    const cold = pass(), warm = pass();
+    if (process.env.HANDS_TIMING) console.log('drive: song 0, 1 000 poses: ' + fmt(cold.ms) + ' ms cold, ' + fmt(warm.ms) + ' ms warm; ' + HandRig.Driver.cache.size + ' fits cached');
+    assert.ok(cold.ms < 2000 && warm.ms < 500, 'song 0: 1 000 poses in ' + fmt(cold.ms) + ' ms, again in ' + fmt(warm.ms) + ' ms');
+    assert.ok(HandRig.Driver.cache.size > 0 && HandRig.Driver.cache.size <= 4000, 'song 0: ' + HandRig.Driver.cache.size + ' fits cached');
+    assert.deepStrictEqual([cold.failures, warm.failures], [0, 0], 'song 0: failures');
   }
 });
 
