@@ -558,6 +558,19 @@ static bool apply_track_queue_if_ready(uint8_t track) {
     return changed;
 }
 
+// The launch quantization's rule, one for queued pads and MUTE changes: BAR and BEAT
+// on a global step that is a multiple of 16 or 4, STEP on every step, TRACK LOOP when
+// the track has played the `track_len` steps of its row.
+static bool launch_point_due(uint8_t quant, uint32_t global_step, uint32_t track_steps,
+                             uint8_t track_len) {
+    switch (quant) {
+        case LAUNCH_QUANT_BAR:  return (global_step % 16u) == 0;
+        case LAUNCH_QUANT_BEAT: return (global_step % 4u) == 0;
+        case LAUNCH_QUANT_STEP: return true;
+        default:                return track_steps >= track_len;
+    }
+}
+
 // At a step boundary with a MUTE change waiting: writes the due targets into the live
 // mutes, before the pulse's live mutes and the song advance, so the rest of the pulse
 // treats them as a mute set just before it. Due is the queued pads' rule; Song mode
@@ -572,19 +585,16 @@ static uint8_t apply_due_mutes(transport_t *t) {
     uint32_t global_step_count = t->pulse_count / PULSES_PER_STEP;
     uint8_t due = 0;
     uint8_t loaded = 0;
-    switch (quant) {
-        case LAUNCH_QUANT_BAR:  if ((global_step_count % 16u) == 0) due = pending; break;
-        case LAUNCH_QUANT_BEAT: if ((global_step_count % 4u) == 0) due = pending; break;
-        case LAUNCH_QUANT_STEP: due = pending; break;
-        default:
-            for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
-                if (!(pending & (1u << tr))) continue;
-                load_prepared_track(tr);
-                loaded |= (uint8_t)(1u << tr);
-                uint8_t track_len = clamp_pattern_steps(prepared_playback.track[tr].length);
-                if (t->track_step_count[tr] >= track_len) due |= (uint8_t)(1u << tr);
-            }
-            break;
+    for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
+        if (!(pending & (1u << tr))) continue;
+        if (quant == LAUNCH_QUANT_TRACK_LOOP) {
+            load_prepared_track(tr);
+            loaded |= (uint8_t)(1u << tr);
+        }
+        uint8_t track_len = clamp_pattern_steps(prepared_playback.track[tr].length);
+        if (launch_point_due(quant, global_step_count, t->track_step_count[tr], track_len)) {
+            due |= (uint8_t)(1u << tr);
+        }
     }
     if (due) {
         uint32_t lock_state = seq_lock();
@@ -733,7 +743,7 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
 
     if ((t->pulse_count % (PPQN / MIDI_PPQN)) == 0) midi_send_clock();
 
-    // Pulse order 0: due MUTE changes. Phase 1 keeps the rows loaded for them.
+    // Pulse order 1a: due MUTE changes. Phase 1 keeps the rows loaded for them.
     uint8_t loaded_rows = 0;
     if (g_seq.mute_pending && (t->pulse_count % PULSES_PER_STEP) == 0) {
         loaded_rows = apply_due_mutes(t);
@@ -810,14 +820,8 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
             if (t->mode == PLAY_MODE_PATTERN &&
                 t->queued_pattern[tr] != NO_QUEUED_PATTERN) {
                 uint8_t quant = g_seq.launch_quant;
-                bool due;
-                switch (quant) {
-                    case LAUNCH_QUANT_BAR:  due = (global_step_count % 16u) == 0; break;
-                    case LAUNCH_QUANT_BEAT: due = (global_step_count % 4u) == 0; break;
-                    case LAUNCH_QUANT_STEP: due = true; break;
-                    default:                due = t->track_step_count[tr] >= track_len; break;
-                }
-                if (due) {
+                if (launch_point_due(quant, global_step_count, t->track_step_count[tr],
+                                     track_len)) {
                     if (apply_track_queue_if_ready((uint8_t)tr)) {
                         prepared = &prepared_playback;
                         track_len = clamp_pattern_steps(prepared->track[tr].length);
@@ -1133,8 +1137,11 @@ static void change_mutes(uint8_t mask, uint8_t target, mutes_op_t op) {
     uint32_t playback_irq_state = playback_lock();
     uint32_t lock_state = seq_lock();
     uint8_t muted = seq_track_mutes_locked();
+    // Tracks in `mask` left out of `change` only lose a waiting change: under a toggle
+    // the ones that had one, under a set the ones already in their target state.
     uint8_t change = mask;
-    if (op == MUTES_TOGGLE) change &= (uint8_t)~g_seq.mute_pending;  // waiting ones are cancelled only
+    if (op == MUTES_TOGGLE) change &= (uint8_t)~g_seq.mute_pending;
+    if (op == MUTES_SET) change &= (uint8_t)(target ^ muted);
     g_seq.mute_pending &= (uint8_t)~mask;
     uint8_t want = (uint8_t)((op == MUTES_SET ? target : (uint8_t)~muted) & change);
     uint8_t unmute = (uint8_t)(change & ~want);

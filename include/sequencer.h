@@ -305,8 +305,9 @@ bool transport_launch(uint8_t track_mask, uint8_t pattern_index);
 // A MUTE press: each track in `mask` with a waiting change loses it; each other track
 // in `mask` gets a change to the opposite of its state (seq_get_track_mutes()'s rule).
 void transport_toggle_mutes(uint8_t mask);
-// A group's release: each track in `mask` gets a change to its bit of `target`,
-// replacing a waiting one.
+// A group's release: each track in `mask` loses its waiting change, and each one whose
+// bit of `target` differs from its state now gets a change to that bit. A track already
+// in its target state gets none: nothing waits, and its stored mutes stay.
 void transport_set_mutes(uint8_t mask, uint8_t target);
 // Cancels the waiting changes in `mask`. Returns the tracks that had one; when `target`
 // is not NULL, *target gets their target bits.

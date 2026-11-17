@@ -2665,6 +2665,16 @@ static void test_mute_now_under_next_step(void) {
     CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
 }
 
+static void test_set_mutes_now_when_stopped_or_next_step(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_set_mutes(0x06, 0x02);        // stopped: 1 muted, 2 stays audible
+    CHECK(g_seq.track_mutes == 0x02 && g_seq.mute_pending == 0);
+    start_under(LAUNCH_QUANT_STEP);
+    run_through_step(2);
+    transport_set_mutes(0x06, 0x04);        // NEXT STEP: 1 audible, 2 muted
+    CHECK(g_seq.track_mutes == 0x04 && g_seq.mute_pending == 0);
+}
+
 static void test_second_toggle_cancels(void) {
     start_under(LAUNCH_QUANT_BAR);
     run_through_step(5);
@@ -2673,6 +2683,16 @@ static void test_second_toggle_cancels(void) {
     CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
     run_through_step(16);
     CHECK(g_seq.track_mutes == 0);
+}
+
+static void test_toggle_mixes_cancel_and_new_change(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(0x01);           // 0 waits
+    transport_toggle_mutes(0x03);           // 0 cancelled, 1 waits
+    CHECK(g_seq.mute_pending == 0x02 && g_seq.track_mutes == 0);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0x02 && g_seq.mute_pending == 0);
 }
 
 static void test_toggle_after_landing_is_a_new_change(void) {
@@ -2703,19 +2723,55 @@ static void test_set_mutes_writes_targets(void) {
     seq_set_track_mute(2, true);
     start_under(LAUNCH_QUANT_BAR);
     run_through_step(5);
-    transport_set_mutes(0x0C, 0x04);        // 2 stays muted, 3 stays audible
-    CHECK(g_seq.mute_pending == 0x0C && g_seq.track_mutes == 0x04);
+    transport_set_mutes(0x0C, 0x04);        // 2 stays muted, 3 stays audible: nothing waits
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0x04);
     run_through_step(16);
     CHECK(g_seq.track_mutes == 0x04 && g_seq.mute_pending == 0);
     transport_set_mutes(0x08, 0x08);
     CHECK(g_seq.mute_pending == 0x08 && g_seq.track_mutes == 0x04);
     run_through_step(32);
     CHECK(g_seq.track_mutes == 0x0C && g_seq.mute_pending == 0);
-    transport_set_mutes(0x08, 0x08);        // waits, to muted
-    transport_set_mutes(0x08, 0x00);        // replaces the target
-    CHECK(g_seq.mute_pending == 0x08);
+    transport_toggle_mutes(0x10);           // 4 waits, to muted
+    transport_set_mutes(0x18, 0x10);        // replaces 4's change; 3 to audible
+    CHECK(g_seq.mute_pending == 0x18 && (g_seq.mute_target & 0x18) == 0x10);
     run_through_step(48);
-    CHECK(g_seq.track_mutes == 0x04 && g_seq.mute_pending == 0);
+    CHECK(g_seq.track_mutes == 0x14 && g_seq.mute_pending == 0);
+}
+
+// Track 2 live-muted, track 3 muted by its stored mute where it plays: set to muted,
+// neither waits nor changes, and the stored mute stays.
+static void test_set_mutes_skips_muted_tracks_set_to_muted(void) {
+    seq_set_track_mute(2, true);
+    g_seq.patterns[0].tracks[3].muted = true;
+    sequencer_refresh_track_playback(3, 0);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_set_mutes(0x0C, 0x0C);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0x04);
+    CHECK(muted_locations(3) == 1 && g_seq.patterns[0].tracks[3].muted);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0x04 && g_seq.patterns[0].tracks[3].muted);
+}
+
+// Track 5 audible, with a stored mute at location 7, which it does not play.
+static void test_set_mutes_skips_audible_track_set_to_audible(void) {
+    g_seq.patterns[7].tracks[5].muted = true;
+    sequencer_refresh_track_playback(5, 7);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_set_mutes(1u << 5, 0);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    CHECK(muted_locations(5) == 1 && g_seq.patterns[7].tracks[5].muted);
+}
+
+static void test_set_mutes_to_state_now_cancels_waiting_change(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1u << 4);        // waits, to muted
+    transport_set_mutes(1u << 4, 0);        // audible, as it is now
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
 }
 
 static void test_cancel_mutes_returns_waiting_and_targets(void) {
@@ -2747,6 +2803,14 @@ static void test_toggle_mutes_now_cancels_and_toggles(void) {
     CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
     run_through_step(16);
     CHECK(g_seq.track_mutes == 0);
+}
+
+static void test_toggle_mutes_now_when_stopped(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_toggle_mutes_now(1u << 6);
+    CHECK(g_seq.track_mutes == 1u << 6 && g_seq.mute_pending == 0);
+    transport_toggle_mutes_now(1u << 6);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
 }
 
 // Each call on track 0 (stored-muted where it plays, nothing waiting) leaves the other
@@ -3129,12 +3193,18 @@ int main(void) {
     RUN(test_mute_and_pad_decide_on_one_row);
     RUN(test_mute_now_when_stopped);
     RUN(test_mute_now_under_next_step);
+    RUN(test_set_mutes_now_when_stopped_or_next_step);
     RUN(test_second_toggle_cancels);
+    RUN(test_toggle_mixes_cancel_and_new_change);
     RUN(test_toggle_after_landing_is_a_new_change);
     RUN(test_toggles_in_one_call_land_on_one_pulse);
     RUN(test_set_mutes_writes_targets);
+    RUN(test_set_mutes_skips_muted_tracks_set_to_muted);
+    RUN(test_set_mutes_skips_audible_track_set_to_audible);
+    RUN(test_set_mutes_to_state_now_cancels_waiting_change);
     RUN(test_cancel_mutes_returns_waiting_and_targets);
     RUN(test_toggle_mutes_now_cancels_and_toggles);
+    RUN(test_toggle_mutes_now_when_stopped);
     RUN(test_mute_calls_leave_other_tracks);
     RUN(test_waiting_mute_follows_quant_change);
     RUN(test_press_after_boundary_waits_for_next);

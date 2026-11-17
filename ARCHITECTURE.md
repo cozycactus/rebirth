@@ -76,11 +76,13 @@ lane order.
   play at once, also in Song mode and with mixed launches. `seq_set_track_config()`
   refuses a third kit before it changes anything and the save validator enforces
   the same rule.
-- **Pulse order.** Each pulse: 1 MIDI Clock; 2 live mutes (a muted kit releases
-  its sounding voices and cancels a pending flam); 3 note-off countdowns;
-  4 flam countdowns (the second hits); 5 on a step boundary, the step. Between 1
-  and 2 comes 0: on a step boundary, the due MUTE changes (Playback Rules), so
-  the live mutes of that pulse include them. Kit
+- **Pulse order.** Each pulse: 1 MIDI Clock; 1a on a step boundary, the due MUTE
+  changes (Playback Rules), so the live mutes of that pulse include them; 2 live
+  mutes (a muted kit releases its sounding voices and cancels a pending flam);
+  3 note-off countdowns; 4 flam countdowns (the second hits); 5 on a step
+  boundary, the step. Under `TRACK LOOP` with a change waiting, the track's row
+  is loaded in 1a, so a kind-change release (and the flam it cancels) can come
+  before that pulse's note-off and flam countdowns. Kit
   messages of 2-4 go out through their own send call, never through `midi_buf`,
   which step 5 clears. With the gate at 100 % the countdown ends in step 3 of the
   pulse that begins the next step, before its Note Ons.
@@ -156,9 +158,11 @@ lane order.
   location, so it is undone with one press.
 - A MUTE change gives a track a target live mute: `transport_toggle_mutes()`
   (a press) the opposite of its state by the rule above, `transport_set_mutes()`
-  the bit it is given. It applies at once while the transport is not playing or
-  under `STEP`; `transport_toggle_mutes_now()` cancels and toggles at once in
-  every case. Otherwise it waits (`mute_pending`, its target in `mute_target`;
+  the bit it is given; a track already in that state gets none and only loses a
+  waiting change, so nothing waits and its stored mutes stay. A change applies
+  at once while the transport is not playing or under `STEP`;
+  `transport_toggle_mutes_now()` cancels and toggles at once in every case.
+  Otherwise it waits (`mute_pending`, its target in `mute_target`;
   neither is saved) for the next launch point: a global step that is a multiple
   of 16 (`BAR`) or 4 (`BEAT`), or under `TRACK LOOP` that track's loop end by the
   queued pads' rule, decided on the same row the pad uses at that boundary
