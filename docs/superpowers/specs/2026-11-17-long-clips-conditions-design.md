@@ -3,8 +3,9 @@
 Date: 2026-11-17. Status: the approach and four choices below were made by the
 project owner (relayed by the session that started this work): a 64-step
 ceiling with dense storage, kit steps kept for all eight tracks, a manual FILL
-from a sustain pedal on the MIDI input, and the pads of the Pattern view
-showing the whole clip. Everything marked "my call" is open to review in the
+from a sustain pedal on the MIDI input, and the pads showing the whole clip in
+the Pattern view and (decided later the same day) in both step editors.
+Everything marked "my call" is open to review in the
 pull request. Base: `master` at bcf6871. Revised the same day after two
 independent reviews of the written spec and plan (see "Review changes").
 
@@ -157,9 +158,11 @@ input.** Rejected: holding TRACK and pressing MUTE 8 (changes two controls), a
 long VALUE press while playing (loses the selector during playback and meets
 the TIE gesture on held steps).
 
-**Pads in the Pattern view.** Decided by the owner: **an overview of the clip**;
-clips launch from the Session view and with the SCENE buttons. Rejected:
-keeping the launch there with a page map on the OLED only.
+**Pads in the Pattern view and the step editors.** Decided by the owner: **an
+overview of the clip** in the Pattern view and in both step editors (note and
+kit), where a pad press picks the step to edit; clips launch from the Session
+view and with the SCENE buttons. Rejected: keeping the launch there with a page
+map on the OLED only; keeping launch and copy on the pads of the step editors.
 
 ## Data model
 
@@ -510,22 +513,25 @@ none, which would read as step 17.
 
 ### The pad overview
 
-In the Pattern view (the owner's choice) and both step editors (my proposal,
-**pending the owner**: the step editors are part of editing one clip, and there
-a pad press would pick the step; without it the pads keep launching and copying
-in the step editors as today), while the pad keyboard is not on, the pads show
-the clip:
+In the Pattern view and in both step editors (the owner's choice for both),
+while the pad keyboard is not on (no SYNTH step held), the pads show the clip:
 
 - pad (column `c`, row `r`, row 0 at the top) is step `r * 8 + c`; page `p` is
   rows `2p` and `2p + 1`;
 - beyond the length: off; an empty step: dim in the track's hue, dim white on the
   shown page; an active step: half in the hue, an accent full; the playhead:
-  white, full. On a kit cell the overview shows the lane the step LEDs show (the
-  remembered lane; the cursor lane in the kit editor): a note half, an accent or
-  flam full;
+  white, full. On a kit cell the overview shows what the step LEDs show (the
+  remembered lane; in the kit editor the cursor lane): a note half, an accent or
+  flam full; at the kit editor's COND stop, a step with a condition half. In a
+  step editor the edited step's pad blinks white in time with the step LED's
+  blink (my call: the pads then show which step the encoders edit);
 - a pad press within the length pins the track's page to the pad's page; in a
-  step editor it also selects that step for editing. A press beyond the length
-  does nothing. It never launches, queues or copies a clip, and is never a copy
+  step editor it also selects that step for editing, on any page, as a step
+  button does on the shown page: selecting another step puts VALUE back on
+  velocity, the kit editor keeps its cursor lane, and a press on the step
+  already edited changes nothing. A press beyond the length does nothing (the
+  note editor's step buttons still reach hidden steps on the shown page, as
+  today). It never launches, queues or copies a clip, and is never a copy
   source. Its release does nothing.
 
 Routing of a pad press, in order: the pad keyboard (a SYNTH step held, as today),
@@ -533,7 +539,10 @@ the overview (Pattern view and step editors), else launch or copy as today (the
 Session view, the selector, track config, song edit). So the copy by pad hold,
 which today works on every screen, no longer works in the Pattern view and the
 step editors (part of the owner's choice for the pads there). SCENE, MUTE and
-PLAY are unchanged everywhere.
+PLAY are unchanged everywhere. The artist's scores (see "Simulator and CI")
+press pads to launch, copy and focus only in the Session view and as keys with
+a SYNTH step held in the Pattern view, and never open a step editor, so this
+routing changes none of their presses.
 
 ### Length
 
@@ -569,7 +578,9 @@ Doubling overwrites steps hidden beyond the length; adding one step does not
   switches VALUE between velocity and condition; today that press only selects
   the same step. It is a tap when, at its press, the button was the edited
   step, and it is released before the long press with no encoder turned or
-  pressed and no key (MIDI or pad) played meanwhile. Holding that button still
+  pressed, no key (MIDI or pad) played and no overview pad pressed meanwhile
+  (on a DRUM track the pads stay the overview while the button is held, and a
+  pad that picked another step must not toggle its mode). Holding that button still
   makes the pads a keyboard, and its long press still toggles the step. Opening
   the editor, leaving it and selecting another step put VALUE back on velocity.
   The screen shows the condition, and which of velocity and condition VALUE
@@ -590,7 +601,7 @@ What changes, against `src/ui.c` at bcf6871:
 | Pattern view, no hold | VALUE short | nothing | page cycle | free gesture |
 | Pattern view, steps held | VALUE short | nothing (cancels the taps) | velocity ↔ condition | free gesture |
 | Pattern view | pad (no keyboard) | launch, or copy with a pad held | overview: pin page; no launch, no copy | **owner-approved change** |
-| Note and kit step editors | pad (no keyboard) | launch, or copy with a pad held | overview: pick the step; no launch, no copy | **change pending the owner** |
+| Note and kit step editors | pad (no keyboard) | launch, or copy with a pad held | overview: pick the step, pin page; no launch, no copy | **owner-approved change** |
 | Note step editor | tap on the edited step | selects it again | velocity ↔ condition | no-op becomes an action |
 | Kit step editor | TRACK past RC | clamped at RC | COND stop | new stop |
 | Pattern selector | 14, 15, 16 | nothing | halve, double, FILL mode | free buttons |
@@ -740,6 +751,9 @@ not in git: the pull request lists the manual's changes for the owner).
   - a lead clip doubled 16 → 32 with button 15, then page 2 opened with VALUE
     short and steps 17-32 edited;
   - a pad press in the overview that opens page 2 of another clip;
+  - the note step editor opened with a TRACK press on the doubled clip, a pad
+    press that picks step 20 on page 2, and its note set there (the scores
+    open a step editor nowhere else);
   - conditions: closing hats with FILL on the last two steps of the clip, a lead
     step on 1:2, a crash on 1ST;
   - the pedal pressed for one bar during the set (CC64 on the MIDI input, as the
@@ -846,6 +860,13 @@ above:
   merging the format change.
 - EVERY N stays in the song's phase from Start, now stated and tested with a
   clip launched out of phase.
+
+The owner then approved the overview in both step editors as well, which
+closed the last open gesture. With it came: a pad press there picks the step
+on any page and pins the page; the edited step blinks on its pad; an overview
+pad pressed during the note editor's tap cancels the tap; and the `long` score
+opens the note step editor once. The artist's existing scores press no pad in
+a step editor.
 
 ## Left to the builder
 

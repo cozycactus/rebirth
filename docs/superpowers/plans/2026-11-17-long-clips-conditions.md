@@ -348,27 +348,34 @@ numbers.
 keyboard" gains the routing order), `README.md`.
 
 **Interfaces:** `led_state_t` gains `bool overview; uint8_t ov_track, ov_length,
-ov_shown_page, ov_playhead; uint64_t ov_active, ov_strong;` (playhead 0xFF =
-none; `ov_strong` = an accent, or a kit accent or flam on the shown lane).
+ov_shown_page, ov_playhead, ov_edit; bool ov_edit_lit; uint64_t ov_active,
+ov_strong;` (playhead and `ov_edit` 0xFF = none; `ov_edit` is the edited step
+in a step editor, `ov_edit_lit` the step LEDs' blink phase `ui.led_anim_phase`;
+`ov_strong` = an accent, or a kit accent or flam on the shown lane; at the kit
+editor's COND stop `ov_active` holds the steps with a condition).
 `led_frame_build()` draws the overview when `overview && !keys`.
-`handle_pad_press()` routes: keyboard, then the overview (Pattern view, and the
-step editors if the owner approves the spec's pending row: no
-`find_copy_source()`, no `pad_seen`), then launch or copy. **Before starting,
-check the owner's answer on the step editors;** without approval the overview
-is the Pattern view only and the step-editor test below is dropped.
+`handle_pad_press()` routes: keyboard, then the overview (the Pattern view and
+both step editors, by the owner's decision: no `find_copy_source()`, no
+`pad_seen`), then launch or copy. In a step editor an overview press sets
+`ui.edit_step` to the absolute step and pins the page (Task 12 makes it also
+cancel the note editor's tap).
 
 - [ ] Tests (`test_led_frame`): pad (column 1, row 1) is step 10; beyond the
   length off (length 40: rows 5-7 off — Review Focus 4); empty steps dim hue,
   dim white on the shown page; active half; strong full; playhead white full; a
-  kit lane's values; `keys` wins over `overview`; SCENE, MUTE, PLAY and BEAT
-  unchanged.
+  kit lane's values; `ov_edit` white full with `ov_edit_lit`, its normal level
+  without; `keys` wins over `overview`; SCENE, MUTE, PLAY and BEAT unchanged.
 - [ ] Tests (`test_ui`): `overview_press_pins_page`;
-  `overview_press_in_step_editor_selects_step` (beyond the length nothing);
+  `overview_press_in_step_editor_selects_step` (note editor on step 3, pad of
+  step 20: `edit_step` 19, the track pinned to page 2, the OLED step `S20`;
+  beyond the length nothing; the same step again changes nothing);
+  `overview_press_in_kit_editor_selects_step` (the cursor lane kept);
   `overview_never_launches_or_copies` (a pad held 600 ms then another pad of the
-  track in the Pattern view: no queue, no copy, no `pad_seen`);
-  `keyboard_precedes_overview`; `copy_still_works_in_selector_and_track_config`;
+  track, in the Pattern view and in each step editor: no queue, no copy, no
+  `pad_seen`); `keyboard_precedes_overview` (in the Pattern view and in the note
+  editor with the edited SYNTH step held); `copy_still_works_in_selector_and_track_config`;
   `pads_still_launch_in_selector_and_session`.
-- [ ] Implement; run everything; commit `feat: the pads show the clip in the Pattern view`.
+- [ ] Implement; run everything; commit `feat: the pads show the clip in the Pattern view and the step editors`.
 
 ### Task 9: the simulator plays a long clip
 
@@ -382,7 +389,9 @@ score `long` (env `LONG=1`, with the `pads` score's options); artist option
 - [ ] In the `long` score: one song's LEAD row 3 clip is doubled to 32 with
   button 15, page 2 is opened with VALUE short and steps 17-32 are edited with
   held steps and pad keys; one overview pad press opens page 2 of another clip;
-  a pad-hold copy of the 32-step clip in the Session view.
+  the note step editor opened with a TRACK press on the 32-step clip, a pad
+  press picks step 20 and TRACK turns its note (the `Model` records it); a
+  pad-hold copy of the 32-step clip in the Session view.
 - [ ] `artist_check.js` (`long` only): `verifyPatterns` checks each clip up to
   its length; the 32-step clip's steps 17-32 are on the wire in the second bar
   of each of its passes; the copy matches its source in all 32 steps. The other
@@ -496,8 +505,10 @@ list moves to the list's first item on the first detent.
   `cond_layer_ends_with_the_hold`; `cond_on_several_held_steps`;
   `cond_turn_activates_step`; `track_still_turns_note_in_cond_layer`. Step
   editor: `tap_edited_step_switches_layer`; `tap_with_a_turn_does_not_switch`;
-  `tap_after_a_key_does_not_switch`; `tap_other_step_only_selects` (and resets
-  to velocity); `opening_and_leaving_reset_layer`; `hold_edited_step_is_keyboard`;
+  `tap_after_a_key_does_not_switch`; `tap_after_an_overview_pad_does_not_switch`
+  (DRUM track: hold the edited step, press the pad of step 20, release: step 20
+  is edited, on velocity); `tap_other_step_only_selects` (and resets to
+  velocity; so does an overview pad of another step); `opening_and_leaving_reset_layer`; `hold_edited_step_is_keyboard`;
   `long_press_edited_step_toggles`. Kit editor: `kit_cursor_reaches_cond_stop`
   (after RC; VALUE sets bits 24-31 of the step's kit word and leaves
   `step_t.cond` alone; LEDs show the page's conditioned steps). `session_long_press_unchanged`; the screens show `COND 1:4` and which
