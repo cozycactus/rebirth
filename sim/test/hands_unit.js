@@ -162,7 +162,7 @@ section('rig', () => {
   const HAND_MODEL = require(path.join(web, 'handmodel.js'));
   const { PANEL } = require(path.join(web, 'handplan.js'));
   const T = globalThis.THREE;
-  const FINGERS = ['thumb', 'index', 'middle', 'ring', 'little'];
+  const FINGERS = ['thumb', 'index', 'middle', 'ring', 'pinky'];
   const pads = {};
   for (const side of ['right', 'left']) {
     const rig = HandRig.create(side, { unitScale: true });
@@ -195,6 +195,7 @@ section('rig', () => {
     assert.ok(spread > 0.005, side + ': a 10° index spread moves its pad ' + spread * 1000 + ' mm toward the thumb');
     rig.setCurls({}, {});
     assert.ok(rig.pad('index').distanceTo(pad) < 1e-9, side + ': zero curls give the rest pose back');
+    assert.throws(() => rig.setCurls({ little: [0, 10, 0, 0] }), /little/, side + ': the fifth finger is pinky');
 
     const { CLEARANCE, PALM } = rig;
     const n = HAND_MODEL[side].mesh.count;
@@ -203,7 +204,48 @@ section('rig', () => {
     assert.ok(CLEARANCE.every(v => Number.isInteger(v) && v >= 0 && v < n), side + ': CLEARANCE indices');
     assert.ok(PALM.length >= 20 && PALM.length < CLEARANCE.length && PALM.every(v => CLEARANCE.includes(v)),
       side + ': PALM is a part of CLEARANCE');
-    const bind = decode(HAND_MODEL[side].mesh.position, Float32Array);
+
+    // The groups partition CLEARANCE by what moves a vertex: a finger's
+    // bones (all of the thumb's; the others' from the proximal on) when they
+    // carry at least half its weight, else the palm.
+    const G = rig.FINGER_CLEARANCE, model = HAND_MODEL[side];
+    assert.deepStrictEqual(Object.keys(G).sort(), FINGERS.concat('palm').sort(), side + ': FINGER_CLEARANCE groups');
+    assert.deepStrictEqual(G.palm, PALM, side + ': the palm group is PALM');
+    const grouped = Object.values(G).flat();
+    assert.deepStrictEqual(grouped.slice().sort((a, b) => a - b), CLEARANCE.slice().sort((a, b) => a - b),
+      side + ': the groups cover CLEARANCE, each vertex once');
+    const owner = model.joints.map(i => {
+      const name = model.bones[i].name.slice(0, -2);
+      const f = FINGERS.find(g => name.startsWith((g === 'pinky' ? 'Little' : g[0].toUpperCase() + g.slice(1)) + '_'));
+      return f && (f === 'thumb' || !name.endsWith('_Metacarpal')) ? f : 'palm';
+    });
+    const SI = decode(model.mesh.skinIndex, Uint16Array), SW = decode(model.mesh.skinWeight, Float32Array);
+    const weightOn = (v, f) => [0, 1, 2, 3].reduce((w, k) => w + (owner[SI[4 * v + k]] === f ? SW[4 * v + k] : 0), 0);
+    for (const f of FINGERS) {
+      assert.ok(G[f].length > 0 && G[f].every(v => weightOn(v, f) >= 0.5), side + ': the ' + f + ' group is on the ' + f);
+    }
+    assert.ok(PALM.every(v => FINGERS.every(f => weightOn(v, f) < 0.5)), side + ': the palm group is on no finger');
+
+    // In a fist each curled finger's lowest point is sampled: the deepest of
+    // all its vertices is at most 3 mm deeper than the deepest of its group,
+    // with the palm level and pitched 20° toward the fingertips.
+    const FIST = [0, 80, 90, 60];
+    rig.setCurls({ index: FIST, middle: FIST, ring: FIST, pinky: FIST });
+    const every = Array.from({ length: n }, (_, v) => v), fist = rig.skinned(every);
+    for (const pitch of [0, 20]) {
+      const down = palmar.clone().multiplyScalar(Math.cos(pitch * Math.PI / 180))
+        .addScaledVector(fingers, Math.sin(pitch * Math.PI / 180));
+      const depth = v => fist[3 * v] * down.x + fist[3 * v + 1] * down.y + fist[3 * v + 2] * down.z;
+      for (const f of FINGERS.slice(1)) {
+        const deepest = Math.max(...every.filter(v => weightOn(v, f) >= 0.5).map(depth));
+        const gap = deepest - Math.max(...G[f].map(depth));
+        assert.ok(gap <= 0.003, side + ': fist, pitch ' + pitch + '°: the ' + f + ' reaches ' + gap * 1000 +
+          ' mm below its clearance vertices');
+      }
+    }
+    rig.setCurls({}, {});
+
+    const bind = decode(model.mesh.position, Float32Array);
     const rest = rig.skinned(CLEARANCE);
     assert.ok(rest instanceof Float32Array && rest.length === 3 * CLEARANCE.length, side + ': skinned() shape');
     CLEARANCE.forEach((v, k) => {
@@ -213,7 +255,7 @@ section('rig', () => {
     });
 
     // Posed and placed, the CPU skin matches three's own bone transform.
-    rig.setCurls({ thumb: [10, 20, 30], index: [5, 40, 30, 20], little: [0, 80, 90, 60] }, { index: -8, thumb: 12 });
+    rig.setCurls({ thumb: [10, 20, 30], index: [5, 40, 30, 20], pinky: [0, 80, 90, 60] }, { index: -8, thumb: 12 });
     rig.setRoot(new T.Vector3(0.1, -0.2, 0.3), new T.Quaternion().setFromEuler(new T.Euler(0.3, -0.5, 1.1)));
     const posed = rig.skinned(CLEARANCE), v3 = new T.Vector3();
     CLEARANCE.forEach((v, k) => {

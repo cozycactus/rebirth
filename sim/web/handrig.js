@@ -10,7 +10,8 @@
 // - a positive spread (about local X) moves the fingertip toward the thumb's
 //   side of the hand, so equal numbers give mirror-image poses.
 // The pose is rest · Rz(curl) · Rx(spread): the spread swings a bone across
-// the finger whatever its curl.
+// the finger whatever its curl. Fingers are thumb, index, middle, ring and
+// pinky (the model's Little_* bones).
 //
 // Lengths: the model is in metres. setRoot() scales it to page units (× 0.92,
 // an 18.7 cm hand) unless opts.unitScale, which the tests use.
@@ -18,17 +19,15 @@
   'use strict';
   const D2R = Math.PI / 180;
   const HAND_SCALE = 0.92;
-  const FINGERS = ['thumb', 'index', 'middle', 'ring', 'little'];
-  const NAME = { thumb: 'Thumb', index: 'Index', middle: 'Middle', ring: 'Ring', little: 'Little' };
+  const FINGERS = ['thumb', 'index', 'middle', 'ring', 'pinky'];
+  const NAME = { thumb: 'Thumb', index: 'Index', middle: 'Middle', ring: 'Ring', pinky: 'Little' };
   // The bones a pose moves, in the order of curls[finger].
   const CHAIN = {
     thumb: ['Metacarpal', 'Proximal', 'Distal'],
     index: ['Metacarpal', 'Proximal', 'Intermediate', 'Distal'],
   };
-  CHAIN.middle = CHAIN.ring = CHAIN.little = CHAIN.index;
-  const SPREAD_AT = { thumb: 0, index: 1, middle: 1, ring: 1, little: 1 };   // in CHAIN
-  const PALM_JOINTS = ['Wrist', 'Thumb_Metacarpal', 'Index_Metacarpal', 'Middle_Metacarpal', 'Ring_Metacarpal',
-    'Little_Metacarpal'];
+  CHAIN.middle = CHAIN.ring = CHAIN.pinky = CHAIN.index;
+  const SPREAD_AT = { thumb: 0, index: 1, middle: 1, ring: 1, pinky: 1 };   // in CHAIN
   const bone = (f, k) => NAME[f] + '_' + CHAIN[f][k];
   const tipOf = f => NAME[f] + '_Tip';
 
@@ -167,18 +166,17 @@
       return best;
     };
 
-    // The clearance vertices: per joint the nearest palmar vertex (Palm is a
-    // helper point outside the skin, not a joint), a 5 × 4 grid over the palm
-    // from the metacarpals' bases toward the knuckles, and the five pads.
-    const clearance = new Set(), palm = new Set();
-    const add = (v, inPalm) => {
-      if (v < 0) return;
-      clearance.add(v);
-      if (inPalm) palm.add(v);
-    };
+    // The clearance vertices: per joint the nearest palmar and the nearest
+    // dorsal vertex (a curled finger reaches down with the back of its
+    // joints; Palm is a helper point outside the skin, not a joint), a 5 × 4
+    // grid over the palm from the metacarpals' bases toward the knuckles, and
+    // the five pads.
+    const clearance = new Set();
+    const add = v => { if (v >= 0) clearance.add(v); };
     for (const name in byName) {
       if (name === 'Palm') continue;
-      add(under(at(name), axis(name, 0).multiplyScalar(palmarX)), PALM_JOINTS.includes(name));
+      add(under(at(name), axis(name, 0).multiplyScalar(palmarX)));
+      add(under(at(name), axis(name, 0).multiplyScalar(-palmarX)));
     }
     const base = [at('Index_Metacarpal'), at('Little_Metacarpal')];
     const knuckle = [at('Index_Proximal'), at('Little_Proximal')];
@@ -187,11 +185,32 @@
         const along = (b + 1) / 5;
         const p = new T.Vector3().lerpVectors(base[0], knuckle[0], along)
           .lerp(new T.Vector3().lerpVectors(base[1], knuckle[1], along), a / 4);
-        add(under(p, palmar), true);
+        add(under(p, palmar));
       }
     }
-    for (const f of FINGERS) add(padOf[f], false);
-    const CLEARANCE = Array.from(clearance), PALM = Array.from(palm);
+    for (const f of FINGERS) add(padOf[f]);
+    const CLEARANCE = Array.from(clearance);
+
+    // The clearance vertices by what moves them: a finger's when at least
+    // half their weight is on its bones (all of the thumb's; the others' from
+    // the proximal on, as their metacarpals hardly move), else the palm's,
+    // which only moving the root can lift.
+    const ownerOfJoint = model.joints.map(i => {
+      const name = bones[i].name.slice(0, -suffix.length);
+      const f = FINGERS.find(g => name.startsWith(NAME[g] + '_'));
+      return f && (f === 'thumb' || !name.endsWith('_Metacarpal')) ? f : 'palm';
+    });
+    const FINGER_CLEARANCE = { palm: [] };
+    for (const f of FINGERS) FINGER_CLEARANCE[f] = [];
+    for (const v of CLEARANCE) {
+      const w = {};
+      for (let k = 0; k < 4; k++) {
+        const o = ownerOfJoint[SI[4 * v + k]];
+        w[o] = (w[o] || 0) + SW[4 * v + k];
+      }
+      FINGER_CLEARANCE[FINGERS.find(f => w[f] >= 0.5) || 'palm'].push(v);
+    }
+    const PALM = FINGER_CLEARANCE.palm;
 
     // ── Posing ──
     const qa = new T.Quaternion();
@@ -202,6 +221,8 @@
     function setCurls(curls, spread) {
       curls = curls || {};
       spread = spread || {};
+      for (const f in curls) if (!CHAIN[f]) throw new Error('HandRig: no finger ' + f);
+      for (const f in spread) if (!CHAIN[f]) throw new Error('HandRig: no finger ' + f);
       for (const f of FINGERS) {
         const c = curls[f] || [];
         for (let k = 0; k < CHAIN[f].length; k++) {
@@ -256,7 +277,8 @@
     }
 
     setRoot(new T.Vector3(), new T.Quaternion());   // at the origin, in page units
-    return { side, root: group, mesh, bone: boneOf, setCurls, setRoot, pad, skinned, CLEARANCE, PALM };
+    return { side, root: group, mesh, bone: boneOf, setCurls, setRoot, pad, skinned, CLEARANCE, PALM,
+      FINGER_CLEARANCE };
   }
 
   const api = { create };
