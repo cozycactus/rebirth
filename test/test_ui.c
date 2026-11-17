@@ -4052,6 +4052,13 @@ static void test_midi_one_update_takes_48_bytes(void) {
     unsigned all = 0;
     for (unsigned i = 0; i < 20; i++) all += sent(KEY_ON, (uint8_t)(40 + i));
     CHECK(all == 20);
+    // Exactly 48: of 60 bytes, 12 are still in the ring after one update.
+    midi_arrives(bytes, sizeof(bytes));
+    ui_update();
+    unsigned left = 0;
+    uint8_t byte;
+    while (midi_in_read(&byte)) left++;
+    CHECK(left == 12);
 }
 
 static void test_midi_control_change_and_clock_bytes_change_nothing(void) {

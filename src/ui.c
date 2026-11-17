@@ -406,6 +406,11 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
     if (ui.panic_latched) {
         if (!encoder_button_held(0) && !encoder_button_held(1)) {
             ui.panic_latched = false;
+            // A byte received since this pass emptied the ring must not start
+            // a message that bytes after the panic would complete.
+            midi_in_flush();
+            midi_in_parser_reset(&ui.midi_parser);
+            ui.midi_dropped_seen = midi_in_dropped();
             // A pad, PLAY or step pressed during the panic and still in its
             // debounce time must not fire once commands are accepted again.
             panel_input_resync();
