@@ -275,7 +275,7 @@ targets (see "Poses and fitting").
   knob, 12 mm above the plate (the knob is 14.5 mm tall), the hand free to
   roll up to 20° thumb side up; the grip at a twist is the grip at twist 0
   turned about the knob's axis. The hand's twist follows the knob angle (15° a detent, as
-  `app.js` draws the knob) within a window of ±35°; inside a fast burst the
+  `app.js` draws the knob) within a window of ±20° (the grip at twist 0 is centred on the arm's direction, so the forearm never swings far); inside a fast burst the
   fingers slide on the knob and the twist eases back toward the middle of
   the window; a full lift and regrip happens only in a pause of 100 ms or
   more between bursts. Encoder press: the index contact point on the knob
