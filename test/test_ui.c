@@ -1335,6 +1335,16 @@ static void test_last_note_comes_from_the_lowest_held_step(void) {
     CHECK(STEP(0, 9).note == 73);
     CHECK(ui.last_note[0] == 53);
     step_up((1u << 2) | (1u << 9));
+    // The lowest target counts also when clamping left it unchanged.
+    reset();
+    pattern_set_step(&g_seq.patterns[0], 0, 2, 0, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[0], 0, 9, 50, 100, STEP_FLAG_ACTIVE);
+    enter_pattern_view();
+    step_down((1u << 2) | (1u << 9));
+    turn(0, -1);
+    CHECK(STEP(0, 9).note == 49);
+    CHECK(ui.last_note[0] == 0);
+    step_up((1u << 2) | (1u << 9));
 }
 
 static void test_last_note_zero_is_a_note(void) {
@@ -1544,6 +1554,35 @@ static void test_copy_ignores_a_hold_from_before_a_recovery(void) {
     hold_pad(0, 2);
     CHECK(!clip_equals(0, 2, 0));
     CHECK(transport_now().current[0] == 2);
+}
+
+// A load that fails returns before the inputs are resynced, so the panel
+// layer's generation does not change: the UI itself must forget the hold.
+static void test_copy_forgets_a_hold_after_a_failed_load(void) {
+    memset(fake_flash, 0, sizeof(fake_flash));
+    fill_source_clip(0);
+    hold_pad(0, 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    uint32_t generation = panel_generation;
+    ui.mode = UI_PATTERN_SELECT;
+    step_down(1u << 9);                                 // step 10: load
+    step_up(1u << 9);
+    CHECK(panel_generation == generation);
+    CHECK(pads_down[0][0]);
+    hold_pad(0, 2);
+    CHECK(!clip_equals(0, 2, 0));
+    CHECK(transport_now().current[0] == 2);
+}
+
+static void test_copy_forgets_a_hold_after_a_panic(void) {
+    fill_source_clip(0);
+    hold_pad(0, 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    drop_pad_holds();                                   // what the panic and save/load paths call
+    panel_generation = ui.pad_generation[0][0];         // even with the panel layer unchanged
+    pads_down[0][0] = true;
+    hold_pad(0, 2);
+    CHECK(!clip_equals(0, 2, 0));
 }
 
 static void test_copy_ignores_a_pad_reported_down_without_a_press(void) {
@@ -1865,6 +1904,17 @@ static void test_roll_slide_runs_from_the_lower_to_the_higher_column(void) {
     roll_draw(NO_QUEUED_PATTERN, 1);        // window 35..60
     CHECK(rect_is(24, 3, 126, 3, true));
     CHECK(rect_is(127, 3, 127, 3, false));
+}
+
+// Two notes below the window are both the bar at column 24: a slide between
+// them is that one column, not a block's width.
+static void test_roll_slide_between_two_edge_bars_stays_on_the_bar(void) {
+    roll_note(0, 20, STEP_FLAG_SLIDE);
+    roll_note(1, 25, 0);
+    roll_note(2, 90, 0);                    // held: window 65..90
+    roll_draw(NO_QUEUED_PATTERN, 2);
+    CHECK(rect_is(24, 3, 24, 3, true));
+    CHECK(rect_is(25, 3, 127, 3, false));
 }
 
 static void test_roll_slide_needs_a_next_step_that_is_on_and_inside_the_length(void) {
@@ -3555,6 +3605,7 @@ int main(int argc, char **argv) {
     RUN(test_roll_notes_0_and_127_alone_sit_at_the_window_ends);
     RUN(test_roll_held_note_stays_in_the_window);
     RUN(test_roll_slide_runs_from_the_lower_to_the_higher_column);
+    RUN(test_roll_slide_between_two_edge_bars_stays_on_the_bar);
     RUN(test_roll_slide_needs_a_next_step_that_is_on_and_inside_the_length);
     RUN(test_roll_slide_from_40_to_100_writes_nothing_outside_the_roll);
     RUN(test_roll_tie_is_one_pixel_with_or_without_accent);
@@ -3601,6 +3652,8 @@ int main(int argc, char **argv) {
     RUN(test_copy_ignores_a_pad_of_another_track);
     RUN(test_copy_needs_the_panel_to_report_the_source_down);
     RUN(test_copy_ignores_a_hold_from_before_a_recovery);
+    RUN(test_copy_forgets_a_hold_after_a_failed_load);
+    RUN(test_copy_forgets_a_hold_after_a_panic);
     RUN(test_copy_ignores_a_pad_reported_down_without_a_press);
     RUN(test_copy_takes_the_longest_held_source);
     RUN(test_copy_source_stays_put_when_the_bank_changes);

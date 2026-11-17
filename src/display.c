@@ -416,9 +416,14 @@ static void draw_piano_roll(const pattern_t *p, uint8_t track, uint8_t play_step
 
         // Row y+3 belongs to the slide and the tie.
         if ((st->flags & STEP_FLAG_SLIDE) && roll_step_on(p, track, s + 1, length)) {
-            int xn = roll_column(p->steps[track][s + 1].note, base);
+            uint8_t next = p->steps[track][s + 1].note;
+            int xn = roll_column(next, base);
+            bool next_inside = next >= base && next < base + ROLL_SEMITONES;
             int from = x < xn ? x : xn;
-            int to = (x > xn ? x : xn) + 2;
+            int to = x > xn ? x : xn;
+            // The line ends on the last column of the far block; an edge bar
+            // is one column wide, so the line stops on it.
+            if (x > xn ? inside : next_inside) to += 2;
             roll_hline(from, to, y + 3);
         }
         if (st->flags & STEP_FLAG_TIE) roll_set(x + 1, y + 3, true);

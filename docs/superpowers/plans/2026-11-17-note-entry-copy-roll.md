@@ -148,9 +148,11 @@ Tests (`test_ui`, by pixel):
 - two notes 25 semitones apart both sit inside the window; 26 apart, the
   higher one is the bar at column 127;
 - notes 0 and 127 alone: block in window column 0 and column 25;
-- notes 40 and 90 with the step on 60 held: the held note is inside the
-  window and both others are edge bars; a held step beyond the length does
-  not move the window;
+- notes 30 and 90 with the step on 60 held: the held note is inside the
+  window and both others are edge bars; with 40 instead of 30 the window
+  starts at 40 (the formula keeps `lo` when the held note already fits), so
+  40 is a block in the first column; a held step beyond the length does not
+  move the window;
 - slide draws its row from the lower to the higher column, also to an edge
   bar, and nothing when the next step is off or beyond the length; no pixel
   is written outside `24..127` for a slide from note 40 to note 100;

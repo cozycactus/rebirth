@@ -139,6 +139,12 @@ static void drop_step_gestures(void) {
     }
 }
 
+// Forgets every pad hold: after a panic and after a save or load, whatever
+// its result, a copy source has to be pressed again.
+static void drop_pad_holds(void) {
+    memset(ui.pad_seen, 0, sizeof(ui.pad_seen));
+}
+
 // Toggles one step. A SYNTH step that is switched on with no stored note
 // takes the track's last note: seeded after pattern_toggle_step(), which
 // writes C4 over a note of 0, so a last note of 0 survives.
@@ -240,6 +246,7 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
         sequencer_panic();
         // Panel keys held through the panic must not fire afterwards.
         panel_input_resync();
+        drop_pad_holds();
         ui.panic_latched = true;
         drop_step_gestures();
         ui.mode = UI_SESSION;
@@ -943,6 +950,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
         } else {
             show_notify(flash_storage_save() ? "SAVED OK" : "SAVE FAILED");
             drop_step_gestures();   // steps held through the stall do nothing
+            drop_pad_holds();
         }
     }
 
@@ -953,6 +961,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
         } else {
             show_notify(flash_storage_load() ? "LOADED OK" : "LOAD FAILED");
             drop_step_gestures();
+            drop_pad_holds();       // also when nothing was loaded
         }
     }
 

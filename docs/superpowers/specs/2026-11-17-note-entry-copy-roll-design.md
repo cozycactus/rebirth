@@ -85,6 +85,8 @@ from the moment the UI handled the source's press.
   copied to another bank (`COPY A1>B3`).
 - A step button already held when the copy happens stays bound to the cell it
   was pressed on (the existing rule); presses after the copy edit the target.
+  A step press that arrives in the same update as the copy is bound to the
+  target, as it is today for any pad press that moves the focus.
 - In the Session view the focus moves to the target cell, so the step buttons
   edit the copy at once. On other screens the focus stays.
 - The OLED shows `COPY A1>A3` for about a second (the existing notice).
@@ -128,7 +130,9 @@ bool panel_input_pad_down(uint8_t track, uint8_t row);
 uint32_t panel_input_generation(void);
 ```
 
-After a recovery, a panic or a save/load the source has to be pressed again.
+After a recovery, a panic or a save or load (whether or not it succeeded) the
+source has to be pressed again: the UI clears its `pad_seen` bits there itself,
+because a load that fails returns before the panel layer is resynced.
 Known limit: if the source is released in the same poll in which the target
 goes down, the press is an ordinary launch.
 
@@ -164,9 +168,10 @@ x 24..127 roll: 26 semitones x 4 px; 16 steps x 4 px, step 1 at the top
   columns `24 + 4n .. 24 + 4n + 3`; `x` below is the first of them, `y = 4s`.
 - A step that is on: a 3x3 block (`x..x+2`, `y..y+2`). With accent the block
   is 4 wide (`x..x+3`). Row `y+3` never belongs to a block.
-- Slide: a line in row `y+3` from column `min(x, xn)` to `max(x, xn) + 2`,
-  where `xn` is the block column of the next step, when the next step is on
-  and inside the length; otherwise nothing. Tie: the single pixel
+- Slide: a line in row `y+3` from column `min(x, xn)` to the last column of
+  the farther mark (`max(x, xn) + 2` for a block, `max(x, xn)` for an edge
+  bar), where `xn` is the column of the next step's note, when the next step
+  is on and inside the length; otherwise nothing. Tie: the single pixel
   `(x+1, y+3)`.
 - A note below the window is a bar at column 24, rows `y..y+2`; above it, at
   column 127. Slides to or from such a note end at that column.
