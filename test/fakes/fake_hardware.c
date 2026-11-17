@@ -21,6 +21,7 @@ unsigned fake_uart_budget = UINT_MAX;
 bool fake_uart_fifo_enabled = true;
 bool fake_uart_tx_irq;
 bool fake_uart_rx_irq;
+unsigned fake_uart_wait_midi_length;
 #define FAKE_UART_RX_CAPACITY 4096
 static uint8_t uart_rx[FAKE_UART_RX_CAPACITY];
 static unsigned uart_rx_head, uart_rx_tail;   // free-running
@@ -58,6 +59,7 @@ void fake_hardware_reset(void) {
     fake_uart_fifo_enabled = true;
     fake_uart_tx_irq = false;
     fake_uart_rx_irq = false;
+    fake_uart_wait_midi_length = 0;
     uart_rx_head = uart_rx_tail = 0;
     wire_time = false;
     wire_free_at = 0;
@@ -227,7 +229,11 @@ unsigned fake_midi_count(uint8_t status) {
     for (unsigned i = 0; i < decoded; i++) count += messages[i].status == status;
     return count;
 }
-void uart_tx_wait_blocking(void *uart) { (void)uart; uart_drained = true; }
+void uart_tx_wait_blocking(void *uart) {
+    (void)uart;
+    uart_drained = true;
+    fake_uart_wait_midi_length = fake_midi_length;
+}
 uint32_t save_and_disable_interrupts(void) { return 0; }
 void restore_interrupts(uint32_t state) { (void)state; }
 void multicore_lockout_start_blocking(void) {

@@ -95,6 +95,7 @@ add_executable(test_ui
     ${REBIRTH_SRC}/song.c
     ${REBIRTH_SRC}/shared_state.c
     ${REBIRTH_SRC}/midi_out.c
+    ${REBIRTH_SRC}/midi_in.c
     ${REBIRTH_SRC}/flash_storage.c
     ${REBIRTH_SRC}/display.c
     ${REBIRTH_SRC}/ssd1309.c

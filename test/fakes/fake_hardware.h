@@ -12,6 +12,7 @@ extern unsigned fake_uart_budget;       // bytes the UART takes before it report
 extern bool fake_uart_fifo_enabled;     // last value passed to uart_set_fifo_enabled;
                                         // uart_init() enables the FIFO, as the SDK does
 extern bool fake_uart_tx_irq;
+extern unsigned fake_uart_wait_midi_length; // fake_midi_length at the last uart_tx_wait_blocking()
 extern bool fake_uart_rx_irq;           // the receive interrupt enable, as the transmit one
 // Bytes received on the input, as the UART's data register would give them: a queue, not
 // the PL011's one-byte holding register. The interrupt handler is not run by a push.
