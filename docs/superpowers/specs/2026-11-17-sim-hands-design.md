@@ -176,10 +176,11 @@ output, CC0). `build-handmodel.py` records each source file's SHA-256 in
 
 Input: `show.actions` and the panel geometry (control centres and top
 heights in page units, from the same numbers `app.js` draws with). Output:
-per hand a timeline of keyed root poses (position, yaw, pitch) and, per
-finger, a timeline of states: free, approaching a target, in contact with a
-target, lifting. `handplan.js` decides which hand and finger, where and
-when; it does not compute joint angles.
+per hand a timeline of keyframes saying what each finger aims at and when
+(free, approaching a target, in contact with a target, lifting, pinching a
+knob). `handplan.js` decides which hand and finger, where and when; it does
+not compute joint angles or the hand's root, which the driver fits from the
+targets (see "Poses and fitting").
 
 1. **Intervals.** Each control's down is paired with its next up: one
    interval per press. `key`, `rig` and `say` actions are not touches.
@@ -188,9 +189,10 @@ when; it does not compute joint angles.
    played by several fingers of one hand when reachable (see 4). A group
    or an interval during which other touches begin and end is a hold; those
    other touches go to the other hand.
-3. **Encoder runs.** Edges of one encoder form a run; runs less than 110 ms
+3. **Encoder runs.** Edges of one encoder form a run; runs less than 150 ms
    apart are one turn (the grip is kept between the bursts of
-   `turnNumber`). A turn ends 20 ms after its last edge. A press of the same
+   `turnNumber`, which are 126 ms apart). A turn ends 20 ms after its last
+   edge. A press of the same
    encoder within 200 ms after a turn continues the same gesture: the pinch
    becomes a push by the index finger without the hand leaving.
 4. **Hands.**
@@ -220,11 +222,12 @@ when; it does not compute joint angles.
    `t`. It arrives over the control 15 mm up about 80 ms before; when the
    hand's previous contact ends sooner, the approach shortens, down to a
    direct move. After a release the finger lifts 15 mm. Hand travel uses
-   minimum-jerk interpolation; the plan records each hand's peak speed.
+   minimum-jerk interpolation.
 7. **Idle.** A hand whose next gesture is more than 1.5 s away (device
    time) leaves the frame (down past the panel's front edge) and comes back
    in time. Otherwise it moves toward its next control and waits lifted 30
-   mm above it, fingers relaxed.
+   mm above it, fingers relaxed. While a `key` note of the `keys` score
+   sounds, the hand that would otherwise edit stays where it is, lifted.
 
 ### Poses and fitting (`handrig.js`)
 
@@ -249,20 +252,22 @@ when; it does not compute joint angles.
   finger has three angles (spread at the knuckle, flex at the knuckle, flex
   at the middle joint with the last joint following at two thirds; for the
   thumb, two at its base and one shared by its other joints), solved by
-  damped least squares within joint limits (spread ±20°, flex 0–95°); an
-  outer loop moves the root (position, yaw, pitch) to minimise the
-  fingers' residuals. A target left more than 1 mm away is an error that
-  the check reports (no silent pose).
+  damped least squares within joint limits (spread ±20°, flex 0–95°)
+  together with the root's position, yaw and pitch, with a light pull
+  toward the seed pose so the solution stays natural. A target left more
+  than 1 mm away is an error that the check reports (no silent pose).
 - Clearance: about 60 vertices spread over the palm, knuckles and fingers
   are skinned each fitted frame; free fingers curl toward `fist` (the thumb
   toward `lift`) and, if that is not enough, the root rises, until no
-  such vertex is below the plate or below the top of the control under it.
+  such vertex is below the plate or inside a control (a box up to its top;
+  an encoder knob is a cylinder 20 mm across and 14.5 mm tall, so fingers
+  on its side are allowed).
 - Encoder turn: thumb and index pads on opposite sides of the knob, 8 mm
   above the plate. The hand's twist follows the knob angle (15° a detent, as
   `app.js` draws the knob) within a window of ±35°; inside a fast burst the
   fingers slide on the knob and the twist eases back toward the middle of
   the window; a full lift and regrip happens only in a pause of 100 ms or
-  more. Encoder press: the index pad on the knob top (14.5 mm).
+  more between bursts. Encoder press: the index pad on the knob top (14.5 mm).
 
 ### Drawing (`handlayer.js`)
 
@@ -311,7 +316,7 @@ show and checks, against a table of touches it builds itself from
    or the top of the control under it;
 5. the two hands' palm boxes do not overlap, and the left hand's wrist is
    left of the right's when both are over the panel;
-6. a hand's peak speed stays under 4 m/s.
+6. a hand's peak speed, measured on the driver's poses, stays under 4 m/s.
 
 The poses of identical situations are cached. The check prints its running
 time; if the whole run exceeds two minutes in CI, the exact fitting (3, 4)
@@ -363,7 +368,7 @@ and this revision fixes:
 
 - Encoder gestures: `turnNumber` presses the same encoder 96 ms after its
   last edge and bursts are 126 ms apart, so a turn now ends 20 ms after its
-  last edge, bursts closer than 110 ms are one turn, and a press right after
+  last edge, bursts closer than 150 ms are one turn, and a press right after
   a turn continues the gesture. A 120 ms regrip every 60° could not keep up
   with 25 ms detents: the twist now has a window, fingers slide inside a
   burst, regrips only in pauses.
@@ -389,6 +394,12 @@ and this revision fixes:
   and `reboot`, shader warm-up.
 - Publishing: `index.html` keeps exactly eight script tags; notices are
   published with the page and the vendor recipes with the source.
+
+A second review, of the implementation plan, moved the turn threshold from
+110 to 150 ms (the plan's own fixture had bursts 126 ms apart), made the
+knob a cylinder for clearance, let the driver fit the root with the fingers
+in one solve, and moved the hand speed check from the plan to the driver's
+poses.
 
 A builder's read of the first version then found that a one-hand copy with
 index and middle cannot reach a pad straight below (now index and thumb,
