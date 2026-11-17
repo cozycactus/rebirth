@@ -313,6 +313,111 @@ static void test_budget_scales_only_dynamic_current(void) {
     for (int i = 0; i < LED_COUNT; i++) CHECK(same(black[i], BLACK));
 }
 
+static void test_pad_key_note_layout(void) {
+    static const uint8_t white_row[8] = {36, 38, 40, 41, 43, 45, 47, 48};
+    static const uint8_t black_row[8] = {0xFF, 37, 39, 0xFF, 42, 44, 46, 0xFF};
+    for (int c = 0; c < 8; c++) {
+        CHECK(pad_key_note(36, (uint8_t)c, 7) == white_row[c]);
+        CHECK(pad_key_note(36, (uint8_t)c, 6) == black_row[c]);
+        // The top pair is three octaves above the bottom one.
+        CHECK(pad_key_note(36, (uint8_t)c, 1) == (white_row[c] + 36));
+        CHECK(pad_key_note(36, (uint8_t)c, 0) == (black_row[c] == 0xFF ? 0xFF : black_row[c] + 36));
+    }
+    for (int pair = 0; pair < 3; pair++) {
+        uint8_t row = (uint8_t)(7 - 2 * pair);
+        uint8_t above = (uint8_t)(row - 2);
+        CHECK(pad_key_note(12, 7, row) == pad_key_note(12, 0, above));
+    }
+    CHECK(pad_key_note(72, 7, 1) == 120);
+    CHECK(pad_key_note(0, 0, 7) == 0);
+    CHECK(pad_key_note(36, 8, 7) == 0xFF);
+    CHECK(pad_key_note(36, 0, 8) == 0xFF);
+}
+
+static led_state_t keys_state(uint8_t track, uint8_t note) {
+    led_state_t s = base_state();
+    s.keys = true;
+    s.keys_base = 36;
+    s.keys_track = track;
+    s.keys_note = note;
+    return s;
+}
+
+static void test_keys_light_the_layout(void) {
+    led_state_t s = keys_state(3, 0xFF);
+    rgb_t frame[LED_COUNT];
+    led_frame_build(&s, frame);
+    for (int c = 0; c < 8; c++) {
+        for (int r = 0; r < 8; r++) {
+            uint8_t note = pad_key_note(36, (uint8_t)c, (uint8_t)r);
+            rgb_t got = frame[LED_PAD(c, r)];
+            if (note == 0xFF) CHECK(same(got, BLACK));
+            else if (r % 2 == 1) CHECK(same(got, scaled(HUE[3], LED_LEVEL_HALF)));
+            else CHECK(same(got, scaled(HUE[3], LED_LEVEL_DIM)));
+        }
+    }
+}
+
+static void test_keys_note_marks_every_pad_with_it(void) {
+    led_state_t s = keys_state(1, 48);               // the shared C: bottom right and one pair up, left
+    rgb_t frame[LED_COUNT];
+    led_frame_build(&s, frame);
+    int marked = 0;
+    for (int c = 0; c < 8; c++) {
+        for (int r = 0; r < 8; r++) {
+            bool is_it = pad_key_note(36, (uint8_t)c, (uint8_t)r) == 48;
+            if (is_it) marked++;
+            CHECK(same(frame[LED_PAD(c, r)], white(LED_LEVEL_FULL)) == is_it);
+        }
+    }
+    CHECK(marked == 2);
+    CHECK(same(frame[LED_PAD(7, 7)], white(LED_LEVEL_FULL)));
+    CHECK(same(frame[LED_PAD(0, 5)], white(LED_LEVEL_FULL)));
+    s.keys_note = 37;                                // a black key
+    CHECK(same(light(&s, LED_PAD(1, 6)), white(LED_LEVEL_FULL)));
+    s.keys_note = 0xFF;                              // marks nothing
+    for (int i = 0; i < 64; i++) CHECK(!same(light(&s, i), white(LED_LEVEL_FULL)));
+}
+
+static void test_keys_hide_the_clip_grid_and_keep_the_rest(void) {
+    led_state_t on = busiest_state();
+    led_state_t off = on;
+    on.keys = true;
+    on.keys_base = 24;
+    on.keys_track = 5;
+    on.keys_note = 0xFF;
+    rgb_t with_keys[LED_COUNT], without[LED_COUNT];
+    led_frame_build(&on, with_keys);
+    led_frame_build(&off, without);
+    for (int c = 0; c < 8; c++) {
+        for (int r = 0; r < 8; r++) {
+            uint8_t note = pad_key_note(24, (uint8_t)c, (uint8_t)r);
+            rgb_t want = BLACK;
+            if (note != 0xFF) want = scaled(HUE[5], r % 2 == 1 ? LED_LEVEL_HALF : LED_LEVEL_DIM);
+            CHECK(same(with_keys[LED_PAD(c, r)], want));
+        }
+    }
+    for (int i = 64; i < LED_COUNT; i++) CHECK(same(with_keys[i], without[i]));
+    // Queued and playing state differs on the pads only without the keyboard.
+    on.pulse += 7;
+    off.pulse += 7;
+    led_frame_build(&on, with_keys);
+    led_frame_build(&off, without);
+    for (int i = 64; i < LED_COUNT; i++) CHECK(same(with_keys[i], without[i]));
+}
+
+static void test_keys_frame_fits_the_budget(void) {
+    led_state_t s = keys_state(0, 48);
+    s.playing = true;
+    s.muted = 0;
+    rgb_t frame[LED_COUNT];
+    led_frame_build(&s, frame);
+    rgb_t key = frame[LED_PAD(0, 7)];       // it is the keyboard that is measured
+    CHECK(key.r || key.g || key.b);
+    led_frame_apply_budget(frame, LED_RGB_BUDGET_MA);
+    CHECK(led_frame_estimate_ma(frame) <= LED_RGB_BUDGET_MA);
+}
+
 int main(void) {
     RUN(test_empty_pad_is_off);
     RUN(test_stored_clip_is_dim_hue);
@@ -329,5 +434,10 @@ int main(void) {
     RUN(test_busiest_designed_frame_fits_budget);
     RUN(test_budget_scales_only_dynamic_current);
     RUN(test_track_hues_stay_distinct_at_every_level);
+    RUN(test_pad_key_note_layout);
+    RUN(test_keys_light_the_layout);
+    RUN(test_keys_note_marks_every_pad_with_it);
+    RUN(test_keys_hide_the_clip_grid_and_keep_the_rest);
+    RUN(test_keys_frame_fits_the_budget);
     return 0;
 }

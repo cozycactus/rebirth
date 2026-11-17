@@ -24,6 +24,8 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **MIDI output** — DIN-5 UART only, avoiding USB MIDI host scheduling jitter
 - **Note entry from a MIDI keyboard** — hold a step on the Pattern view and press
   a key on a keyboard at the DIN input: the step takes the key's note and velocity
+- **Pads as a keyboard** — while a step of a SYNTH clip is held, the 64 pads are a
+  four-octave piano and a pad press sets the step's note, with no MIDI keyboard
 - **CV/Gate output** — 4 channels via MCP4822 DACs (1V/oct, 12-bit; default 0-2.048 V)
 - **96 PPQN** internal timing, **24 PPQN** MIDI Clock, 20–300 BPM
 - **Swing value** per pattern (playback timing pending)
@@ -206,6 +208,27 @@ buttons edit it.
   with a key down leaves the note sounding until Panic. A keyboard's All Notes
   Off and All Sound Off release the notes it started, and so does a flash save
   or load.
+- **Pads as a keyboard.** While a step of a SYNTH clip is held in the Pattern
+  view (or the edited step's button in the step editor), the pads stop launching
+  clips and are a keyboard: a pad press does what a key of the MIDI keyboard does
+  (the held step is switched on if it was off and takes the note, the note is
+  sounded on the track's channel), except that the velocity is always 100 and a
+  step's own velocity is left alone. All eight columns are keys of the track being
+  edited. Rows are paired from the bottom: in each pair the lower row is the white
+  keys and the upper row the black keys, and the pairs are consecutive octaves.
+  The window is fixed when the first step is held: the held step's octave (the
+  track's last note for an empty step) is the second pair from the bottom, one
+  octave below and two above, and it does not move until every step is let go.
+
+  | Column | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+  |---|---|---|---|---|---|---|---|---|
+  | lower row (white) | C | D | E | F | G | A | B | C |
+  | upper row (black) | - | C# | D# | - | F# | G# | A# | - |
+
+  Lights: white keys are the track's colour at half level, black keys dim, the pads
+  with no note are off, and every pad of the held step's note is white at full. In
+  the Session view, on DRUM and kit cells and with no step held, the pads launch
+  and copy as before. A pad released after its step still ends its note.
 - Hold both encoder buttons for Panic: it stops playback and returns to the
   Session view. Release both before issuing another command; keys held through
   the panic or pressed while it is held do nothing afterwards.

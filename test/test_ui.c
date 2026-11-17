@@ -95,10 +95,17 @@ static unsigned debounce_polls;
 // press sets the pad down, a queued release clears it; a resync forgets both.
 static bool pads_down[NUM_TRACKS][8];
 static uint32_t panel_generation;
+// The next poll loses the key state (a failed read): the generation changes
+// while the pads it reported down still read down.
+static bool poll_loses_sync;
 static void push_panel(panel_kind_t kind, uint8_t track, uint8_t row);
 void panel_input_init(void) {}
 void panel_input_poll(uint32_t now_ms) {
     (void)now_ms;
+    if (poll_loses_sync) {
+        poll_loses_sync = false;
+        panel_generation++;
+    }
     if (debounce_polls > 0 && --debounce_polls == 0) {
         push_panel(debouncing.kind, debouncing.track, debouncing.row);
     }
@@ -161,6 +168,7 @@ static void reset(void) {
     debounce_polls = 0;
     memset(pads_down, 0, sizeof(pads_down));
     panel_generation = 1;
+    poll_loses_sync = false;
     encoder_resyncs = mcp_resyncs = 0;
     memset(shown, 0, sizeof(shown));
     rgb_inits = 0;
@@ -4068,6 +4076,583 @@ static void test_midi_control_change_and_clock_bytes_change_nothing(void) {
     CHECK(ui.last_note[0] == 62);
 }
 
+// ─── The pads as a keyboard while a step is held ───────────────
+
+#define KEY_CH 3                        // the edited track's channel in these tests
+
+// Pattern view on track 0 (SYNTH, channel KEY_CH) with step `step` held. With
+// the step's note `note` (0 = an empty step) the window's bottom-left pad is
+// 12 * (note / 12 - 1); an empty step uses the track's last note.
+static void keys_step_held(uint8_t step, uint8_t note) {
+    set_channel_everywhere(0, KEY_CH);
+    enter_pattern_view();
+    if (note) pattern_set_step(&g_seq.patterns[0], 0, step, note, 100, STEP_FLAG_ACTIVE);
+    step_down(1u << step);
+    fake_midi_length = 0;
+}
+
+static unsigned key_offs(uint8_t note) { return sent((uint8_t)(KEY_OFF | KEY_CH), note); }
+
+static void test_pad_key_writes_the_held_step_and_sounds(void) {
+    ui.last_note[0] = 57;                   // an empty held step: the window follows it
+    keys_step_held(2, 0);
+    transport_snapshot_t before = transport_now();
+    session_focus_t focus = session_get_focus();
+    hold_pad(5, 5);                         // base 36: two rows up, column 5 is 57
+    CHECK(STEP(0, 2).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 2).note == 57 && STEP(0, 2).velocity == 100);
+    CHECK(count_channel_note_on(KEY_CH, 57, 100) == 1);
+    CHECK(fake_midi_length == 3);
+    CHECK(ui.last_note[0] == 57);
+    transport_snapshot_t after = transport_now();
+    CHECK(same_transport(&before, &after));
+    CHECK(session_get_focus().track == focus.track && session_get_focus().location == focus.location);
+    CHECK(ui.pad_seen[5] == 0);
+    step_up(1u << 2);                       // the step is not toggled off by its release
+    CHECK(STEP(0, 2).flags == STEP_FLAG_ACTIVE);
+    CHECK(key_offs(57) == 0);
+    let_go_pad(5, 5);
+    CHECK(key_offs(57) == 1);
+    CHECK(STEP(0, 2).flags == STEP_FLAG_ACTIVE);
+}
+
+static void test_pad_key_keeps_the_steps_velocity(void) {
+    keys_step_held(2, 0);
+    pattern_set_step(&g_seq.patterns[0], 0, 2, 50, 64, STEP_FLAG_ACTIVE);   // base 36
+    hold_pad(0, 7);
+    CHECK(STEP(0, 2).note == 36 && STEP(0, 2).velocity == 64);
+    CHECK(count_channel_note_on(KEY_CH, 36, 100) == 1);
+}
+
+// A step that is off keeps the velocity it was stored with when a pad
+// switches it on.
+static void test_pad_key_switches_a_step_on_with_its_stored_velocity(void) {
+    keys_step_held(2, 0);
+    pattern_set_step(&g_seq.patterns[0], 0, 2, 50, 64, 0);                  // off; base 36
+    hold_pad(0, 7);
+    CHECK(STEP(0, 2).flags & STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 2).note == 36 && STEP(0, 2).velocity == 64);
+}
+
+// A pad whose Note On found no room owns no note: letting it go must not end
+// the note a MIDI key holds on the same pitch.
+static void test_pad_key_that_was_not_sent_ends_no_note(void) {
+    keys_step_held(2, 57);
+    ui_update();                            // the pads become keys: base 36
+    MIDI_UPDATE(KEY_ON, 36, 100);           // the keyboard holds 36
+    CHECK(count_channel_note_on(KEY_CH, 36, 100) == 1);
+    fake_uart_writable = false;
+    for (unsigned bytes = 0; bytes <= (MIDI_TX_QUEUE_SIZE - 1u) / 2u; bytes += 3u) {
+        midi_send_note_on(1, 1, 100);       // over half full: a key's Note On is refused
+    }
+    hold_pad(0, 7);                         // 36 again, from a pad
+    CHECK(STEP(0, 2).note == 36);           // the step is written all the same
+    CHECK(ui.pad_key[0][7] == 0);
+    let_go_pad(0, 7);
+    fake_uart_writable = true;
+    midi_send_note_on(1, 1, 100);           // drains the queue
+    CHECK(count_channel_note_on(KEY_CH, 36, 100) == 1 && key_offs(36) == 0);
+    MIDI_UPDATE(KEY_OFF, 36, 0);            // the keyboard's own release ends it
+    CHECK(key_offs(36) == 1);
+}
+
+// All Notes Off from the keyboard ends the pads' notes too; a pad still down
+// then owns nothing, so its release does not end a note started afterwards.
+static void test_pad_key_owns_nothing_after_all_notes_off(void) {
+    keys_step_held(2, 57);
+    hold_pad(0, 7);
+    CHECK(count_channel_note_on(KEY_CH, 36, 100) == 1);
+    MIDI_UPDATE(0xB0, 123, 0);
+    CHECK(key_offs(36) == 1 && ui.pad_key[0][7] == 0);
+    MIDI_UPDATE(KEY_ON, 36, 100);           // the keyboard starts 36 again
+    let_go_pad(0, 7);
+    CHECK(key_offs(36) == 1);               // not ended by the pad
+    MIDI_UPDATE(KEY_OFF, 36, 0);
+    CHECK(key_offs(36) == 2);
+}
+
+static void test_pad_key_window_follows_the_note_at_the_start_of_the_hold(void) {
+    keys_step_held(2, 57);
+    hold_pad(0, 7);
+    CHECK(STEP(0, 2).note == 36);           // 57 puts the bottom-left pad at 36
+    let_go_pad(0, 7);
+    hold_pad(5, 5);
+    CHECK(STEP(0, 2).note == 57);
+    let_go_pad(5, 5);
+    // The step now has 57 again; a pad in another octave changes it, and the window stays.
+    hold_pad(0, 3);                         // 36 + 24
+    CHECK(STEP(0, 2).note == 60);
+    let_go_pad(0, 3);
+    hold_pad(0, 7);
+    CHECK(STEP(0, 2).note == 36);           // not 48
+    let_go_pad(0, 7);
+    // Let go and held again: the window follows the new note.
+    step_up(1u << 2);
+    step_down(1u << 2);
+    CHECK(STEP(0, 2).note == 36);
+    hold_pad(0, 7);
+    CHECK(STEP(0, 2).note == 24);           // the step's 36 puts the base at 24
+}
+
+static void test_pad_key_window_of_an_empty_step_and_its_clamps(void) {
+    ui.last_note[0] = 80;                   // base 60
+    keys_step_held(2, 0);
+    hold_pad(0, 7);
+    CHECK(STEP(0, 2).note == 60);
+    let_go_pad(0, 7);
+    step_up(1u << 2);
+    // Notes 0 to 11 clamp the window at 0.
+    pattern_set_step(&g_seq.patterns[0], 0, 3, 5, 100, STEP_FLAG_ACTIVE);
+    step_down(1u << 3);
+    hold_pad(0, 7);
+    CHECK(STEP(0, 3).note == 0);
+    CHECK(count_channel_note_on(KEY_CH, 0, 100) == 1);
+    let_go_pad(0, 7);
+    hold_pad(7, 1);                         // 36 above: top of three octaves, plus the C
+    CHECK(STEP(0, 3).note == 48);
+    let_go_pad(7, 1);
+    step_up(1u << 3);
+    // Notes from 108 clamp it at 72: the top right pad is 120.
+    pattern_set_step(&g_seq.patterns[0], 0, 4, 127, 100, STEP_FLAG_ACTIVE);
+    step_down(1u << 4);
+    hold_pad(7, 1);
+    CHECK(STEP(0, 4).note == 120);
+    let_go_pad(7, 1);
+    hold_pad(0, 7);
+    CHECK(STEP(0, 4).note == 72);
+}
+
+static void test_pad_without_a_note_does_nothing(void) {
+    keys_step_held(2, 57);
+    transport_snapshot_t before = transport_now();
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    hold_pad(0, 6);                         // black row, column 0
+    hold_pad(3, 4);
+    hold_pad(7, 0);
+    CHECK(fake_midi_length == 0);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+    transport_snapshot_t after = transport_now();
+    CHECK(same_transport(&before, &after));
+    CHECK(ui.pad_key[0][6] == 0 && ui.pad_seen[0] == 0 && ui.pad_seen[3] == 0);
+    let_go_pad(0, 6);
+    CHECK(fake_midi_length == 0);
+}
+
+static void test_pad_key_with_two_held_steps_writes_both(void) {
+    keys_step_held(2, 57);
+    step_down(1u << 6);
+    hold_pad(2, 7);                         // 40
+    CHECK(STEP(0, 2).note == 40 && STEP(0, 6).note == 40);
+    CHECK(STEP(0, 6).flags == STEP_FLAG_ACTIVE && STEP(0, 6).velocity == 100);
+    step_up(1u << 2);
+    step_up(1u << 6);
+    CHECK(STEP(0, 2).flags == STEP_FLAG_ACTIVE && STEP(0, 6).flags == STEP_FLAG_ACTIVE);
+}
+
+static void test_pads_launch_when_the_keyboard_is_off(void) {
+    // No step held in the Pattern view.
+    enter_pattern_view();
+    hold_pad(0, 2);
+    CHECK(transport_now().current[0] == 2);
+    CHECK(fake_midi_length == 0);
+    let_go_pad(0, 2);
+    // A step held in the Session view.
+    reset();
+    press_step(2);
+    hold_pad(1, 3);
+    CHECK(transport_now().current[1] == 3);
+    CHECK(fake_midi_length == 0);
+    CHECK(!ui.pad_keys_on);
+    step_up(1u << 2);
+    let_go_pad(1, 3);
+    // A DRUM cell.
+    reset();
+    enter_pattern_view();
+    ui.selected_track = 4;
+    step_down(1u << 2);
+    hold_pad(4, 3);
+    CHECK(transport_now().current[4] == 3);
+    CHECK(!ui.pad_keys_on && fake_midi_length == 0);
+    // A kit cell.
+    reset();
+    make_kit(1);
+    enter_pattern_view();
+    ui.selected_track = 1;
+    step_down(1u << 3);
+    hold_pad(1, 2);
+    CHECK(transport_now().current[1] == 2);
+    CHECK(!ui.pad_keys_on && fake_midi_length == 0);
+}
+
+static void test_pad_key_of_another_column_goes_out_on_the_edited_track(void) {
+    set_channel_everywhere(5, 9);
+    keys_step_held(2, 57);
+    hold_pad(5, 7);                         // column 5, bottom row: 45
+    CHECK(count_channel_note_on(KEY_CH, 45, 100) == 1);
+    CHECK(count_channel_note_on(9, 45, 100) == 0);
+    CHECK(STEP(0, 2).note == 45);
+    CHECK(STEP(5, 2).flags == 0);
+    let_go_pad(5, 7);
+    CHECK(key_offs(45) == 1);
+}
+
+static void test_pad_key_released_after_the_step_is_let_go(void) {
+    keys_step_held(2, 57);
+    hold_pad(1, 1);                         // a key: the keyboard is on
+    CHECK(ui.pad_key[1][1] != 0);
+    transport_snapshot_t before = transport_now();
+    step_up(1u << 2);
+    // The keyboard is off by now. The panel layer still reports the pad down, so
+    // only the release event, not the sweep, can end the note.
+    push_panel_event(PANEL_PAD, 1, 1, false);
+    pads_down[1][1] = true;
+    ui_update();
+    CHECK(key_offs(36 + 12 * 3 + 2) == 1);  // row 1, column 1: 36 + 36 + 2
+    transport_snapshot_t after = transport_now();
+    CHECK(same_transport(&before, &after));
+    CHECK(ui.pad_key[1][1] == 0);
+}
+
+static void test_pad_pressed_as_a_launcher_stays_a_launcher_after_a_step_is_held(void) {
+    enter_pattern_view();
+    set_channel_everywhere(0, KEY_CH);
+    fill_source_clip(1);
+    hold_pad(2, 1);                         // keyboard off: a launch, a copy source
+    CHECK(ui.pad_seen[2] == (1u << 1));
+    step_down(1u << 2);
+    hold_pad(0, 7);                         // a key now
+    CHECK(ui.pad_seen[2] == (1u << 1) && ui.pad_seen[0] == 0);
+    step_up(1u << 2);
+    let_go_pad(0, 7);
+    CHECK(key_offs(ui.last_note[0]) == 1);
+    // Still a source: held long enough, the next pad of its column copies.
+    fill_source_clip(1);
+    g_seq.patterns[1].steps[2][3] = g_seq.patterns[1].steps[0][3];
+    pattern_set_step(&g_seq.patterns[1], 2, 5, 61, 80, STEP_FLAG_ACTIVE);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(2, 4);
+    CHECK(clip_equals(1, 4, 2));
+    // Its release is a launcher's: it ends the hold and sends no Note Off.
+    unsigned offs_before = sent((uint8_t)(KEY_OFF | KEY_CH), 36);
+    let_go_pad(2, 1);
+    CHECK(ui.pad_seen[2] == (1u << 4));
+    CHECK(sent((uint8_t)(KEY_OFF | KEY_CH), 36) == offs_before);
+}
+
+static void test_pad_keys_are_never_copy_sources(void) {
+    keys_step_held(2, 57);
+    fill_source_clip(0);
+    hold_pad(0, 7);                         // a key held for a long time
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 5);                         // another pad of its column: another key
+    CHECK(ui.notify_ticks == 0);
+    CHECK(!clip_equals(0, 5, 0));
+    // With the keyboard off the held key pad is still no source for a launch.
+    let_go_pad(0, 5);
+    step_up(1u << 2);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 2);
+    CHECK(ui.notify_ticks == 0);
+    CHECK(strcmp(ui.notify_msg, "COPY A1>A3") != 0);
+    CHECK(!clip_equals(0, 2, 0));
+    CHECK(transport_now().current[0] == 2);
+}
+
+static void test_pad_key_lost_release_is_noticed_once(void) {
+    keys_step_held(2, 57);
+    hold_pad(0, 7);
+    CHECK(key_offs(36) == 0);
+    pads_down[0][7] = false;                // forgotten without a release event
+    ui_update();
+    CHECK(key_offs(36) == 1);
+    CHECK(ui.pad_key[0][7] == 0);
+    ui_update();
+    CHECK(key_offs(36) == 1);
+    pads_down[0][7] = true;                 // a late release is nothing
+    let_go_pad(0, 7);
+    CHECK(key_offs(36) == 1);
+}
+
+static void test_pad_key_forgotten_by_panic_and_save(void) {
+    keys_step_held(2, 57);
+    hold_pad(0, 7);
+    held[0] = held[1] = true;
+    press_encoder(0, BTN_LONG_PRESS);       // Panic
+    CHECK(ui.panic_latched);
+    CHECK(ui.pad_key[0][7] == 0);
+    held[0] = held[1] = false;
+    ui_update();
+    CHECK(key_offs(36) == 0);
+    let_go_pad(0, 7);                       // its release does nothing
+    CHECK(key_offs(36) == 0);
+
+    reset();
+    keys_step_held(2, 57);
+    hold_pad(0, 7);
+    ui.mode = UI_PATTERN_SELECT;
+    step_down(1u << 8);                     // save
+    CHECK(strcmp(ui.notify_msg, "SAVED OK") == 0);
+    CHECK(key_offs(36) == 1);
+    CHECK(ui.pad_key[0][7] == 0);
+    let_go_pad(0, 7);
+    CHECK(key_offs(36) == 1);
+
+    reset();
+    keys_step_held(2, 57);
+    hold_pad(0, 7);
+    ui.mode = UI_PATTERN_SELECT;
+    step_down(1u << 9);                     // load
+    CHECK(strcmp(ui.notify_msg, "LOADED OK") == 0 || strcmp(ui.notify_msg, "LOAD FAILED") == 0);
+    CHECK(key_offs(36) == 1);
+    CHECK(ui.pad_key[0][7] == 0);
+    let_go_pad(0, 7);
+    CHECK(key_offs(36) == 1);
+}
+
+static void test_pad_key_in_step_edit_needs_the_edited_steps_button(void) {
+    set_channel_everywhere(0, KEY_CH);
+    ui.last_note[0] = 57;
+    enter_step_edit();
+    step_buttons.held = 1u << 0;
+    hold_pad(2, 7);                         // base 36: 40
+    CHECK(STEP(0, 0).flags == 0);           // the active flag is untouched
+    CHECK(STEP(0, 0).note == 40);
+    CHECK(count_channel_note_on(KEY_CH, 40, 100) == 1);
+    // The note of the edited step is marked although the step is off.
+    ui_render();
+    rgb_t mark = shown[LED_PAD(2, 7)];
+    CHECK(mark.r > 0 && mark.r == mark.g && mark.g == mark.b);
+    let_go_pad(2, 7);
+    CHECK(key_offs(40) == 1);
+    // Button up: a pad launches as before.
+    step_buttons.held = 0;
+    hold_pad(1, 3);
+    CHECK(transport_now().current[1] == 3);
+    CHECK(!ui.pad_keys_on);
+    // Another step's button: not the edited step.
+    let_go_pad(1, 3);
+    step_buttons.held = 1u << 3;
+    hold_pad(1, 4);
+    CHECK(transport_now().current[1] == 4);
+}
+
+static void test_pad_key_same_note_on_two_pads(void) {
+    ui.last_note[0] = 57;
+    keys_step_held(2, 0);
+    hold_pad(7, 7);                         // 48
+    CHECK(count_channel_note_on(KEY_CH, 48, 100) == 1 && key_offs(48) == 0);
+    hold_pad(0, 5);                         // the same C: Off, then On
+    CHECK(count_channel_note_on(KEY_CH, 48, 100) == 2 && key_offs(48) == 1);
+    let_go_pad(7, 7);
+    CHECK(key_offs(48) == 2);
+    let_go_pad(0, 5);
+    CHECK(key_offs(48) == 2);
+}
+
+static void test_pad_key_in_song_mode_writes_without_a_notice(void) {
+    transport_set_mode(PLAY_MODE_SONG);
+    keys_step_held(2, 57);
+    ui.notify_ticks = 0;
+    ui.notify_msg[0] = 0;
+    hold_pad(5, 5);
+    CHECK(STEP(0, 2).note == 57 && STEP(0, 2).flags == STEP_FLAG_ACTIVE);
+    CHECK(strcmp(ui.notify_msg, "SONG MODE") != 0 && ui.notify_ticks == 0);
+}
+
+static bool is_hue_only(rgb_t c, bool red) {
+    return red ? (c.r > 0 && c.g == 0 && c.b == 0) : (c.r > 0 && c.r == c.g && c.g == c.b);
+}
+
+static void test_pad_keys_show_in_the_frame_only_while_the_step_is_held(void) {
+    keys_step_held(2, 57);
+    ui_update();
+    ui_render();
+    CHECK(ui.pad_keys_on && ui.pad_keys_base == 36);
+    CHECK(is_hue_only(shown[LED_PAD(0, 7)], true));         // a white key: the edited track's hue
+    CHECK(is_hue_only(shown[LED_PAD(1, 6)], true));         // a black key
+    CHECK(shown[LED_PAD(1, 6)].r < shown[LED_PAD(0, 7)].r);
+    CHECK(rgb_is(shown[LED_PAD(0, 6)], 0, 0, 0));           // no note
+    CHECK(is_hue_only(shown[LED_PAD(5, 5)], false));        // the held step's note 57, in white
+    hold_pad(2, 7);                                         // 40: the mark follows the pad
+    ui_render();
+    CHECK(is_hue_only(shown[LED_PAD(2, 7)], false));
+    CHECK(is_hue_only(shown[LED_PAD(5, 5)], true));
+    let_go_pad(2, 7);
+    step_up(1u << 2);
+    ui_update();                                            // one pass after the release
+    ui_render();
+    CHECK(!ui.pad_keys_on);
+    CHECK(rgb_is(shown[LED_PAD(0, 7)], 0, 0, 0));           // the clip grid again
+    CHECK(rgb_is(shown[LED_PAD(2, 7)], 0, 0, 0));
+}
+
+// The MIDI input of a pass is handled before the panel events of that pass.
+static void test_pad_key_after_a_midi_key_in_one_pass_ends_with_the_pads_note(void) {
+    keys_step_held(2, 57);
+    ui_update();                            // the keyboard is on, its window fixed at 36
+    MIDI_ARRIVES(KEY_ON, 70, 90);
+    push_panel_event(PANEL_PAD, 0, 7, true);
+    ui_update();
+    CHECK(count_channel_note_on(KEY_CH, 70, 90) == 1);
+    CHECK(count_channel_note_on(KEY_CH, 36, 100) == 1);
+    CHECK(STEP(0, 2).note == 36);           // the pad came last
+    CHECK(STEP(0, 2).velocity == 90);       // the MIDI key's velocity, left alone by the pad
+    CHECK(ui.last_note[0] == 36);
+}
+
+static void test_pad_pressed_with_its_step_in_one_pass_launches_and_the_frame_agrees(void) {
+    enter_pattern_view();
+    step_buttons.pressed = step_buttons.held = 1u << 2;
+    push_panel_event(PANEL_PAD, 0, 3, true);
+    ui_update();                            // the keyboard is not on yet
+    CHECK(transport_now().current[0] == 3);
+    CHECK(!ui.pad_keys_on && ui.pad_key[0][3] == 0);
+    ui_render();
+    CHECK(!is_hue_only(shown[LED_PAD(0, 7)], true));
+    CHECK(rgb_is(shown[LED_PAD(0, 6)], 0, 0, 0));
+    CHECK(!is_hue_only(shown[LED_PAD(5, 5)], false));
+}
+
+static void test_pad_pressed_with_the_last_step_released_follows_the_snapshot(void) {
+    keys_step_held(2, 57);
+    ui_update();                            // the keyboard is on
+    CHECK(ui.pad_keys_on);
+    step_buttons.held = 0;
+    step_buttons.released = 1u << 2;
+    push_panel_event(PANEL_PAD, 0, 3, true);
+    ui_update();                            // the step is let go in this pass: no keyboard
+    CHECK(transport_now().current[0] == 3);
+    CHECK(ui.pad_key[0][3] == 0 && !ui.pad_keys_on);
+    ui_render();
+    CHECK(rgb_is(shown[LED_PAD(0, 6)], 0, 0, 0));
+    CHECK(!is_hue_only(shown[LED_PAD(0, 7)], true));
+}
+
+static void test_pad_pressed_as_a_key_clears_its_own_launcher_hold_only(void) {
+    enter_pattern_view();
+    hold_pad(0, 7);                         // a launcher press: a copy source
+    hold_pad(2, 1);
+    CHECK(ui.pad_seen[0] == (1u << 7) && ui.pad_seen[2] == (1u << 1));
+    step_down(1u << 2);
+    hold_pad(0, 7);                         // its release was lost: now a key
+    CHECK(ui.pad_key[0][7] != 0);
+    CHECK(ui.pad_seen[0] == 0 && ui.pad_seen[2] == (1u << 1));
+}
+
+static void test_pad_key_note_off_goes_to_the_channel_it_started_on(void) {
+    keys_step_held(2, 57);
+    hold_pad(0, 7);
+    CHECK(count_channel_note_on(KEY_CH, 36, 100) == 1);
+    step_up(1u << 2);
+    ui.mode = UI_SESSION;                   // the editor is left
+    set_channel_everywhere(0, 9);           // and the track's channel changes
+    let_go_pad(0, 7);
+    CHECK(key_offs(36) == 1);
+    CHECK(sent((uint8_t)(KEY_OFF | 9), 36) == 0);
+    ui_update();
+    CHECK(key_offs(36) == 1);
+}
+
+static void test_pad_key_released_once_when_the_generation_changes(void) {
+    keys_step_held(2, 57);
+    hold_pad(0, 7);
+    CHECK(key_offs(36) == 0);
+    panel_generation++;                     // key state lost; the pad still reads down
+    CHECK(pads_down[0][7]);
+    ui_update();
+    CHECK(key_offs(36) == 1 && ui.pad_key[0][7] == 0);
+    ui_update();
+    CHECK(key_offs(36) == 1);
+}
+
+// The panel layer loses its key state in the poll that hands out a press it
+// had accepted before: the key would remember the new generation and its lost
+// release would never show. It is released in the same pass.
+static void test_pad_key_pressed_in_a_poll_that_lost_sync_does_not_hang(void) {
+    keys_step_held(2, 57);
+    poll_loses_sync = true;
+    hold_pad(0, 7);
+    CHECK(STEP(0, 2).note == 36);           // the write stands
+    CHECK(count_channel_note_on(KEY_CH, 36, 100) == 1);
+    CHECK(key_offs(36) == 1 && ui.pad_key[0][7] == 0);
+    CHECK(pads_down[0][7]);                 // the panel layer still reports it down
+    ui_update();
+    let_go_pad(0, 7);                       // a release that does arrive is nothing
+    CHECK(key_offs(36) == 1);
+}
+
+static void test_pads_launch_in_the_step_editor_on_a_drum_track_and_a_kit(void) {
+    enter_pattern_view();
+    ui.selected_track = 4;
+    press_encoder(0, BTN_PRESS);
+    CHECK(ui.mode == UI_STEP_EDIT);
+    step_buttons.held = 1u << 0;
+    hold_pad(4, 3);
+    CHECK(transport_now().current[4] == 3);
+    CHECK(!ui.pad_keys_on && fake_midi_length == 0);
+
+    reset();
+    make_kit(1);
+    enter_pattern_view();
+    ui.selected_track = 1;
+    ui.mode = UI_STEP_EDIT;                 // a kit has its own editor: force this one
+    ui.edit_step = 0;
+    step_buttons.held = 1u << 0;
+    hold_pad(1, 2);
+    CHECK(transport_now().current[1] == 2);
+    CHECK(!ui.pad_keys_on && fake_midi_length == 0);
+}
+
+// In the step editor a long press toggles the step; a button used as a key's
+// modifier does not.
+static void test_step_edit_long_press_after_a_pad_key_does_not_toggle(void) {
+    ui.last_note[0] = 57;
+    enter_step_edit();
+    step_down(1u << 0);
+    hold_pad(2, 7);
+    CHECK(STEP(0, 0).note == 40 && STEP(0, 0).flags == 0);
+    long_step(0);                           // held past 500 ms
+    CHECK(STEP(0, 0).flags == 0);
+    step_up(1u << 0);
+    CHECK(STEP(0, 0).flags == 0);
+    step_down(1u << 0);                     // a new hold, with no key
+    long_step(0);
+    CHECK(STEP(0, 0).flags == STEP_FLAG_ACTIVE);
+}
+
+static void test_step_edit_long_press_after_a_midi_key_does_not_toggle(void) {
+    enter_step_edit();
+    step_down(1u << 0);
+    MIDI_UPDATE(KEY_ON, 75, 66);
+    CHECK(STEP(0, 0).note == 75 && STEP(0, 0).flags == 0);
+    long_step(0);
+    CHECK(STEP(0, 0).flags == 0);
+    step_up(1u << 0);
+    step_down(1u << 0);
+    long_step(0);
+    CHECK(STEP(0, 0).flags == STEP_FLAG_ACTIVE);
+}
+
+static void test_pad_keyboard_is_off_in_the_frame_after_a_screen_change(void) {
+    ui.last_note[0] = 57;
+    enter_step_edit();
+    step_buttons.held = 1u << 0;
+    ui_update();
+    CHECK(ui.pad_keys_on);
+    press_encoder(1, BTN_PRESS);            // back to the screen the editor came from
+    CHECK(ui.mode != UI_STEP_EDIT);
+    CHECK(!ui.pad_keys_on);
+    ui_render();
+    CHECK(rgb_is(shown[LED_PAD(0, 6)], 0, 0, 0));
+}
+
+static void test_step_edit_long_press_without_a_key_still_toggles(void) {
+    enter_step_edit();
+    step_down(1u << 0);
+    long_step(0);
+    CHECK(STEP(0, 0).flags == STEP_FLAG_ACTIVE);
+}
+
 int main(int argc, char **argv) {
     seq_lock_init();
     RUN(test_session_is_home_and_steps_edit_focus);
@@ -4258,6 +4843,38 @@ int main(int argc, char **argv) {
     RUN(test_midi_panic_drops_a_half_message);
     RUN(test_midi_one_update_takes_48_bytes);
     RUN(test_midi_control_change_and_clock_bytes_change_nothing);
+    RUN(test_pad_key_writes_the_held_step_and_sounds);
+    RUN(test_pad_key_keeps_the_steps_velocity);
+    RUN(test_pad_key_switches_a_step_on_with_its_stored_velocity);
+    RUN(test_pad_key_that_was_not_sent_ends_no_note);
+    RUN(test_pad_key_owns_nothing_after_all_notes_off);
+    RUN(test_pad_key_window_follows_the_note_at_the_start_of_the_hold);
+    RUN(test_pad_key_window_of_an_empty_step_and_its_clamps);
+    RUN(test_pad_without_a_note_does_nothing);
+    RUN(test_pad_key_with_two_held_steps_writes_both);
+    RUN(test_pads_launch_when_the_keyboard_is_off);
+    RUN(test_pad_key_of_another_column_goes_out_on_the_edited_track);
+    RUN(test_pad_key_released_after_the_step_is_let_go);
+    RUN(test_pad_pressed_as_a_launcher_stays_a_launcher_after_a_step_is_held);
+    RUN(test_pad_keys_are_never_copy_sources);
+    RUN(test_pad_key_lost_release_is_noticed_once);
+    RUN(test_pad_key_forgotten_by_panic_and_save);
+    RUN(test_pad_key_in_step_edit_needs_the_edited_steps_button);
+    RUN(test_pad_key_same_note_on_two_pads);
+    RUN(test_pad_key_in_song_mode_writes_without_a_notice);
+    RUN(test_pad_keys_show_in_the_frame_only_while_the_step_is_held);
+    RUN(test_pad_key_after_a_midi_key_in_one_pass_ends_with_the_pads_note);
+    RUN(test_pad_pressed_with_its_step_in_one_pass_launches_and_the_frame_agrees);
+    RUN(test_pad_pressed_with_the_last_step_released_follows_the_snapshot);
+    RUN(test_pad_pressed_as_a_key_clears_its_own_launcher_hold_only);
+    RUN(test_pad_key_note_off_goes_to_the_channel_it_started_on);
+    RUN(test_pad_key_released_once_when_the_generation_changes);
+    RUN(test_pad_key_pressed_in_a_poll_that_lost_sync_does_not_hang);
+    RUN(test_pads_launch_in_the_step_editor_on_a_drum_track_and_a_kit);
+    RUN(test_step_edit_long_press_after_a_pad_key_does_not_toggle);
+    RUN(test_step_edit_long_press_after_a_midi_key_does_not_toggle);
+    RUN(test_step_edit_long_press_without_a_key_still_toggles);
+    RUN(test_pad_keyboard_is_off_in_the_frame_after_a_screen_change);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS the six base OLED screens render (the four kit screens: test_render_kit_*)");
