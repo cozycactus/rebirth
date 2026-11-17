@@ -199,7 +199,9 @@ section('rig', () => {
 
     const { CLEARANCE, PALM } = rig;
     const n = HAND_MODEL[side].mesh.count;
-    assert.ok(CLEARANCE.length >= 40 && CLEARANCE.length <= 80, side + ': CLEARANCE has ' + CLEARANCE.length);
+    // About 60 over the palm, knuckles and pads, plus three under each
+    // fingertip's last segment (Task 3).
+    assert.ok(CLEARANCE.length >= 40 && CLEARANCE.length <= 90, side + ': CLEARANCE has ' + CLEARANCE.length);
     assert.strictEqual(new Set(CLEARANCE).size, CLEARANCE.length, side + ': CLEARANCE vertices differ');
     assert.ok(CLEARANCE.every(v => Number.isInteger(v) && v >= 0 && v < n), side + ': CLEARANCE indices');
     assert.ok(PALM.length >= 20 && PALM.length < CLEARANCE.length && PALM.every(v => CLEARANCE.includes(v)),
@@ -309,6 +311,9 @@ section('fit', () => {
   };
   const at = (rig, name) => rig.bone(name).getWorldPosition(new T.Vector3());
   const yawOf = d => Math.atan2(-d.x, d.y) / D2R;
+  const HAND_MODEL = require(path.join(web, 'handmodel.js'));
+  const everyVertex = {};
+  for (const side of ['right', 'left']) everyVertex[side] = Array.from({ length: HAND_MODEL[side].mesh.count }, (_, v) => v);
   // A pinch's contacts face the knob's axis.
   const knob = enc => {
     const c = PANEL.control({ op: 'encsw', enc });
@@ -327,6 +332,11 @@ section('fit', () => {
     rig.clear(Object.keys(targets));
     const left = rig.violations();
     assert.deepStrictEqual(left, [], what + ': after clear: ' + fmt(left.slice(0, 5)));
+    // Nothing of the hand, not only its clearance vertices, under the plate.
+    const mesh = rig.skinned(everyVertex[rig.side]);
+    let lowest = Infinity, at0 = -1;
+    for (let v = 0; v < mesh.length / 3; v++) if (mesh[3 * v + 2] < lowest) { lowest = mesh[3 * v + 2]; at0 = v; }
+    assert.ok(lowest >= -0.5 * MM, what + ': vertex ' + at0 + ' is ' + fmt(-lowest / MM) + ' mm under the plate');
     for (const f in targets) {
       const d = rig.contact(f, toward).distanceTo(targets[f]) / MM;
       assert.ok(d <= limitMm, what + ': after clear the ' + f + ' contact is ' + fmt(d) + ' mm off');
@@ -472,6 +482,18 @@ section('fit', () => {
   const res = turn.fit(turned, { dir: d0 });
   settle('two targets turned 30°', turn, turned, res, 1);
   assert.ok(res.yawDeg >= 20 && res.yawDeg <= 40, 'the root turned ' + fmt(res.yawDeg) + '° for a 30° turn');
+
+  // The cap on a hooking fingertip: the index alone on TRACK's side 10 mm
+  // up, its contact facing the knob's axis, first hooks its last segment
+  // under the plate (73° down); the fit caps the descent and the hook is
+  // gone, the contact still on its target.
+  const hook = HandRig.create('right');
+  const east = new T.Vector3(track.u + 10 * MM, -track.v, 10 * MM);
+  const capped = hook.fit({ index: east }, { dir: hook.armDir(east), toward: { index: knob(0) } });
+  assert.ok(capped.ok && capped.capped.includes('index'), 'the index on the knob side is capped: ' + fmt(capped));
+  const tipVerts = hook.FINGER_CLEARANCE.index, tipAt = hook.skinned(tipVerts);
+  tipVerts.forEach((v, k) => assert.ok(tipAt[3 * k + 2] >= 0,
+    'capped: index vertex ' + v + ' is ' + fmt(-tipAt[3 * k + 2] / MM) + ' mm under the plate'));
 
   // The palm rises: the index on bare plate left of the pads with the hand
   // pointing 10° up puts the palm under the plate; clear() lifts the root

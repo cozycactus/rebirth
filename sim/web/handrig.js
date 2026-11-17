@@ -69,6 +69,8 @@
   // A fingertip hooking under gets its last segment's descent capped (the
   // fit's residual row CAP_WEIGHT mm per radian over it).
   const CAP = 45 * D2R, CAP_WEIGHT = 100;
+  // A free finger curls until it is this far clear of the controls.
+  const CURL_MARGIN_MM = 0.5;
   const NAME = { thumb: 'Thumb', index: 'Index', middle: 'Middle', ring: 'Ring', pinky: 'Little' };
   // The bones a pose moves, in the order of curls[finger].
   const CHAIN = {
@@ -218,8 +220,8 @@
     // The clearance vertices: per joint the nearest palmar and the nearest
     // dorsal vertex (a curled finger reaches down with the back of its
     // joints; Palm is a helper point outside the skin, not a joint), a 5 × 4
-    // grid over the palm from the metacarpals' bases toward the knuckles, and
-    // the five pads.
+    // grid over the palm from the metacarpals' bases toward the knuckles, the
+    // five pads, and each last segment's underside (below).
     const clearance = new Set();
     const add = v => { if (v >= 0) clearance.add(v); };
     for (const name in byName) {
@@ -238,6 +240,27 @@
       }
     }
     for (const f of FINGERS) add(padOf[f]);
+    // The underside of each last segment: the vertices that become its
+    // lowest as it tilts, level, half down and straight down (the deepest,
+    // in the distal bone's frame, toward the palm, at 45° toward the tip
+    // and toward the tip), among those weighted at least 0.5 to the distal
+    // or tip.
+    for (const f of FINGERS) {
+      const jt = jointOf[tipOf(f)], jd = jointOf[bone(f, CHAIN[f].length - 1)], inv = skeleton.boneInverses[jd];
+      for (const tilt of [0, 45, 90]) {
+        const c = Math.cos(tilt * D2R), s = Math.sin(tilt * D2R);
+        let best = -1, most = -Infinity;
+        for (let v = 0; v < n; v++) {
+          let w = 0;
+          for (let k = 0; k < 4; k++) if (SI[4 * v + k] === jt || SI[4 * v + k] === jd) w += SW[4 * v + k];
+          if (w < 0.5) continue;
+          v3.fromArray(P, 3 * v).applyMatrix4(inv);
+          const d = palmarX * v3.x * c + v3.y * s;
+          if (d > most) { most = d; best = v; }
+        }
+        add(best);
+      }
+    }
     const CLEARANCE = Array.from(clearance);
 
     // The clearance vertices by what moves them: a finger's when at least
@@ -482,11 +505,15 @@
     };
 
     // How far the last segment of finger f descends toward the plate,
-    // radians (90° = straight down); read after skinInto has updated the
-    // bones.
+    // radians: 0 level, 90° straight down, past 90° when it hooks back. Its
+    // horizontal run is signed along the finger's own heading (from its
+    // metacarpal to its proximal joint, flattened), so a hook does not read
+    // as a shallower slope. Read after skinInto has updated the bones.
     const descentOf = f => {
       const a = byName[bone(f, CHAIN[f].length - 1)].matrixWorld.elements, b = byName[tipOf(f)].matrixWorld.elements;
-      return Math.atan2(a[14] - b[14], Math.hypot(b[12] - a[12], b[13] - a[13]));
+      const m = byName[bone(f, 0)].matrixWorld.elements, q = byName[bone(f, 1)].matrixWorld.elements;
+      const hx = q[12] - m[12], hy = q[13] - m[13], h = Math.hypot(hx, hy) || 1;
+      return Math.atan2(a[14] - b[14], ((b[12] - a[12]) * hx + (b[13] - a[13]) * hy) / h);
     };
 
     // One damped-least-squares solve: the contact vertices job.verts of
@@ -728,22 +755,28 @@
         job.verts = null;
         residualMm = solveRounds(job);
       }
-      return result(residualMm, 1, yaw0);
+      const out = result(residualMm, 1, yaw0);
+      out.capped = hooks;
+      return out;
     }
 
     // Several contacts on their targets ({finger: Vector3}) in one solve,
     // from nearly straight fingers (the others as in point), the root
     // turned along opts.dir (default armDir of the targets' centre), then
     // to the best rigid alignment of the contacts with the targets, and
-    // moved onto them. opts.freeYaw widens the yaw window to ±100°. ok iff
-    // every contact is within 1 mm. The result also gives the fitted yaw
-    // (from opts.dir, counter-clockwise seen from above), the pitch and dir.
+    // moved onto them. opts.freeYaw widens the yaw window to ±100°;
+    // opts.toward gives a finger another contact direction (as contact()
+    // takes it; default down). ok iff every contact is within 1 mm. The
+    // result also gives the fitted yaw (from opts.dir, counter-clockwise
+    // seen from above), the pitch, the roll, dir, and `capped`: the fingers
+    // whose last segment hooked under the plate and was capped.
     function fit(targets, opts) {
+      opts = opts || {};
       targets = copyTargets(targets);
       const curls = {}, toward = {};
       for (const f of FINGERS) curls[f] = f in targets ? STRAIGHT[f] : POSES.point[f];
-      for (const f in targets) toward[f] = DOWN;
-      return fitFrom(targets, opts || {}, curls, toward);
+      for (const f in targets) toward[f] = (opts.toward && opts.toward[f]) || DOWN;
+      return fitFrom(targets, opts, curls, toward);
     }
 
     // Thumb and index on the side of encoder enc's knob, opposite each
@@ -836,13 +869,14 @@
     const violations = () => violationsUp().map(({ vertex, mm }) => ({ vertex, mm }));
 
     // Curls free finger f toward the fist (the thumb toward lift) just
-    // enough, found by bisection, that none of its clearance vertices is in
-    // a control; all the way when even that is not enough.
+    // enough, found by bisection, that each of its clearance vertices is
+    // CURL_MARGIN_MM above any control or the plate under it; all the way
+    // when even that is not enough.
     function curlAway(f) {
-      const verts = FINGER_CLEARANCE[f], buf = new Float64Array(3 * verts.length);
+      const verts = FINGER_CLEARANCE[f], buf = new Float64Array(3 * verts.length), margin = CURL_MARGIN_MM * MM;
       const hit = () => {
         skinInto(verts, buf);
-        for (let k = 0; k < verts.length; k++) if (PANEL.inside(buf[3 * k], buf[3 * k + 1], buf[3 * k + 2])) return true;
+        for (let k = 0; k < verts.length; k++) if (PANEL.inside(buf[3 * k], buf[3 * k + 1], buf[3 * k + 2] - margin)) return true;
         return false;
       };
       if (!hit()) return;
