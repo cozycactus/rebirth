@@ -1,7 +1,8 @@
 # The Pads as a Keyboard while a Step Is Held — Design
 
 Date: 2026-11-17. Status: behaviour and layout approved by the project owner
-in conversation (piano layout; no scale setting). Builds on
+in conversation (piano layout; no scale setting). Revised the same day after
+an independent review (see "Review changes"). Builds on
 `2026-11-17-midi-keyboard-entry-design.md`: a pad pressed in this mode is a
 key, handled by the same code as a key of a MIDI keyboard.
 
@@ -37,8 +38,13 @@ a four-octave keyboard.
 
 ## When the pads are a keyboard
 
-The keyboard is **on** in a pass when, at the moment the panel events of that
-pass are handled, either holds:
+Once per pass, after the MIDI input is handled and before the panel events,
+the UI takes a **snapshot**: whether the keyboard is on, for which track and
+location, with which steps, and its window. The pad presses of that pass and
+the LED frame both use the snapshot; nothing decides again later in the pass.
+A panic and a screen change clear it.
+
+The keyboard is **on** when either holds:
 
 - `ui.mode == UI_PATTERN_VIEW`, the cell is a SYNTH cell (not DRUM, not kit),
   and a step is held: `ui.grid_hold & steps->held` is not empty (the rule the
@@ -46,15 +52,23 @@ pass are handled, either holds:
 - `ui.mode == UI_STEP_EDIT` on a SYNTH track and the edited step's button is
   down and was not pressed in this pass.
 
+So a step and a pad pressed in the same pass launch (the keyboard is not on
+yet), and the frame of that pass shows the clip grid. The lights follow the
+routing within one frame (33 ms).
+
+**The reference step** is the lowest held step in the Pattern view and the
+edited step in Step Edit.
+
 **The window.** The keyboard shows four octaves starting at the C `base`.
 `base` is chosen when the keyboard turns on (it was off in the previous
 pass) and stays fixed until it turns off:
 
-- the reference note `n` is the stored note of the lowest held step if that
-  note is not 0, else `last_note[track]`;
+- the reference note `n` is the reference step's stored note if that step is
+  on or its note is not 0, else `last_note[track]`;
 - `base = 12 * (n / 12 - 1)`, clamped to `0..72`: the reference note's octave
   is the second pair of rows from the bottom, with one octave below it and
-  two above.
+  two above. At the clamps (notes 0-11 and above 95) it is another pair, and
+  notes above 120 have no pad.
 
 **The layout.** Rows are numbered 0 (top, printed 1) to 7 (bottom, printed 8).
 Octave `k = (7 - row) / 2` (0 for the bottom pair). In each pair the lower row
@@ -66,7 +80,8 @@ Octave `k = (7 - row) / 2` (0 for the bottom pair). In each pair the lower row
 | black row, semitone | none | 1 | 3 | none | 6 | 8 | 10 | none |
 
 The pad's note is `base + 12 * k + semitone`. The last white pad of a pair is
-the same C as the first white pad of the pair above. Highest note: 120.
+the same C as the first white pad of the pair above. Highest note: 120, on
+the last white pad of the top pair (row index 1, column 7).
 
 ## What a pad does
 
@@ -76,15 +91,19 @@ screen).
 **Press, keyboard on.**
 - A pad with a note is a key: exactly what a Note On from the MIDI input does
   (`handle_midi_event()`), with two differences: the pass-through velocity is
-  100, and the write does not change a step's velocity (a step that the write
-  switches on gets the default 100 from `toggle_step()`). So: the note is
+  100, and the write never changes a step's velocity (an explicit flag on the
+  write; a step switched on in the Pattern view keeps its stored velocity, and
+  gets 100 only when that was 0, as `pattern_toggle_step()` does). In Step
+  Edit the step is not switched on or off. So: the note is
   passed through to the track's channel (capped sends, the note table), each
   held step is switched on if it was off and takes the note,
   `last_note[track]` follows, and the held steps are not toggled on release.
 - The pad is remembered as a key with its note
   (`pad_key[track][row] = note + 1`).
-- It does not launch, queue, cancel, copy or move the focus, and it is not
-  recorded as a copy source.
+- It does not launch, queue, cancel, copy or move the focus. The keyboard is
+  checked before the copy source is looked for and before any of the copy
+  bookkeeping is written; a key press also clears its own `pad_seen` bit, so
+  a pad that was a key is never a copy source later.
 - A pad without a note (the three dark pads of a black row) does nothing.
 
 **Press, keyboard off.** Today's behaviour: launch, or copy.
@@ -94,14 +113,26 @@ pass-through rule, and the pad is forgotten, whether or not the keyboard is
 still on. Otherwise today's behaviour (the copy hold ends).
 
 **A release that never comes.** The panel layer can forget a key without an
-event (overflow, chip reset, resync). On every pass, a pad remembered as a
-key that `panel_input_pad_down()` no longer reports down is released as
-above. A panic and a save or load forget all pad keys (the pass-through
+event (overflow, chip reset, resync), and after a failed read it can go on
+reporting a pad down whose release it lost. Each key remembers the panel
+layer's sync generation at its press. On every pass, after the panel events,
+a pad remembered as a key is released as above when
+`panel_input_pad_down()` no longer reports it down or the generation has
+changed. A panic and a save or load forget all pad keys (the pass-through
 table is handled there already).
 
 **The same note twice.** Two pads can carry the same C. The pass-through
 table is by pitch: the second press retriggers, the first release ends the
 note, the second release does nothing.
+
+**Step Edit's long press.** In Step Edit a long press of a step button
+switches that step on or off. A button that is being used to hold the step
+for a key must not do that: once a key (a pad or a MIDI key) has written to
+the edited step, that button's long press is ignored until it is released.
+(This also corrects the MIDI keyboard entry it builds on.)
+
+MIDI input is handled before the panel events of a pass, so a MIDI key and a
+pad key in one pass leave the step with the pad's note.
 
 SCENE, MUTE and PLAY are not affected. In Song mode the keys work (nothing
 is launched).
@@ -128,9 +159,10 @@ instead of the clip grid:
 SCENE, MUTE, PLAY and BEAT are built as today. The current budget applies to
 the frame as today.
 
-`keys_note` is the stored note of the lowest held step when that step is on
-(in Step Edit: the edited step's note when it is not 0), else 0xFF. It is
-read every frame, so it follows the pad just pressed.
+`keys` and `keys_base` come from the snapshot, `keys_track` is the snapshot's
+track. `keys_note` is read at frame time from the snapshot's reference step,
+so it follows the pad just pressed: its stored note when the step is on (in
+Step Edit: on, or its note is not 0), else 0xFF.
 
 The layout lives in one place, a pure function both the UI and the frame
 builder use:
@@ -175,6 +207,17 @@ would turn the pad's release into a launcher's, and the note would hang.
 
 - Names of the static helpers and of the `ui` fields.
 - Whether the layout table is two arrays or a formula.
+
+## Review changes
+
+An independent review of the first draft (three reviewers) led to these
+changes: the single snapshot per pass used by both the routing and the
+lights; the reference step and note defined for Step Edit and for a step
+that is on with note 0; a key pad kept out of the copy bookkeeping by
+construction; the sync generation as a second sign of a lost release; the
+velocity rule stated as it really is; Step Edit's long press not toggling a
+step that a key wrote to; the position of note 120 and the behaviour at the
+clamps.
 
 ## Verification
 

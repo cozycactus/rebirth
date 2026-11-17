@@ -98,6 +98,15 @@ Tests (`test_ui`; "sent" is the decoded output of the fake UART):
 - a pad key and a MIDI key in the same pass both work, in arrival order
   (MIDI input is handled before the panel events).
 
+## Changes after the design review
+
+The tests above were written to the revised spec: lights are checked through
+the frame the fake receives, not the local `led_state_t`; "arrival order"
+became "MIDI before panel events"; the budget test checks the keyboard frame
+is within the budget; tests were added for a step and a pad in one pass, the
+generation change, the Note Off on the original channel after the context
+changed, Step Edit on DRUM and kit, and Step Edit's long press after a key.
+
 ## Order and review
 
 1, then 2. The whole diff gets one independent review before a pull request.
