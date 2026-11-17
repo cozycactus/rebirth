@@ -12,6 +12,12 @@ extern unsigned fake_uart_budget;       // bytes the UART takes before it report
 extern bool fake_uart_fifo_enabled;     // last value passed to uart_set_fifo_enabled;
                                         // uart_init() enables the FIFO, as the SDK does
 extern bool fake_uart_tx_irq;
+extern unsigned fake_uart_wait_midi_length; // fake_midi_length at the last uart_tx_wait_blocking()
+extern bool fake_uart_rx_irq;           // the receive interrupt enable, as the transmit one
+// Bytes received on the input, as the UART's data register would give them: a queue, not
+// the PL011's one-byte holding register. The interrupt handler is not run by a push.
+void fake_uart_rx_push(const uint8_t *bytes, unsigned count);
+unsigned fake_uart_rx_pending(void);    // bytes pushed and not yet read
 extern uint32_t fake_midi_time_us[FAKE_MIDI_CAPACITY]; // wire start time of each byte (wire-time mode)
 typedef struct { uint8_t status, data1, data2; } fake_midi_msg_t;
 // Decodes fake_midi into at most `max` messages and returns how many it stored: running

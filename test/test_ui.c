@@ -3508,6 +3508,566 @@ static void test_drop_step_gestures_forgets_kit_presses_and_holds(void) {
 }
 
 #define RUN(test) do { reset(); test(); printf("PASS %s\n", #test); } while (0)
+// ─── Note entry from a MIDI keyboard ───────────────────────────
+
+// Bytes arrive at the fake UART and its interrupt runs; the pass that reads them is
+// separate, so a test can combine them with panel events in one ui_update().
+static void midi_arrives(const uint8_t *bytes, unsigned count) {
+    fake_uart_rx_push(bytes, count);
+    fake_irq_handlers[UART0_IRQ]();
+}
+#define MIDI_ARRIVES(...) \
+    midi_arrives((const uint8_t[]){__VA_ARGS__}, sizeof((const uint8_t[]){__VA_ARGS__}))
+#define MIDI_UPDATE(...) do { MIDI_ARRIVES(__VA_ARGS__); ui_update(); } while (0)
+
+#define KEY_ON  0x90
+#define KEY_OFF 0x80
+
+// Decoded messages sent so far with this status byte and first data byte.
+static unsigned sent(uint8_t status, uint8_t data1) {
+    static fake_midi_msg_t messages[FAKE_MIDI_CAPACITY];
+    unsigned decoded = fake_midi_decode(messages, FAKE_MIDI_CAPACITY);
+    unsigned found = 0;
+    for (unsigned i = 0; i < decoded; i++) {
+        found += messages[i].status == status && messages[i].data1 == data1;
+    }
+    return found;
+}
+
+static bool msg_equals(fake_midi_msg_t m, uint8_t status, uint8_t d1, uint8_t d2) {
+    return m.status == status && m.data1 == d1 && m.data2 == d2;
+}
+
+static void set_channel_everywhere(uint8_t track, uint8_t channel) {
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) g_seq.patterns[p].tracks[track].midi_channel = channel;
+}
+
+static void test_midi_key_in_session_is_passed_through_and_becomes_the_last_note(void) {
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    MIDI_UPDATE(KEY_ON, 65, 77);
+    CHECK(count_channel_note_on(0, 65, 77) == 1);
+    CHECK(fake_midi_length == 3);
+    CHECK(ui.last_note[0] == 65);
+    MIDI_UPDATE(KEY_OFF, 65, 0);
+    CHECK(sent(KEY_OFF, 65) == 1);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+    press_step(3);
+    release_step(3);                        // a Session short press takes the last note
+    CHECK(STEP(0, 3).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 3).note == 65);
+}
+
+static void test_midi_key_released_where_it_started_when_the_focus_moves(void) {
+    set_channel_everywhere(2, 9);
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    CHECK(count_channel_note_on(0, 60, 100) == 1);
+    session_set_focus(2, 0);
+    MIDI_UPDATE(KEY_ON, 62, 100);           // the new focus is on channel 9
+    CHECK(count_channel_note_on(9, 62, 100) == 1);
+    MIDI_UPDATE(KEY_OFF, 60, 0);
+    CHECK(sent(KEY_OFF | 0, 60) == 1);
+    CHECK(sent(KEY_OFF | 9, 60) == 0);
+    MIDI_UPDATE(KEY_OFF, 62, 0);
+    CHECK(sent(KEY_OFF | 9, 62) == 1);
+}
+
+static void test_midi_same_key_twice_is_off_then_on(void) {
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    MIDI_UPDATE(KEY_ON, 60, 90);
+    static fake_midi_msg_t messages[8];
+    CHECK(fake_midi_decode(messages, 8) == 3);
+    CHECK(msg_equals(messages[0], KEY_ON, 60, 100));
+    CHECK(msg_equals(messages[1], KEY_OFF, 60, 0));
+    CHECK(msg_equals(messages[2], KEY_ON, 60, 90));
+}
+
+static void test_midi_same_pitch_from_two_input_channels_is_one_note(void) {
+    MIDI_UPDATE(KEY_ON | 0, 60, 100);
+    MIDI_UPDATE(KEY_ON | 1, 60, 100);       // keys are told apart by pitch alone
+    CHECK(sent(KEY_ON, 60) == 2 && sent(KEY_OFF, 60) == 1);
+    MIDI_UPDATE(KEY_OFF | 0, 60, 0);
+    CHECK(sent(KEY_OFF, 60) == 2);
+    MIDI_UPDATE(KEY_OFF | 1, 60, 0);
+    CHECK(sent(KEY_OFF, 60) == 2);
+}
+
+static void test_midi_note_off_for_a_key_never_on_sends_nothing(void) {
+    MIDI_UPDATE(KEY_OFF, 60, 0);
+    MIDI_UPDATE(KEY_ON, 62, 0);             // velocity 0 is a Note Off too
+    CHECK(fake_midi_length == 0);
+}
+
+static void test_midi_key_in_track_config_goes_to_the_configured_track(void) {
+    set_channel_everywhere(5, 12);
+    ui.mode = UI_TRACK_CONFIG;
+    ui.config_track = 5;
+    CHECK(ui.selected_track == 0);
+    MIDI_UPDATE(KEY_ON, 64, 100);
+    CHECK(count_channel_note_on(12, 64, 100) == 1);
+    CHECK(fake_midi_length == 3);           // and on no other channel
+    CHECK(ui.last_note[5] == 60);           // track 6 is a drum track
+    CHECK(ui.last_note[0] == 60);
+}
+
+static void test_midi_key_in_session_uses_the_focused_cell(void) {
+    g_seq.patterns[3].tracks[2].midi_channel = 11;
+    session_set_focus(2, 3);
+    MIDI_UPDATE(KEY_ON, 70, 100);
+    CHECK(count_channel_note_on(11, 70, 100) == 1);
+    CHECK(fake_midi_length == 3);
+    CHECK(ui.last_note[2] == 70);
+    // The cell's own configuration decides: a kit there has no last note.
+    g_seq.patterns[3].tracks[2].type = TRACK_TYPE_KIT;
+    MIDI_UPDATE(KEY_ON, 72, 100);
+    CHECK(count_channel_note_on(11, 72, 100) == 1);
+    CHECK(ui.last_note[2] == 70);
+}
+
+static void test_midi_key_with_a_held_step_writes_note_and_velocity(void) {
+    enter_pattern_view();
+    step_down(1u << 2);
+    MIDI_UPDATE(KEY_ON, 70, 90);
+    CHECK(STEP(0, 2).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 2).note == 70 && STEP(0, 2).velocity == 90);
+    CHECK(ui.last_note[0] == 70);
+    step_up(1u << 2);                       // not toggled off by the release
+    CHECK(STEP(0, 2).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 2).note == 70);
+}
+
+static void test_midi_key_with_two_held_steps_and_an_old_note(void) {
+    enter_pattern_view();
+    pattern_set_step(&g_seq.patterns[0], 0, 5, 50, 20, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
+    step_down(1u << 4);
+    step_down(1u << 5);
+    MIDI_UPDATE(KEY_ON, 71, 88);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 4).note == 71 && STEP(0, 4).velocity == 88);
+    CHECK(STEP(0, 5).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT));   // flags untouched
+    CHECK(STEP(0, 5).note == 71 && STEP(0, 5).velocity == 88);
+    step_up(1u << 4);
+    step_up(1u << 5);
+    CHECK(STEP(0, 4).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 5).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT));
+}
+
+static void test_midi_note_on_velocity_zero_writes_nothing(void) {
+    enter_pattern_view();
+    step_down(1u << 2);
+    MIDI_UPDATE(KEY_ON, 70, 0);
+    CHECK(STEP(0, 2).flags == 0 && STEP(0, 2).note == 0);
+    CHECK(fake_midi_length == 0);
+    step_up(1u << 2);                       // still a tap
+    CHECK(STEP(0, 2).flags == STEP_FLAG_ACTIVE);
+}
+
+static void test_midi_key_with_no_held_step_writes_nothing(void) {
+    enter_pattern_view();
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    MIDI_UPDATE(KEY_ON, 70, 90);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+    CHECK(count_channel_note_on(0, 70, 90) == 1);
+    CHECK(ui.last_note[0] == 70);
+    // A step released earlier is no longer held either.
+    step_down(1u << 2);
+    step_up(1u << 2);
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    MIDI_UPDATE(KEY_ON, 72, 90);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+}
+
+static void test_midi_key_and_step_press_in_one_update_do_not_write(void) {
+    enter_pattern_view();
+    MIDI_ARRIVES(KEY_ON, 70, 90);
+    step_down(1u << 3);
+    CHECK(STEP(0, 3).flags == 0);
+    step_up(1u << 3);                       // a tap
+    CHECK(STEP(0, 3).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 3).velocity == 100);      // not the key's
+}
+
+static void test_midi_key_in_the_update_that_releases_the_step_does_not_write(void) {
+    enter_pattern_view();
+    step_down(1u << 3);
+    MIDI_ARRIVES(KEY_ON, 70, 90);
+    step_up(1u << 3);
+    CHECK(STEP(0, 3).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(0, 3).velocity == 100);
+}
+
+static void test_midi_two_keys_in_one_update_last_wins(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    MIDI_UPDATE(KEY_ON, 70, 90, 72, 80);
+    CHECK(STEP(0, 4).note == 72 && STEP(0, 4).velocity == 80);
+    CHECK(ui.last_note[0] == 72);
+}
+
+static void test_midi_key_then_encoder_turn_in_one_update(void) {
+    enter_pattern_view();
+    step_down(1u << 4);
+    MIDI_ARRIVES(KEY_ON, 70, 90);
+    turn(0, 2);
+    CHECK(STEP(0, 4).note == 72);
+    CHECK(STEP(0, 4).velocity == 90);
+}
+
+static void test_midi_key_on_a_drum_step_writes_velocity_only(void) {
+    enter_pattern_view();
+    ui.selected_track = 4;                  // drum, drum_note 40
+    step_down(1u << 3);
+    MIDI_UPDATE(KEY_ON, 70, 90);
+    CHECK(STEP(4, 3).flags == STEP_FLAG_ACTIVE);
+    CHECK(STEP(4, 3).note == 40);
+    CHECK(STEP(4, 3).velocity == 90);
+    CHECK(ui.last_note[4] == 60);           // a drum keeps no last note
+    CHECK(count_channel_note_on(4, 70, 90) == 1);   // the key still plays on the track's channel
+    step_up(1u << 3);
+    CHECK(STEP(4, 3).flags == STEP_FLAG_ACTIVE);
+}
+
+// Step Edit on step 1 of track 0, its button reported down or up.
+static void enter_step_edit(void) {
+    press_encoder(0, BTN_PRESS);
+    press_encoder(0, BTN_PRESS);
+    CHECK(ui.mode == UI_STEP_EDIT && ui.edit_step == 0);
+}
+
+static void test_midi_key_in_step_edit_writes_only_with_the_button_down(void) {
+    enter_step_edit();
+    step_buttons.held = 1u << 0;
+    MIDI_UPDATE(KEY_ON, 75, 66);
+    CHECK(STEP(0, 0).flags == 0);           // not switched on
+    CHECK(STEP(0, 0).note == 75 && STEP(0, 0).velocity == 66);
+    CHECK(ui.last_note[0] == 75);
+    pattern_set_step(&g_seq.patterns[0], 0, 0, 60, 100, STEP_FLAG_ACTIVE | STEP_FLAG_SLIDE);
+    MIDI_UPDATE(KEY_ON, 76, 67);
+    CHECK(STEP(0, 0).flags == (STEP_FLAG_ACTIVE | STEP_FLAG_SLIDE));
+    CHECK(STEP(0, 0).note == 76 && STEP(0, 0).velocity == 67);
+    // Button up: nothing in the pattern changes, the key is passed through.
+    step_buttons.held = 0;
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    fake_midi_length = 0;
+    MIDI_UPDATE(KEY_ON, 77, 68);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+    CHECK(count_channel_note_on(0, 77, 68) == 1);
+    CHECK(ui.last_note[0] == 77);
+    // Another step's button down does not write to the edited step.
+    step_buttons.held = 1u << 3;
+    MIDI_UPDATE(KEY_ON, 78, 69);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+}
+
+static void test_midi_key_in_step_edit_pressed_in_the_same_update_does_not_write(void) {
+    enter_step_edit();
+    MIDI_ARRIVES(KEY_ON, 75, 66);
+    step_down(1u << 0);                     // pressed and held in this very update
+    CHECK(STEP(0, 0).note == 0 && STEP(0, 0).velocity == 0);
+}
+
+static void test_midi_key_in_step_edit_on_a_drum_track_writes_velocity_only(void) {
+    enter_pattern_view();
+    ui.selected_track = 4;
+    press_encoder(0, BTN_PRESS);
+    CHECK(ui.mode == UI_STEP_EDIT && ui.selected_track == 4);
+    pattern_set_step(&g_seq.patterns[0], 4, 0, 40, 100, STEP_FLAG_ACTIVE);
+    step_buttons.held = 1u << 0;
+    MIDI_UPDATE(KEY_ON, 75, 66);
+    CHECK(STEP(4, 0).note == 40 && STEP(4, 0).velocity == 66);
+    CHECK(ui.last_note[4] == 60);
+}
+
+static void test_midi_key_on_a_kit_track_is_passed_through_and_writes_nothing(void) {
+    g_seq.patterns[0].tracks[1].type = TRACK_TYPE_KIT;
+    set_channel_everywhere(1, 7);
+    session_set_focus(1, 0);
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    MIDI_UPDATE(KEY_ON, 36, 110);
+    CHECK(count_channel_note_on(7, 36, 110) == 1);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+    CHECK(ui.last_note[1] == 60);
+    // With a step held on the kit in the Pattern view.
+    enter_pattern_view();
+    ui.selected_track = 1;
+    step_down(1u << 3);
+    memcpy(patterns_before, g_seq.patterns, sizeof(patterns_before));
+    MIDI_UPDATE(KEY_ON, 38, 100);
+    CHECK(count_channel_note_on(7, 38, 100) == 1);
+    CHECK(memcmp(patterns_before, g_seq.patterns, sizeof(patterns_before)) == 0);
+    CHECK(ui.last_note[1] == 60);
+}
+
+static void test_midi_write_while_playing_is_heard(void) {
+    enter_pattern_view();
+    transport_start();
+    timer_hw->alarm[0] = pulse_interval_us;
+    tick();                                 // step 1 plays; nothing is on it
+    step_down(1u << 1);
+    MIDI_UPDATE(KEY_ON, 62, 90);
+    step_up(1u << 1);
+    fake_midi_length = 0;
+    for (unsigned i = 0; i < PULSES_PER_STEP; i++) tick();
+    CHECK(count_note_on(62, 90) == 1);
+}
+
+// The whole queue holds MIDI_TX_QUEUE_SIZE - 1 bytes; a key may use half.
+#define THRU_HALF ((MIDI_TX_QUEUE_SIZE - 1u) / 2u)
+
+static void test_midi_flood_never_overflows_the_queue(void) {
+    pattern_set_step(&g_seq.patterns[0], 1, 0, 60, 100, STEP_FLAG_ACTIVE);
+    sequencer_refresh_track_playback(1, 0);
+    fake_uart_writable = false;             // a stuck output: nothing leaves
+    // The first key queues 3 bytes, each repeat 6 (Off, On).
+    unsigned accepted = 1 + (THRU_HALF - 3u) / 6u;
+    for (unsigned i = 0; i < accepted + 40; i++) MIDI_UPDATE(KEY_ON, 60, 100);
+    MIDI_UPDATE(KEY_ON, 61, 100);           // 3 bytes still fit under the half
+    MIDI_UPDATE(KEY_ON, 63, 100);           // refused: not in the table
+    CHECK(!midi_output_overflowed());
+    transport_start();
+    timer_hw->alarm[0] = pulse_interval_us;
+    tick();                                 // the sequencer's own notes still fit
+    CHECK(!midi_output_overflowed());
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(sent(KEY_ON, 60) == accepted);
+    CHECK(sent(KEY_OFF, 60) == accepted - 1);
+    CHECK(sent(KEY_ON, 61) == 1 && sent(KEY_ON, 63) == 0);
+    MIDI_UPDATE(KEY_OFF, 63, 0);            // never entered in the table
+    CHECK(sent(KEY_OFF, 63) == 0);
+    MIDI_UPDATE(KEY_OFF, 60, 0);            // the accepted one is released
+    CHECK(sent(KEY_OFF, 60) == accepted);
+    MIDI_UPDATE(KEY_ON, 62, 100);           // and a key works again
+    CHECK(sent(KEY_ON, 62) == 1);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+}
+
+static void test_midi_note_off_that_finds_the_queue_full_stays_pending(void) {
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    CHECK(sent(KEY_ON, 60) == 1);
+    fake_uart_writable = false;
+    for (unsigned note = 0; note < (MIDI_TX_QUEUE_SIZE - 1u) / 3u; note++) {
+        midi_send_note_on(1, note & 0x7F, 100);     // exactly fills the queue
+    }
+    CHECK(!midi_output_overflowed());
+    MIDI_UPDATE(KEY_OFF, 60, 0);
+    CHECK(!midi_output_overflowed());
+    ui_update();                            // still no room: tried again, still pending
+    CHECK(sent(KEY_OFF, 60) == 0);
+    fake_uart_writable = true;
+    ui_update();                            // the retry drains the UART and gets through
+    CHECK(sent(KEY_OFF, 60) == 1);
+    ui_update();
+    CHECK(sent(KEY_OFF, 60) == 1);          // and only once
+    MIDI_UPDATE(KEY_OFF, 60, 0);
+    CHECK(sent(KEY_OFF, 60) == 1);
+}
+
+// A release must leave room for the sequencer: with the queue three quarters
+// full it waits, and the sequencer's next message still fits.
+static void test_midi_note_off_leaves_room_for_the_sequencer(void) {
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    fake_uart_writable = false;
+    for (unsigned sent_bytes = 0; sent_bytes + 3u <= (MIDI_TX_QUEUE_SIZE - 1u) * 3u / 4u; sent_bytes += 3u) {
+        midi_send_note_on(1, 10, 100);
+    }
+    MIDI_UPDATE(KEY_OFF, 60, 0);            // refused: it would pass the three quarters
+    for (unsigned n = 0; n < 60; n++) midi_send_note_on(1, 11, 100);    // the sequencer still fits
+    CHECK(!midi_output_overflowed());
+    fake_uart_writable = true;
+    ui_update();
+    CHECK(sent(KEY_OFF, 60) == 1);
+}
+
+// Bytes that arrive between midi_init() and ui_init() are thrown away: the ring
+// may have overflowed and lost a Note Off.
+static void test_midi_input_from_before_the_ui_started_is_dropped(void) {
+    uint8_t stream[3 + 61 + 3] = { KEY_ON, 60, 100 };
+    memset(stream + 3, 0xF8, 61);
+    stream[64] = KEY_OFF; stream[65] = 60; stream[66] = 0;     // does not fit the ring
+    fake_uart_rx_push(stream, sizeof(stream));
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(midi_in_dropped() > 0);
+    ui_init();
+    fake_midi_length = 0;
+    ui_update();
+    ui_update();
+    CHECK(sent(KEY_ON, 60) == 0);
+}
+
+// With the queue full and the UART not taking bytes the release is refused.
+// The UART starts taking bytes again once that has happened: the save must
+// wait for the queue and send the release before the stall, not after it.
+static void uart_resumes_once_a_release_is_pending(spin_lock_t *lock) {
+    (void)lock;
+    if (ui.thru_pending_count) fake_uart_writable = true;
+}
+
+static void test_midi_save_sends_a_refused_release_before_the_stall(void) {
+    ui.mode = UI_PATTERN_SELECT;
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    fake_uart_writable = false;
+    for (unsigned n = 0; n < (MIDI_TX_QUEUE_SIZE - 1u) / 3u; n++) midi_send_note_on(1, 10, 100);
+    fake_before_lock = uart_resumes_once_a_release_is_pending;
+    step_down(1u << 8);                     // save
+    fake_before_lock = NULL;
+    CHECK(strcmp(ui.notify_msg, "SAVED OK") == 0);
+    CHECK(sent(KEY_OFF, 60) == 1);
+    CHECK(fake_uart_wait_midi_length == fake_midi_length);     // nothing left for after the stall
+}
+
+static void test_midi_all_notes_off_from_the_keyboard_releases_every_key(void) {
+    MIDI_UPDATE(KEY_ON, 60, 100, 64, 100, 67, 100);
+    CHECK(sent(KEY_ON, 60) + sent(KEY_ON, 64) + sent(KEY_ON, 67) == 3);
+    MIDI_UPDATE(0xB5, 123, 0);
+    CHECK(sent(KEY_OFF, 60) == 1 && sent(KEY_OFF, 64) == 1 && sent(KEY_OFF, 67) == 1);
+    MIDI_UPDATE(KEY_ON, 62, 100);
+    MIDI_UPDATE(0xB0, 120, 0);              // All Sound Off does the same
+    CHECK(sent(KEY_OFF, 62) == 1);
+    MIDI_UPDATE(KEY_OFF, 60, 0);
+    CHECK(sent(KEY_OFF, 60) == 1);
+}
+
+static void test_midi_lost_bytes_are_a_gap(void) {
+    enter_pattern_view();
+    step_down(1u << 2);
+    MIDI_UPDATE(KEY_ON, 60, 100, 64, 100);
+    CHECK(STEP(0, 2).note == 64);
+    // Between two updates more bytes arrive than the ring holds: 62 clock bytes, then a
+    // Note On cut after its note, and the rest of the stream lost.
+    uint8_t burst[MIDI_IN_RING_SIZE + 8];
+    memset(burst, 0xF8, sizeof(burst));
+    burst[MIDI_IN_RING_SIZE - 2] = KEY_ON;
+    burst[MIDI_IN_RING_SIZE - 1] = 70;
+    midi_arrives(burst, sizeof(burst));
+    CHECK(midi_in_dropped() == 8);
+    fake_midi_length = 0;
+    ui_update();
+    CHECK(sent(KEY_OFF, 60) == 1 && sent(KEY_OFF, 64) == 1);    // every sounding key released
+    CHECK(sent(KEY_ON, 70) == 0);
+    // The keyboard goes on with running status: its data bytes have no status here.
+    MIDI_UPDATE(62, 100);
+    CHECK(fake_midi_length == 6);
+    CHECK(STEP(0, 2).note == 64 && STEP(0, 2).velocity == 100);
+    CHECK(sent(KEY_ON, 70) == 0 && sent(KEY_ON, 62) == 0);
+    // A new status works again.
+    MIDI_UPDATE(KEY_ON, 65, 99);
+    CHECK(STEP(0, 2).note == 65);
+}
+
+static void test_midi_save_releases_the_keys_and_resets_the_parser(void) {
+    ui.mode = UI_PATTERN_SELECT;
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    CHECK(sent(KEY_ON, 60) == 1);
+    MIDI_ARRIVES(KEY_ON, 64);               // a note cut in two by the save
+    step_down(1u << 8);                     // save
+    CHECK(strcmp(ui.notify_msg, "SAVED OK") == 0);
+    CHECK(sent(KEY_OFF, 60) == 1);
+    CHECK(fake_uart_wait_midi_length == 6);     // the Note Off left before the stall
+    CHECK(sent(KEY_ON, 64) == 0);
+    fake_midi_length = 0;
+    MIDI_UPDATE(100);                       // the velocity, with no status before it
+    CHECK(fake_midi_length == 0);
+    MIDI_UPDATE(KEY_OFF, 60, 0);
+    CHECK(sent(KEY_OFF, 60) == 0);
+}
+
+static void test_midi_load_releases_the_keys_and_resets_the_parser(void) {
+    ui.mode = UI_PATTERN_SELECT;
+    step_down(1u << 8);                     // save, so that there is something to load
+    step_up(1u << 8);
+    CHECK(strcmp(ui.notify_msg, "SAVED OK") == 0);
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    MIDI_ARRIVES(KEY_ON, 64);
+    step_down(1u << 9);                     // load
+    CHECK(strcmp(ui.notify_msg, "LOADED OK") == 0);
+    CHECK(sent(KEY_OFF, 60) == 1);
+    CHECK(fake_uart_wait_midi_length == 6);     // released before the load began
+    fake_midi_length = 0;
+    MIDI_UPDATE(100);
+    CHECK(fake_midi_length == 0);
+}
+
+// A load that fails also leaves the keyboard stream suspect.
+static void test_midi_failed_load_still_releases_and_resets(void) {
+    memset(fake_flash, 0xFF, sizeof(fake_flash));
+    ui.mode = UI_PATTERN_SELECT;
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    MIDI_ARRIVES(KEY_ON, 64);
+    step_down(1u << 9);
+    CHECK(strcmp(ui.notify_msg, "LOAD FAILED") == 0);
+    CHECK(sent(KEY_OFF, 60) == 1);
+    fake_midi_length = 0;
+    MIDI_UPDATE(100);
+    CHECK(fake_midi_length == 0);
+}
+
+static void test_midi_panic_forgets_the_keys_and_ignores_keys_during_it(void) {
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    held[0] = held[1] = true;
+    press_encoder(0, BTN_LONG_PRESS);
+    CHECK(ui.panic_latched);
+    fake_midi_length = 0;
+    MIDI_UPDATE(KEY_ON, 70, 100);           // during the panic
+    CHECK(fake_midi_length == 0);
+    CHECK(ui.last_note[0] == 60);
+    held[0] = held[1] = false;
+    ui_update();
+    CHECK(!ui.panic_latched);
+    ui_update();
+    CHECK(fake_midi_length == 0);           // not acted on after it either
+    CHECK(ui.last_note[0] == 60);
+    MIDI_UPDATE(KEY_OFF, 60, 0);            // the table was cleared by the panic
+    MIDI_UPDATE(KEY_OFF, 70, 0);
+    CHECK(sent(KEY_OFF, 60) == 0 && sent(KEY_OFF, 70) == 0);
+    MIDI_UPDATE(KEY_ON, 62, 100);           // keys work again
+    CHECK(count_channel_note_on(0, 62, 100) == 1);
+}
+
+static void test_midi_panic_drops_a_half_message(void) {
+    held[0] = held[1] = true;
+    MIDI_ARRIVES(KEY_ON, 64);
+    press_encoder(0, BTN_LONG_PRESS);
+    CHECK(ui.panic_latched);
+    held[0] = held[1] = false;
+    ui_update();
+    MIDI_UPDATE(100);
+    CHECK(sent(KEY_ON, 64) == 0);
+}
+
+static void test_midi_one_update_takes_48_bytes(void) {
+    uint8_t bytes[60];
+    for (unsigned i = 0; i < 20; i++) {
+        bytes[i * 3] = KEY_ON;
+        bytes[i * 3 + 1] = (uint8_t)(40 + i);
+        bytes[i * 3 + 2] = 100;
+    }
+    midi_arrives(bytes, sizeof(bytes));
+    CHECK(midi_in_dropped() == 0);
+    ui_update();
+    unsigned first = 0;
+    for (unsigned i = 0; i < 20; i++) first += sent(KEY_ON, (uint8_t)(40 + i));
+    CHECK(first == 16);                     // 48 bytes
+    ui_update();
+    unsigned all = 0;
+    for (unsigned i = 0; i < 20; i++) all += sent(KEY_ON, (uint8_t)(40 + i));
+    CHECK(all == 20);
+    // Exactly 48: of 60 bytes, 12 are still in the ring after one update.
+    midi_arrives(bytes, sizeof(bytes));
+    ui_update();
+    unsigned left = 0;
+    uint8_t byte;
+    while (midi_in_read(&byte)) left++;
+    CHECK(left == 12);
+}
+
+static void test_midi_control_change_and_clock_bytes_change_nothing(void) {
+    MIDI_UPDATE(KEY_ON, 60, 100, 0xF8, 0xB0, 7, 100, 0xF8, 0xFE, 0xE0, 0, 64, 0x91, 62, 100);
+    CHECK(fake_midi_length == 6);
+    CHECK(sent(KEY_ON, 60) == 1 && sent(KEY_ON | 0, 62) == 1);
+    CHECK(ui.last_note[0] == 62);
+}
+
 int main(int argc, char **argv) {
     seq_lock_init();
     RUN(test_session_is_home_and_steps_edit_focus);
@@ -3663,6 +4223,41 @@ int main(int argc, char **argv) {
     RUN(test_copy_leaves_a_held_step_on_its_cell);
     RUN(test_copy_over_the_playing_clip_is_heard);
     RUN(test_copy_takes_a_kit_clips_kit_steps);
+    RUN(test_midi_key_in_session_is_passed_through_and_becomes_the_last_note);
+    RUN(test_midi_key_released_where_it_started_when_the_focus_moves);
+    RUN(test_midi_same_key_twice_is_off_then_on);
+    RUN(test_midi_same_pitch_from_two_input_channels_is_one_note);
+    RUN(test_midi_note_off_for_a_key_never_on_sends_nothing);
+    RUN(test_midi_key_in_track_config_goes_to_the_configured_track);
+    RUN(test_midi_key_in_session_uses_the_focused_cell);
+    RUN(test_midi_key_with_a_held_step_writes_note_and_velocity);
+    RUN(test_midi_key_with_two_held_steps_and_an_old_note);
+    RUN(test_midi_note_on_velocity_zero_writes_nothing);
+    RUN(test_midi_key_with_no_held_step_writes_nothing);
+    RUN(test_midi_key_and_step_press_in_one_update_do_not_write);
+    RUN(test_midi_key_in_the_update_that_releases_the_step_does_not_write);
+    RUN(test_midi_two_keys_in_one_update_last_wins);
+    RUN(test_midi_key_then_encoder_turn_in_one_update);
+    RUN(test_midi_key_on_a_drum_step_writes_velocity_only);
+    RUN(test_midi_key_in_step_edit_writes_only_with_the_button_down);
+    RUN(test_midi_key_in_step_edit_pressed_in_the_same_update_does_not_write);
+    RUN(test_midi_key_in_step_edit_on_a_drum_track_writes_velocity_only);
+    RUN(test_midi_key_on_a_kit_track_is_passed_through_and_writes_nothing);
+    RUN(test_midi_write_while_playing_is_heard);
+    RUN(test_midi_flood_never_overflows_the_queue);
+    RUN(test_midi_note_off_that_finds_the_queue_full_stays_pending);
+    RUN(test_midi_note_off_leaves_room_for_the_sequencer);
+    RUN(test_midi_input_from_before_the_ui_started_is_dropped);
+    RUN(test_midi_save_sends_a_refused_release_before_the_stall);
+    RUN(test_midi_all_notes_off_from_the_keyboard_releases_every_key);
+    RUN(test_midi_lost_bytes_are_a_gap);
+    RUN(test_midi_save_releases_the_keys_and_resets_the_parser);
+    RUN(test_midi_load_releases_the_keys_and_resets_the_parser);
+    RUN(test_midi_failed_load_still_releases_and_resets);
+    RUN(test_midi_panic_forgets_the_keys_and_ignores_keys_during_it);
+    RUN(test_midi_panic_drops_a_half_message);
+    RUN(test_midi_one_update_takes_48_bytes);
+    RUN(test_midi_control_change_and_clock_bytes_change_nothing);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS the six base OLED screens render (the four kit screens: test_render_kit_*)");

@@ -20,6 +20,11 @@ bool fake_uart_writable = true;
 unsigned fake_uart_budget = UINT_MAX;
 bool fake_uart_fifo_enabled = true;
 bool fake_uart_tx_irq;
+bool fake_uart_rx_irq;
+unsigned fake_uart_wait_midi_length;
+#define FAKE_UART_RX_CAPACITY 4096
+static uint8_t uart_rx[FAKE_UART_RX_CAPACITY];
+static unsigned uart_rx_head, uart_rx_tail;   // free-running
 uint32_t fake_midi_time_us[FAKE_MIDI_CAPACITY];
 uint32_t fake_gates;
 unsigned fake_gate_rises;
@@ -53,6 +58,9 @@ void fake_hardware_reset(void) {
     fake_uart_budget = UINT_MAX;
     fake_uart_fifo_enabled = true;
     fake_uart_tx_irq = false;
+    fake_uart_rx_irq = false;
+    fake_uart_wait_midi_length = 0;
+    uart_rx_head = uart_rx_tail = 0;
     wire_time = false;
     wire_free_at = 0;
     fake_gates = 0;
@@ -139,7 +147,17 @@ void uart_set_format(void *uart, int bits, int stop, int parity) {
 }
 void uart_set_fifo_enabled(void *uart, bool enabled) { (void)uart; fake_uart_fifo_enabled = enabled; }
 void uart_set_irq_enables(void *uart, bool rx, bool tx) {
-    (void)uart; (void)rx; fake_uart_tx_irq = tx;
+    (void)uart; fake_uart_rx_irq = rx; fake_uart_tx_irq = tx;
+}
+void fake_uart_rx_push(const uint8_t *bytes, unsigned count) {
+    assert(uart_rx_head - uart_rx_tail + count <= FAKE_UART_RX_CAPACITY);
+    for (unsigned i = 0; i < count; i++) uart_rx[uart_rx_head++ % FAKE_UART_RX_CAPACITY] = bytes[i];
+}
+unsigned fake_uart_rx_pending(void) { return uart_rx_head - uart_rx_tail; }
+bool uart_is_readable(void *uart) { (void)uart; return uart_rx_head != uart_rx_tail; }
+uint8_t uart_getc(void *uart) {
+    assert(uart_is_readable(uart));
+    return uart_rx[uart_rx_tail++ % FAKE_UART_RX_CAPACITY];
 }
 bool uart_is_writable(void *uart) {
     (void)uart;
@@ -211,7 +229,11 @@ unsigned fake_midi_count(uint8_t status) {
     for (unsigned i = 0; i < decoded; i++) count += messages[i].status == status;
     return count;
 }
-void uart_tx_wait_blocking(void *uart) { (void)uart; uart_drained = true; }
+void uart_tx_wait_blocking(void *uart) {
+    (void)uart;
+    uart_drained = true;
+    fake_uart_wait_midi_length = fake_midi_length;
+}
 uint32_t save_and_disable_interrupts(void) { return 0; }
 void restore_interrupts(uint32_t state) { (void)state; }
 void multicore_lockout_start_blocking(void) {

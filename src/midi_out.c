@@ -15,7 +15,7 @@ void uart_putc_raw(void *uart, uint8_t c);
 
 #define MIDI_UART       uart0
 #define MIDI_TX_PIN     0
-#define MIDI_RX_PIN     1   // For future MIDI input/sync
+#define MIDI_RX_PIN     1   // DIN input through the opto (J402)
 
 // ─── UART output buffer ─────────────────────────────────────────
 // Buffer MIDI messages during step processing, flush all at once.
@@ -114,7 +114,7 @@ static void __not_in_flash_func(midi_tx_drain_locked)(void) {
         midi_tx_message_left--;
         if (midi_tx_tail == midi_tx_head) midi_tx_ran_empty = true;
     }
-    uart_set_irq_enables(MIDI_UART, false, midi_tx_pending_locked());
+    uart_set_irq_enables(MIDI_UART, true, midi_tx_pending_locked());
 }
 
 // Queues whole messages if the queue then holds at most `max_queued` bytes
@@ -143,7 +143,33 @@ static void midi_tx_reset_locked(void) {
     midi_clock_pending = false;
 }
 
+// ─── UART input ring ────────────────────────────────────────────
+// The producer is the UART interrupt and the consumer the main loop, both on core 0, so
+// the ring needs no lock. The indices run free (a multiple of the size wraps them), so
+// full and empty cannot be mixed up.
+
+_Static_assert((MIDI_IN_RING_SIZE & (MIDI_IN_RING_SIZE - 1u)) == 0,
+               "MIDI_IN_RING_SIZE must be a power of two");
+
+static volatile uint8_t midi_in_ring[MIDI_IN_RING_SIZE];
+static volatile uint16_t midi_in_head;      // written by the interrupt
+static volatile uint16_t midi_in_tail;      // written by the main loop
+static volatile uint32_t midi_in_dropped_bytes;
+
+static void __not_in_flash_func(midi_in_push)(uint8_t byte) {
+    uint16_t head = midi_in_head;
+    if ((uint16_t)(head - midi_in_tail) >= MIDI_IN_RING_SIZE) {
+        midi_in_dropped_bytes++;
+        return;
+    }
+    midi_in_ring[head & (MIDI_IN_RING_SIZE - 1u)] = byte;
+    midi_in_head = (uint16_t)(head + 1u);
+}
+
 static void __isr __not_in_flash_func(midi_uart_irq_handler)(void) {
+    // Read first, and without the TX lock: with the FIFO off the receive interrupt stays
+    // asserted until the data register is read, also when the ring has no room for the byte.
+    while (uart_is_readable(MIDI_UART)) midi_in_push(uart_getc(MIDI_UART));
     uint32_t lock_state = midi_tx_lock();
     midi_tx_drain_locked();
     midi_tx_unlock(lock_state);
@@ -159,10 +185,16 @@ void midi_init(void) {
     midi_tx_head = 0;
     midi_tx_reset_locked();
     midi_tx_dropped_bytes = 0;
+    midi_in_head = 0;
+    midi_in_tail = 0;
+    midi_in_dropped_bytes = 0;
 
     uart_init(MIDI_UART, MIDI_BAUD);
     gpio_set_function(MIDI_TX_PIN, GPIO_FUNC_UART);
     gpio_set_function(MIDI_RX_PIN, GPIO_FUNC_UART);
+    // The input opto (H11L1) has an open-collector output. The internal pull-up
+    // keeps the line idle high also on a board without the external resistor.
+    gpio_pull_up(MIDI_RX_PIN);
 
     // MIDI is 8N1
     uart_set_format(MIDI_UART, 8, 1, UART_PARITY_NONE);
@@ -172,11 +204,40 @@ void midi_init(void) {
 
     irq_set_exclusive_handler(UART0_IRQ, midi_uart_irq_handler);
     irq_set_enabled(UART0_IRQ, true);
-    uart_set_irq_enables(MIDI_UART, false, false);
+    uart_set_irq_enables(MIDI_UART, true, false);
 #endif
 
     midi_buf_len = 0;
     midi_overflow = false;
+}
+
+// ─── Input ──────────────────────────────────────────────────────
+
+bool midi_in_read(uint8_t *byte) {
+#ifndef MOCK_HARDWARE
+    uint16_t tail = midi_in_tail;
+    if (tail == midi_in_head) return false;
+    *byte = midi_in_ring[tail & (MIDI_IN_RING_SIZE - 1u)];
+    midi_in_tail = (uint16_t)(tail + 1u);
+    return true;
+#else
+    (void)byte;
+    return false;
+#endif
+}
+
+uint32_t midi_in_dropped(void) {
+#ifndef MOCK_HARDWARE
+    return midi_in_dropped_bytes;
+#else
+    return 0;
+#endif
+}
+
+void midi_in_flush(void) {
+#ifndef MOCK_HARDWARE
+    midi_in_tail = midi_in_head;
+#endif
 }
 
 // ─── Low-level send ─────────────────────────────────────────────
@@ -256,7 +317,7 @@ void midi_clear_output_queue(void) {
     uint32_t lock_state = midi_tx_lock();
     midi_tx_reset_locked();
     midi_overflow = false;
-    uart_set_irq_enables(MIDI_UART, false, false);
+    uart_set_irq_enables(MIDI_UART, true, false);
     midi_tx_unlock(lock_state);
 #else
     midi_overflow = false;

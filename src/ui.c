@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "sequencer.h"
+#include "midi_in.h"
 #include "kit.h"
 #include "ssd1309.h"
 #include "encoder.h"
@@ -17,6 +18,17 @@
 // ─── Tempo LED ─────────────────────────────────────────────────
 #define TEMPO_LED_PIN   25
 #define TEMPO_LED_MS    30      // LED on-time per beat
+
+// MIDI keyboard: bytes taken from the input ring in one UI pass; the rest wait there.
+#define MIDI_IN_BYTES_PER_PASS 48
+// Output queue room a passed-through key may use. A full queue stops the transport, so a
+// Note On (with the Note Off of a retrigger) leaves at most half the queue used; a Note
+// Off may fill it, as it must not be refused for long.
+#define THRU_ON_QUEUE_MAX  ((MIDI_TX_QUEUE_SIZE - 1u) / 2u)
+// A release may use more of the queue than a new note, but never all of it:
+// the sequencer's own sends must still fit, or the overflow rule stops it.
+#define THRU_OFF_QUEUE_MAX ((MIDI_TX_QUEUE_SIZE - 1u) * 3u / 4u)
+#define THRU_NONE 0xFF
 
 // A pad held this long is a clip copy source for the next pad of its track.
 #define PAD_COPY_HOLD_MS 500
@@ -89,6 +101,13 @@ typedef struct {
     // The pitch last entered on each track: a new SYNTH step starts there.
     // UI RAM only; not saved, not cleared by Stop, Panic or load.
     uint8_t last_note[NUM_TRACKS];
+
+    // MIDI keyboard on the DIN input
+    midi_in_parser_t midi_parser;
+    uint32_t midi_dropped_seen;     // midi_in_dropped() when last looked at
+    uint8_t  thru_channel[128];     // channel a passed-through note sounds on, THRU_NONE = off
+    bool     thru_release_pending[128]; // its Note Off was refused: tried again every pass
+    uint8_t  thru_pending_count;
 
     // Flash notification: shown for ~1 second, then cleared
     char     notify_msg[17];    // up to 16 chars
@@ -169,6 +188,159 @@ static void toggle_steps(uint8_t track, uint8_t location, uint16_t mask) {
     sequencer_refresh_track_playback(track, location);
 }
 
+// ─── MIDI keyboard ─────────────────────────────────────────────
+
+// A key goes out on the channel of the track being edited, and is released on the channel
+// it started on, whatever the focus did meanwhile. Only the capped send is used: the
+// ordinary ones set the overflow flag, which stops the transport.
+
+static void thru_forget(void) {
+    memset(ui.thru_channel, THRU_NONE, sizeof(ui.thru_channel));
+    memset(ui.thru_release_pending, 0, sizeof(ui.thru_release_pending));
+    ui.thru_pending_count = 0;
+}
+
+static void thru_note_off(uint8_t note) {
+    uint8_t channel = ui.thru_channel[note];
+    if (channel == THRU_NONE) return;
+    const uint8_t message[] = {(uint8_t)(MIDI_NOTE_OFF | channel), note, 0};
+    if (midi_try_send_bytes_capped(message, sizeof(message), THRU_OFF_QUEUE_MAX)) {
+        ui.thru_channel[note] = THRU_NONE;
+        if (ui.thru_release_pending[note]) {
+            ui.thru_release_pending[note] = false;
+            ui.thru_pending_count--;
+        }
+    } else if (!ui.thru_release_pending[note]) {
+        // The note stays in the table, marked: every pass tries again.
+        ui.thru_release_pending[note] = true;
+        ui.thru_pending_count++;
+    }
+}
+
+static void thru_release_all(void) {
+    for (uint8_t note = 0; note < 128; note++) thru_note_off(note);
+}
+
+static void thru_retry_releases(void) {
+    if (ui.thru_pending_count == 0) return;
+    for (uint8_t note = 0; note < 128; note++) {
+        if (ui.thru_release_pending[note]) thru_note_off(note);
+    }
+}
+
+// A Note On, with the Note Off of a key still down on the same pitch as one batch. If the
+// queue has no room the key is dropped and not entered in the table.
+static void thru_note_on(uint8_t note, uint8_t channel, uint8_t velocity) {
+    uint8_t message[6];
+    uint16_t length = 0;
+    uint8_t old = ui.thru_channel[note];
+    if (old != THRU_NONE) {
+        message[length++] = (uint8_t)(MIDI_NOTE_OFF | old);
+        message[length++] = note;
+        message[length++] = 0;
+    }
+    message[length++] = (uint8_t)(MIDI_NOTE_ON | channel);
+    message[length++] = note;
+    message[length++] = velocity;
+    if (!midi_try_send_bytes_capped(message, length, THRU_ON_QUEUE_MAX)) return;
+    ui.thru_channel[note] = channel;
+    if (ui.thru_release_pending[note]) {
+        ui.thru_release_pending[note] = false;
+        ui.thru_pending_count--;
+    }
+}
+
+// Bytes may have been lost, so the stream cannot be trusted: with running status the next
+// bytes could read as a wrong note, and a Note Off may have been among the lost ones.
+static void midi_in_gap(void) {
+    midi_in_flush();
+    midi_in_parser_reset(&ui.midi_parser);
+    ui.midi_dropped_seen = midi_in_dropped();
+    thru_release_all();
+}
+
+// The cell a key goes to: the focused one in the Session view, the configured track on
+// its config screen, the selected track elsewhere.
+static void midi_in_cell(uint8_t *track, uint8_t *location) {
+    if (ui.mode == UI_SESSION) {
+        session_focus_t focus = session_get_focus();
+        *track = focus.track;
+        *location = focus.location;
+        return;
+    }
+    *track = ui.mode == UI_TRACK_CONFIG ? ui.config_track : ui.selected_track;
+    *location = g_seq.active_pattern[*track];
+}
+
+// Writes a key into the steps in `mask`: one lock, then the playback refresh. A step that
+// is off is switched on first when `activate` (Pattern view), as with the encoders. A
+// DRUM step keeps its stored note.
+static void write_key_to_steps(uint8_t track, uint8_t location, uint16_t mask, bool activate,
+                               uint8_t note, uint8_t velocity) {
+    uint32_t lock_state = seq_lock();
+    pattern_t *pat = &g_seq.patterns[location];
+    bool synth = pat->tracks[track].type == TRACK_TYPE_SYNTH;
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (!(mask & (1u << s))) continue;
+        step_t *st = &pat->steps[track][s];
+        if (activate && !(st->flags & STEP_FLAG_ACTIVE)) toggle_step(pat, track, s);
+        if (synth) st->note = note;
+        st->velocity = velocity;
+    }
+    seq_unlock(lock_state);
+    sequencer_refresh_track_playback(track, location);
+}
+
+static void handle_midi_event(const midi_in_event_t *event, const step_buttons_t *steps) {
+    if (event->kind == MIDI_IN_ALL_OFF) {
+        thru_release_all();
+        return;
+    }
+    if (event->kind == MIDI_IN_NOTE_OFF) {
+        thru_note_off(event->note);
+        return;
+    }
+
+    uint8_t track, location;
+    midi_in_cell(&track, &location);
+    const track_config_t *config = &g_seq.patterns[location].tracks[track];
+    thru_note_on(event->note, config->midi_channel, event->velocity);
+    if (config->type == TRACK_TYPE_KIT) return;
+    if (config->type == TRACK_TYPE_SYNTH) ui.last_note[track] = event->note;
+
+    // A step is held when its button is down now: a step pressed or released in this
+    // pass does not count.
+    uint16_t mask = 0;
+    bool activate = false;
+    if (ui.mode == UI_PATTERN_VIEW) {
+        mask = (uint16_t)(ui.grid_hold & steps->held);
+        activate = true;
+        // A step a key wrote to is not toggled on release.
+        ui.grid_tap_pending &= (uint16_t)~mask;
+    } else if (ui.mode == UI_STEP_EDIT) {
+        mask = (uint16_t)(steps->held & (uint16_t)~steps->pressed & (1u << ui.edit_step));
+    }
+    if (mask) write_key_to_steps(track, location, mask, activate, event->note, event->velocity);
+}
+
+// Called at the start of every pass, before the panic check.
+static void handle_midi_input(const step_buttons_t *steps) {
+    uint8_t byte;
+    if (ui.panic_latched) {
+        // Keys pressed during a panic do nothing, not even once it is released.
+        midi_in_flush();        // constant time, however fast bytes arrive
+        midi_in_parser_reset(&ui.midi_parser);
+        ui.midi_dropped_seen = midi_in_dropped();
+        return;
+    }
+    thru_retry_releases();
+    if (midi_in_dropped() != ui.midi_dropped_seen) midi_in_gap();
+    midi_in_event_t event;
+    for (unsigned n = 0; n < MIDI_IN_BYTES_PER_PASS && midi_in_read(&byte); n++) {
+        if (midi_in_parse(&ui.midi_parser, byte, &event)) handle_midi_event(&event, steps);
+    }
+}
+
 // Patterns are written by Core 0 only: the panel reads them without a lock.
 static bool is_kit(session_focus_t cell) {
     return kit_is_cell(&g_seq.patterns[cell.location], cell.track);
@@ -234,6 +406,11 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
     if (ui.panic_latched) {
         if (!encoder_button_held(0) && !encoder_button_held(1)) {
             ui.panic_latched = false;
+            // A byte received since this pass emptied the ring must not start
+            // a message that bytes after the panic would complete.
+            midi_in_flush();
+            midi_in_parser_reset(&ui.midi_parser);
+            ui.midi_dropped_seen = midi_in_dropped();
             // A pad, PLAY or step pressed during the panic and still in its
             // debounce time must not fire once commands are accepted again.
             panel_input_resync();
@@ -244,6 +421,10 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
     if ((e1b == BTN_LONG_PRESS && encoder_button_held(1)) ||
         (e2b == BTN_LONG_PRESS && encoder_button_held(0))) {
         sequencer_panic();
+        // All Notes Off has gone out: the keys held down are released.
+        thru_forget();
+        midi_in_flush();
+        midi_in_parser_reset(&ui.midi_parser);
         // Panel keys held through the panic must not fire afterwards.
         panel_input_resync();
         drop_pad_holds();
@@ -948,7 +1129,11 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
         if (g_seq.transport.state != TRANSPORT_STOPPED) {
             show_notify("STOP TO SAVE");
         } else {
+            thru_release_all();     // the stall would leave a held key sounding
+            midi_wait_output_idle();    // a release the full queue refused goes out
+            thru_retry_releases();      // now, not after the stall
             show_notify(flash_storage_save() ? "SAVED OK" : "SAVE FAILED");
+            midi_in_gap();          // interrupts were off: bytes may be lost
             drop_step_gestures();   // steps held through the stall do nothing
             drop_pad_holds();
         }
@@ -959,7 +1144,11 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
         if (g_seq.transport.state != TRANSPORT_STOPPED) {
             show_notify("STOP TO LOAD");
         } else {
+            thru_release_all();
+            midi_wait_output_idle();
+            thru_retry_releases();
             show_notify(flash_storage_load() ? "LOADED OK" : "LOAD FAILED");
+            midi_in_gap();
             drop_step_gestures();
             drop_pad_holds();       // also when nothing was loaded
         }
@@ -1583,6 +1772,12 @@ void ui_init(void) {
     ui.mode = UI_SESSION;
     ui.step_edit_return = UI_SESSION;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) ui.last_note[track] = 60;
+    thru_forget();
+    // Bytes that arrived since midi_init() are dropped: if the ring overflowed
+    // meanwhile, a Note On could be in it without its Note Off.
+    midi_in_flush();
+    midi_in_parser_reset(&ui.midi_parser);
+    ui.midi_dropped_seen = midi_in_dropped();
     session_init();         // Reads the transport: call after sequencer_init
 }
 
@@ -1602,6 +1797,9 @@ void ui_update(void) {
     button_event_t e1b = encoder_get_button(0);
     button_event_t e2b = encoder_get_button(1);
     step_buttons_t *steps = mcp23017_get_buttons();
+
+    // Keys from the MIDI keyboard, before the panic check: a panic clears what they sound.
+    handle_midi_input(steps);
 
     // 3. Tempo LED
     handle_tempo_led();
