@@ -1755,7 +1755,7 @@ static void render_notify(void) {
 // sending it; a frame the chain is still busy with is skipped. Called with no
 // lock held: sequencer_clip_mask takes seq_lock itself.
 static void update_panel_lights(const transport_snapshot_t *snap) {
-    led_state_t state;
+    led_state_t state = {0};
     state.bank = session_bank();
     state.clip_mask = sequencer_clip_mask(state.bank);
     memcpy(state.current, snap->current, sizeof(state.current));
