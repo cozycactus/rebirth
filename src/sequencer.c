@@ -677,20 +677,14 @@ done:
     return changed_mask;
 }
 
-// ─── Timer ISR — called every pulse (96 PPQN) ──────────────────
+// ─── One pulse (96 PPQN) ────────────────────────────────────────
 
-static void __isr __time_critical_func(sequencer_timer_isr)(void) {
-    uint32_t isr_start_us = timer_hw->timerawl;
-    gpio_put(JITTER_PROBE_PIN, 1);
-    uint32_t playback_irq_state = playback_lock();
-    uint32_t scheduled_us = timer_hw->alarm[timer_alarm_num];
-    jitter_record_entry(isr_start_us, scheduled_us);
-
-    // Clear the alarm IRQ
-    hw_clear_bits(&timer_hw->intr, 1u << timer_alarm_num);
-
+// One internal pulse of the playing transport: MIDI Clock, live mutes, note-off and
+// flam countdowns, and on a step boundary the step. Does nothing unless playing.
+// Called with the playback lock held. In RAM, as the timer ISR.
+static void __time_critical_func(run_pulse)(void) {
     transport_t *t = (transport_t *)&g_seq.transport;
-    if (t->state != TRANSPORT_PLAYING) goto isr_done;
+    if (t->state != TRANSPORT_PLAYING) return;
 
     if ((t->pulse_count % (PPQN / MIDI_PPQN)) == 0) midi_send_clock();
 
@@ -737,9 +731,7 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
             t->pulse_count > 0 &&
             (global_step_count % STEPS_PER_PATTERN) == 0) {
             uint8_t changed_mask = advance_song_position();
-            if (t->state != TRANSPORT_PLAYING) {
-                goto isr_done;
-            }
+            if (t->state != TRANSPORT_PLAYING) return;
             for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
                 if (changed_mask & (1u << tr)) {
                     t->track_step_count[tr] = 0;
@@ -809,8 +801,22 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
     }
 
     t->pulse_count++;
+}
 
-isr_done:
+// ─── Timer ISR — called every pulse (96 PPQN) ──────────────────
+
+static void __isr __time_critical_func(sequencer_timer_isr)(void) {
+    uint32_t isr_start_us = timer_hw->timerawl;
+    gpio_put(JITTER_PROBE_PIN, 1);
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t scheduled_us = timer_hw->alarm[timer_alarm_num];
+    jitter_record_entry(isr_start_us, scheduled_us);
+
+    // Clear the alarm IRQ
+    hw_clear_bits(&timer_hw->intr, 1u << timer_alarm_num);
+
+    run_pulse();
+
     if (midi_output_overflowed()) panic_playback();
 
     // Re-arm after processing. Writing an alarm in the past would stall for
