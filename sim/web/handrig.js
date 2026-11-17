@@ -310,7 +310,7 @@
     // ── Posing ──
     const qa = new T.Quaternion();
     // The current pose, degrees; and the targets of the last place, fit or
-    // pinch (null once setCurls or setRoot moves the hand by hand).
+    // pinch (null once setCurls, setRoot or setPose moves the hand by hand).
     const now = { curls: {}, spread: {} };
     for (const f of FINGERS) { now.curls[f] = CHAIN[f].map(() => 0); now.spread[f] = 0; }
     let last = null;
@@ -350,6 +350,7 @@
     const S = new T.Vector3(scale, scale, scale);
     function setRoot(position, quaternion) {
       group.matrix.compose(position, quaternion, S);
+      readRoot();
       group.matrixWorldNeedsUpdate = true;
       last = null;
       group.updateMatrixWorld(true);
@@ -384,6 +385,60 @@
       rp.copy(PIVOT).multiplyScalar(scale).applyQuaternion(rq);
       group.matrix.compose(rp.negate().add(pose.pivot), rq, S);
       group.matrixWorldNeedsUpdate = true;
+    }
+    // The inverse: the fit's root read back from the group's matrix, so that
+    // a hand placed by setRoot or setPose is where a refit or clear() starts.
+    const toModel = fromModel.clone().transpose();
+    const dp = new T.Vector3(), dq = new T.Quaternion(), ds = new T.Vector3();
+    const bx = new T.Vector3(), by = new T.Vector3(), b0 = new T.Vector3(), bz = new T.Vector3(), bm = new T.Matrix4();
+    function readRoot() {
+      group.matrix.decompose(dp, dq, ds);
+      pose.pivot.copy(PIVOT).multiplyScalar(scale).applyQuaternion(dq).add(dp);
+      bm.makeRotationFromQuaternion(dq).multiply(toModel);
+      bx.setFromMatrixColumn(bm, 0);
+      by.setFromMatrixColumn(bm, 1);
+      pose.yaw = yawOf(by);
+      pose.pitch = pitchOf(by);
+      // The back of the hand at roll 0, as writeRoot builds it; the roll
+      // turns it about the fingers' direction (by the thumb's side).
+      b0.copy(UPV).addScaledVector(by, -by.z);
+      if (b0.lengthSq() < 1e-12) { pose.roll = 0; return; }
+      b0.normalize();
+      bz.crossVectors(b0, by);
+      pose.roll = thumbSide * Math.atan2(-bx.dot(bz), bx.dot(b0));
+    }
+
+    // The pose in the fit's terms, copied: the pivot (world units), the
+    // root's rotation, and the curls and spreads as setCurls takes them.
+    function getPose() {
+      group.matrix.decompose(dp, dq, ds);
+      const curls = {}, spread = {};
+      for (const f of FINGERS) { curls[f] = now.curls[f].slice(); spread[f] = now.spread[f]; }
+      return { pivot: PIVOT.clone().multiplyScalar(scale).applyQuaternion(dq).add(dp), quaternion: dq.clone(), curls, spread };
+    }
+    // Puts back a pose as getPose() gives it: the pivot and the quaternion,
+    // or the pivot and a direction `dir` (the back of the hand up, as place()
+    // turns the hand); the curls and spreads when given (a finger left out
+    // at rest). Like setRoot, the hand keeps no targets.
+    function setPose(p) {
+      if (p.curls || p.spread) {
+        for (const f in p.curls || {}) if (!CHAIN[f]) throw new Error('HandRig: no finger ' + f);
+        for (const f in p.spread || {}) if (!CHAIN[f]) throw new Error('HandRig: no finger ' + f);
+        writePose(p.curls, p.spread);
+      }
+      if (p.dir) {
+        pose.pivot.set(p.pivot.x, p.pivot.y, p.pivot.z);
+        pose.yaw = yawOf(p.dir); pose.pitch = pitchOf(p.dir); pose.roll = 0;
+        writeRoot();
+      } else {
+        const q = rq.copy(p.quaternion).normalize();
+        rp.copy(PIVOT).multiplyScalar(scale).applyQuaternion(q).negate().add(p.pivot);
+        group.matrix.compose(rp, q, S);
+        readRoot();
+      }
+      group.matrixWorldNeedsUpdate = true;
+      last = null;
+      group.updateMatrixWorld(true);
     }
 
     // ── Skinning on the CPU, as three's vertex shader does it ──
@@ -536,8 +591,12 @@
     // finger, from the current pose, within the limits, pulled toward
     // job.seed (radians per finger); a finger in job.capped keeps its last
     // segment's descent within CAP (a stiff one-sided row). Numeric Jacobian.
+    // With job.fixRoot only the fingers' angles move; with job.doneMm the
+    // solve stops once every contact is that close (else it also waits for
+    // the steps to settle).
     function solve(job) {
       const list = job.fingers, nf = list.length, nr = job.rollMax ? 6 : 5, n = nr + 3 * nf;
+      const first = job.fixRoot ? nr : 0;
       const capped = list.filter(f => job.capped && job.capped.includes(f)), m = 6 * nf + capped.length;
       const x = new Float64Array(n), lo = new Float64Array(n), hi = new Float64Array(n), seed = new Float64Array(3 * nf);
       x[0] = pose.pivot.x / MM; x[1] = pose.pivot.y / MM; x[2] = pose.pivot.z / MM;
@@ -590,9 +649,10 @@
       // Until the contacts are on their targets and the steps have settled,
       // so that the pull can still act once they are (it drifts slowly: the
       // damping outweighs it).
-      let cost = residual(x, r);
-      for (let it = 0, moved = Infinity; it < (job.iterations || ITERATIONS) && (worst(r) > 0.005 || moved > 1e-6); it++) {
-        for (let j = 0; j < n; j++) {
+      let cost = residual(x, r), moved = Infinity;
+      const settled = () => (job.doneMm !== undefined ? worst(r) <= job.doneMm : worst(r) <= 0.005 && moved <= 1e-6);
+      for (let it = 0; it < (job.iterations || ITERATIONS) && !settled(); it++) {
+        for (let j = first; j < n; j++) {
           xt.set(x);
           xt[j] += H;
           residual(xt, rt);
@@ -600,7 +660,7 @@
         }
         // The variables free to move: not held at a limit by the gradient.
         const free = [];
-        for (let j = 0; j < n; j++) {
+        for (let j = first; j < n; j++) {
           let s = 0;
           for (let k = 0; k < m; k++) s += J[k * n + j] * r[k];
           g[j] = s;
@@ -861,11 +921,30 @@
       }
       return { mm: least, upMm: up };
     }
+    // The touching fingers' targets and contact directions: those given as
+    // [{finger, target, toward}] (toward as contact() takes it, default
+    // down), or, given nothing, those of the last place, fit or pinch (none
+    // once the hand was moved by hand). `given` marks the first kind.
+    function touchingOf(touching) {
+      if (touching === undefined) return last && { targets: last.targets, toward: last.toward, given: false };
+      const targets = {}, toward = {};
+      for (const c of touching || []) {
+        if (!TIP_VERTS[c.finger]) throw new Error('HandRig: no finger ' + c.finger);
+        targets[c.finger] = new T.Vector3(c.target.x, c.target.y, c.target.z);
+        toward[c.finger] = c.toward || DOWN;
+      }
+      return { targets, toward, given: true };
+    }
+    // A contact is on its target within 1 mm; on a knob's side (a pinch)
+    // within 2 mm, as pinch() says.
+    const limitOf = toward => (toward && toward.axis ? 2 : 1);
+    const settledOf = (touch, residualMm) => Object.keys(touch.targets).every(f => residualMm[f] <= limitOf(touch.toward[f]));
+
     // Whether world point (x, y, z), inside a control, is inside the one
     // under finger f's target: the controls are convex and apart, so the
     // segment to a point just inside the target stays inside only then.
-    function inOwnTarget(f, x, y, z) {
-      const t = last.targets[f], q = inward(t, last.toward[f]).multiplyScalar(0.3 * MM).add(t);
+    function inOwnTarget(touch, f, x, y, z) {
+      const t = touch.targets[f], q = inward(t, touch.toward[f]).multiplyScalar(0.3 * MM).add(t);
       for (let i = 1; i <= 40; i++) {
         const s = i / 40;
         if (!PANEL.inside(x + (q.x - x) * s, y + (q.y - y) * s, z + (q.z - z) * s)) return false;
@@ -874,23 +953,24 @@
     }
 
     // The clearance vertices inside a control or below the plate, deepest
-    // first. A vertex of a touching finger's last two segments may sink up
-    // to 1 mm into its own target (a fingertip pressed into silicone);
-    // nothing is exempt below the plate.
-    function violationsUp() {
+    // first. A vertex of a touching finger's last two segments (`touch`, as
+    // touchingOf gives them) may sink up to 1 mm into its own target (a
+    // fingertip pressed into silicone); nothing is exempt below the plate.
+    function violationsUp(touch) {
       const p = skinInto(CLEARANCE, new Float64Array(3 * CLEARANCE.length)), out = [];
       CLEARANCE.forEach((v, k) => {
         const x = p[3 * k], y = p[3 * k + 1], z = p[3 * k + 2];
         if (!PANEL.inside(x, y, z)) return;
         const d = depth(x, y, z);
-        if (last && z >= 0 && d.mm <= 1) {
-          for (const f in last.targets) if (TIP_SET[f].has(v) && inOwnTarget(f, x, y, z)) return;
+        if (touch && z >= 0 && d.mm <= 1) {
+          for (const f in touch.targets) if (TIP_SET[f].has(v) && inOwnTarget(touch, f, x, y, z)) return;
         }
         out.push({ vertex: v, mm: d.mm, upMm: d.upMm });
       });
       return out.sort((a, b) => b.mm - a.mm);
     }
-    const violations = () => violationsUp().map(({ vertex, mm }) => ({ vertex, mm }));
+    // violations(touching): touching as touchingOf takes it.
+    const violations = touching => violationsUp(touchingOf(touching)).map(({ vertex, mm }) => ({ vertex, mm }));
 
     // Curls free finger f toward the fist (the thumb toward lift) just
     // enough, found by bisection, that each of its clearance vertices is
@@ -923,25 +1003,58 @@
 
     // The free fingers (not in `active`) curl out of the controls; then,
     // while a palm vertex is still in one, the root rises by its depth and
-    // the active fingers are refitted to their targets from there, the
-    // pivot kept no lower (≤ 3 rounds).
-    function clear(active) {
+    // the active touching fingers are refitted to their targets from there,
+    // the pivot kept no lower (≤ 3 rounds). touching as touchingOf takes it:
+    // given, the refit starts from the hand's own root (wherever setRoot,
+    // setPose or a fit left it); given nothing, from the last fit's, and a
+    // hand moved by hand does not rise. Returns { ok, residualMm }: the
+    // touching fingers' contacts (mm), ok iff each is on its target (within
+    // 1 mm; 2 mm on a knob's side).
+    function clear(active, touching) {
       active = [].concat(active || []);
+      const touch = touchingOf(touching);
       for (let round = 0; ; round++) {
         for (const f of FINGERS) if (!active.includes(f)) curlAway(f);
-        const left = violationsUp().filter(v => PALM.includes(v.vertex));
-        if (!left.length || round === 3 || !last) return;
-        const fingers = active.filter(f => f in last.targets);
+        const left = violationsUp(touch).filter(v => PALM.includes(v.vertex));
+        if (!left.length || round === 3 || !touch) break;
+        const fingers = active.filter(f => f in touch.targets);
         pose.pivot.z += (Math.max(...left.map(v => v.upMm)) + 0.25) * MM;
         writeRoot();
-        if (fingers.length) solveRounds(Object.assign({}, last, { fingers, verts: null, floorMm: pose.pivot.z / MM }));
+        if (fingers.length) {
+          const from = touch.given ? { targets: touch.targets, toward: touch.toward, seed: seedOf(fingers), yaw0: pose.yaw,
+            pitch0: pose.pitch, yawWindow: YAW, rollMax: fingers.some(f => touch.toward[f].axis) ? PINCH_ROLL : 0 } : last;
+          solveRounds(Object.assign({}, from, { fingers, verts: null, floorMm: pose.pivot.z / MM }));
+        }
         group.updateMatrixWorld(true);
       }
+      const residualMm = touch ? residualsOf(touch.targets, touch.toward) : {};
+      return { ok: !touch || settledOf(touch, residualMm), residualMm };
+    }
+
+    // The touching fingers' contacts (touching as touchingOf takes it)
+    // re-solved from the hand's current pose, its root held: only when one
+    // is more than opts.toleranceMm (default 1) off its target, then by at
+    // most opts.iterations (default 8) steps of the fit's solve over the
+    // touching fingers' angles, from the angles they have. Returns { ok,
+    // residualMm, solved }, ok as clear() says it.
+    function refit(touching, opts) {
+      opts = opts || {};
+      const touch = touchingOf(touching), fingers = touch ? Object.keys(touch.targets) : [];
+      if (!fingers.length) return { ok: true, residualMm: {}, solved: false };
+      let residualMm = residualsOf(touch.targets, touch.toward);
+      const tolerance = opts.toleranceMm === undefined ? 1 : opts.toleranceMm;
+      if (fingers.every(f => residualMm[f] <= tolerance)) return { ok: settledOf(touch, residualMm), residualMm, solved: false };
+      const verts = {};
+      for (const f of fingers) verts[f] = contactVertex(f, touch.toward[f]);
+      solve({ fingers, targets: touch.targets, toward: touch.toward, verts, seed: seedOf(fingers), yaw0: pose.yaw,
+        pitch0: pose.pitch, yawWindow: YAW, fixRoot: true, iterations: opts.iterations || 8, doneMm: 0.05 });
+      residualMm = residualsOf(touch.targets, touch.toward);
+      return { ok: settledOf(touch, residualMm), residualMm, solved: true };
     }
 
     setRoot(new T.Vector3(), new T.Quaternion());   // at the origin, in page units
-    return { side, root: group, mesh, bone: boneOf, setCurls, setRoot, pad, skinned, CLEARANCE, PALM,
-      FINGER_CLEARANCE, armDir, contact, place, fit, pinch, clear, violations };
+    return { side, root: group, mesh, bone: boneOf, setCurls, setRoot, getPose, setPose, pad, skinned, CLEARANCE, PALM,
+      FINGER_CLEARANCE, armDir, contact, place, fit, pinch, clear, refit, violations };
   }
 
   for (const f in STRAIGHT) Object.freeze(STRAIGHT[f]);

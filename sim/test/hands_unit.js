@@ -320,16 +320,18 @@ section('fit', () => {
     return { axis: new T.Vector3(c.u, -c.v, 0) };
   };
 
-  // Fitted within limitMm; after clear() no violations and the contact
-  // points (toward: the contact direction, default down) still within
-  // limitMm of their targets.
+  // Fitted within limitMm; after clear() (which says so too) no violations
+  // and the contact points (toward: the contact direction, default down)
+  // still within limitMm of their targets.
   const settle = (what, rig, targets, res, limitMm, toward) => {
     assert.ok(res.ok, what + ': not fitted: ' + fmt(res.residualMm));
     assert.deepStrictEqual(Object.keys(res.residualMm).sort(), Object.keys(targets).sort(), what + ': residuals');
     for (const f in targets) {
       assert.ok(res.residualMm[f] <= limitMm, what + ': the ' + f + ' is ' + fmt(res.residualMm[f]) + ' mm off');
     }
-    rig.clear(Object.keys(targets));
+    const cleared = rig.clear(Object.keys(targets));
+    assert.ok(cleared.ok && Object.keys(cleared.residualMm).sort().join() === Object.keys(targets).sort().join(),
+      what + ': clear() says ' + fmt(cleared));
     const left = rig.violations();
     assert.deepStrictEqual(left, [], what + ': after clear: ' + fmt(left.slice(0, 5)));
     // Nothing of the hand, not only its clearance vertices, under the plate.
@@ -544,6 +546,77 @@ section('fit', () => {
   settle('index on bare plate, the hand pointing up', low, { index: bare }, lowRes, 1);
   assert.ok(low.root.matrix.elements[14] > z0 + 10 * MM, 'clear() lifted the root ' +
     fmt((low.root.matrix.elements[14] - z0) / MM) + ' mm');
+
+  // A pose set by hand. getPose() is the pose in the fit's terms (the
+  // pivot, the root's rotation, the curls and spreads); setPose() puts it
+  // back on any rig of that side, the same to the vertex.
+  const pad = top({ op: 'pad', track: 6, row: 4 }), pressed08 = pad.clone().setZ(pad.z - 0.8 * MM);
+  const own = HandRig.create('right');
+  own.place('index', pressed08, own.armDir(pad));
+  own.clear(['index']);
+  assert.deepStrictEqual(own.violations(), [], 'after place() and clear() the index pressed 0.8 mm in is exempt');
+  const saved = own.getPose(), meshAt = own.skinned(everyVertex.right);
+  assert.ok(saved.pivot.isVector3 && saved.quaternion.isQuaternion && saved.curls.index.length === 4 &&
+    saved.curls.thumb.length === 3 && typeof saved.spread.index === 'number', 'getPose(): ' + fmt(saved));
+  const copyRig = HandRig.create('right');
+  copyRig.setPose(saved);
+  const copyAt = copyRig.skinned(everyVertex.right);
+  let apartMm = 0;
+  for (let k = 0; k < copyAt.length; k++) apartMm = Math.max(apartMm, Math.abs(copyAt[k] - meshAt[k]) / MM);
+  assert.ok(apartMm < 1e-3, 'setPose(getPose()) moves a vertex ' + fmt(apartMm) + ' mm');
+  // It keeps no targets: violations() and clear() take the touching fingers
+  // as [{finger, target, toward}] (toward as contact() takes it).
+  own.setPose(saved);
+  assert.ok(own.violations().length > 0, 'a pose set by hand: the pressed fingertip is not exempt unless listed');
+  const touching = [{ finger: 'index', target: pressed08 }];
+  assert.deepStrictEqual(own.violations(touching), [], 'listed, the pressed fingertip is exempt');
+  const kept = own.clear(['index'], touching);
+  assert.ok(kept.ok && kept.residualMm.index <= 1, 'clear(active, touching): ' + fmt(kept));
+  // clear() reports a contact it leaves off its target (no silent pose).
+  const far = own.clear(['index'], [{ finger: 'index', target: pressed08.clone().setX(pressed08.x + 20 * MM) }]);
+  assert.ok(!far.ok && far.residualMm.index > 19, 'clear() with the index 20 mm off: ' + fmt(far));
+  // The palm rises from a pose set by hand too, from where the hand is.
+  low.place('index', bare, flatDir);
+  low.setPose(low.getPose());
+  const zHand = low.root.matrix.elements[14];
+  const risen = low.clear(['index'], [{ finger: 'index', target: bare }]);
+  assert.ok(low.root.matrix.elements[14] > zHand + 10 * MM, 'clear() after setPose() lifted the root ' +
+    fmt((low.root.matrix.elements[14] - zHand) / MM) + ' mm');
+  assert.ok(risen.ok && risen.residualMm.index <= 1, 'clear() after setPose() refits the index: ' + fmt(risen));
+  assert.deepStrictEqual(low.violations([{ finger: 'index', target: bare }]), [], 'after the rise nothing is in a control');
+  // setRoot() keeps the fit's root too: the same rise from a root set by it.
+  const viaRoot = HandRig.create('right'), at0 = new T.Vector3(), q0 = new T.Quaternion(), s0 = new T.Vector3();
+  low.place('index', bare, flatDir);
+  const placed = low.getPose();
+  low.root.matrix.decompose(at0, q0, s0);
+  viaRoot.setCurls(placed.curls, placed.spread);
+  viaRoot.setRoot(at0, q0);
+  const zRoot = viaRoot.root.matrix.elements[14];
+  assert.ok(viaRoot.clear(['index'], [{ finger: 'index', target: bare }]).ok &&
+    viaRoot.root.matrix.elements[14] > zRoot + 10 * MM, 'clear() after setRoot() lifts and refits');
+
+  // refit(): the contacts re-solved from the hand's root, which stays where
+  // it is: the left hand on steps 0 1 2, its root moved 3 mm sideways, puts
+  // its fingertips back within 1 mm by its fingers alone; within 1 mm it
+  // does nothing.
+  const holder = HandRig.create('left');
+  const three = aims('step', 'index', [['pinky', 0], ['ring', 1], ['middle', 2]]);
+  holder.fit(three, { dir: holder.armDir(centre(three)) });
+  const list3 = Object.keys(three).map(finger => ({ finger, target: three[finger] }));
+  assert.ok(holder.clear(Object.keys(three), list3).ok, 'steps 0 1 2 fitted');
+  const fitted = holder.getPose();
+  assert.deepStrictEqual(holder.refit(list3).solved, false, 'refit() within 1 mm: nothing to solve');
+  const moved = Object.assign({}, fitted, { pivot: fitted.pivot.clone().add(new T.Vector3(3 * MM, 0, 0)) });
+  holder.setPose(moved);
+  const back = holder.refit(list3);
+  assert.ok(back.solved && back.ok, 'refit() after a 3 mm move: ' + fmt(back));
+  for (const f in three) {
+    assert.ok(holder.contact(f).distanceTo(three[f]) / MM <= 1, 'refit(): the ' + f + ' is ' +
+      fmt(holder.contact(f).distanceTo(three[f]) / MM) + ' mm off');
+  }
+  const still = holder.getPose();
+  assert.ok(still.pivot.distanceTo(moved.pivot) < 1e-6 * MM && still.quaternion.angleTo(moved.quaternion) < 1e-9,
+    'refit() leaves the root where it was');
 });
 
 // ─── plan: touches, groups, turns, hands, fingers, timing ────────
