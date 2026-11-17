@@ -18,6 +18,10 @@
 #define TEMPO_LED_PIN   25
 #define TEMPO_LED_MS    30      // LED on-time per beat
 
+// A pad held this long is a clip copy source for the next pad of its track.
+#define PAD_COPY_HOLD_MS 500
+#define PAD_ROWS 8
+
 // ─── UI Modes ──────────────────────────────────────────────────
 
 typedef enum {
@@ -73,6 +77,19 @@ typedef struct {
     uint32_t led_anim_ms;
     bool     led_anim_phase;
 
+    // Pad presses the UI has handled and not yet seen released, per track (bit
+    // = row), and what each was when pressed: the time, the location it stood
+    // for and the panel layer's sync generation. Only a pad in pad_seen can
+    // be a copy source; see find_copy_source().
+    uint8_t  pad_seen[NUM_TRACKS];
+    uint32_t pad_down_ms[NUM_TRACKS][PAD_ROWS];
+    uint8_t  pad_location[NUM_TRACKS][PAD_ROWS];
+    uint32_t pad_generation[NUM_TRACKS][PAD_ROWS];
+
+    // The pitch last entered on each track: a new SYNTH step starts there.
+    // UI RAM only; not saved, not cleared by Stop, Panic or load.
+    uint8_t last_note[NUM_TRACKS];
+
     // Flash notification: shown for ~1 second, then cleared
     char     notify_msg[17];    // up to 16 chars
     uint8_t  notify_ticks;      // counts down at ~30 fps
@@ -122,6 +139,23 @@ static void drop_step_gestures(void) {
     }
 }
 
+// Forgets every pad hold: after a panic and after a save or load, whatever
+// its result, a copy source has to be pressed again.
+static void drop_pad_holds(void) {
+    memset(ui.pad_seen, 0, sizeof(ui.pad_seen));
+}
+
+// Toggles one step. A SYNTH step that is switched on with no stored note
+// takes the track's last note: seeded after pattern_toggle_step(), which
+// writes C4 over a note of 0, so a last note of 0 survives.
+static void toggle_step(pattern_t *pat, uint8_t track, uint8_t step) {
+    step_t *st = &pat->steps[track][step];
+    bool seed = pat->tracks[track].type == TRACK_TYPE_SYNTH &&
+                !(st->flags & STEP_FLAG_ACTIVE) && st->note == 0;
+    pattern_toggle_step(pat, track, step);
+    if (seed) st->note = ui.last_note[track];
+}
+
 // Toggles the steps in `mask` of one track at one location and refreshes its
 // playback. Takes seq_lock: call with no lock held.
 static void toggle_steps(uint8_t track, uint8_t location, uint16_t mask) {
@@ -129,7 +163,7 @@ static void toggle_steps(uint8_t track, uint8_t location, uint16_t mask) {
     uint32_t lock_state = seq_lock();
     pattern_t *pat = &g_seq.patterns[location];
     for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
-        if (mask & (1u << s)) pattern_toggle_step(pat, track, s);
+        if (mask & (1u << s)) toggle_step(pat, track, s);
     }
     seq_unlock(lock_state);
     sequencer_refresh_track_playback(track, location);
@@ -212,6 +246,7 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
         sequencer_panic();
         // Panel keys held through the panic must not fire afterwards.
         panel_input_resync();
+        drop_pad_holds();
         ui.panic_latched = true;
         drop_step_gestures();
         ui.mode = UI_SESSION;
@@ -223,18 +258,76 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
 
 // ─── Global panel controls (every screen) ──────────────────────
 
+// The pad of `track` that is a copy source for a press now, or -1: one whose
+// press the UI handled and whose release it has not, that the panel layer
+// still reports down with no recovery since, held at least PAD_COPY_HOLD_MS.
+// The longest held wins. Each condition covers a way a hold can be unreal: a
+// pad accepted in the same poll as the one pressed now, a release the panel
+// layer lost, a key state it forgot.
+static int find_copy_source(uint8_t track, uint8_t target_row, uint32_t now) {
+    int source = -1;
+    uint32_t longest = 0;
+    for (uint8_t row = 0; row < PAD_ROWS; row++) {
+        if (row == target_row || !(ui.pad_seen[track] & (1u << row))) continue;
+        if (!panel_input_pad_down(track, row)) continue;
+        if (ui.pad_generation[track][row] != panel_input_generation()) continue;
+        uint32_t held = (uint32_t)(now - ui.pad_down_ms[track][row]);
+        if (held < PAD_COPY_HOLD_MS || (source >= 0 && held <= longest)) continue;
+        source = row;
+        longest = held;
+    }
+    return source;
+}
+
+// Copies the clip of `track` at `src` over `dst` and refreshes the target's
+// playback. Takes seq_lock: call with no lock held. The transport is not
+// touched; in the Session view the focus moves to the copy.
+static void copy_clip(uint8_t track, uint8_t src, uint8_t dst) {
+    uint32_t lock_state = seq_lock();
+    pattern_copy_track(&g_seq.patterns[dst], &g_seq.patterns[src], track);
+    seq_unlock(lock_state);
+    sequencer_refresh_track_playback(track, dst);
+    if (ui.mode == UI_SESSION) session_set_focus(track, dst);
+    char msg[17];
+    snprintf(msg, sizeof(msg), "COPY %c%d>%c%d", 'A' + pattern_bank(src),
+             pattern_slot(src) + 1, 'A' + pattern_bank(dst), pattern_slot(dst) + 1);
+    show_notify(msg);
+}
+
+// A pad press: a copy when another pad of the track is a source, else the
+// ordinary launch. Either way the press is recorded, so it can be a source.
+static void handle_pad_press(uint8_t track, uint8_t row) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    uint8_t target = pattern_make_index(session_bank(), row);
+    int source = find_copy_source(track, row, now);
+    uint8_t source_location = source >= 0 ? ui.pad_location[track][source] : 0;
+
+    ui.pad_seen[track] |= (uint8_t)(1u << row);
+    ui.pad_down_ms[track][row] = now;
+    ui.pad_location[track][row] = target;
+    ui.pad_generation[track][row] = panel_input_generation();
+
+    if (source >= 0) {
+        copy_clip(track, source_location, target);
+        return;
+    }
+    // Outside the Session view a pad only launches.
+    if (!session_pad(track, row, ui.mode == UI_SESSION)) show_notify("SONG MODE");
+}
+
 // Pads, SCENE, MUTE and PLAY. Called with no lock held: every session_* and
-// transport call below takes the locks itself.
+// transport call below takes the locks itself. A pad release only ends the
+// hold the UI tracks for copying; SCENE, MUTE and PLAY act on press.
 static void handle_panel_events(void) {
     panel_event_t ev;
     while (panel_input_next(&ev)) {
+        if (ev.kind == PANEL_PAD && !ev.down && ev.track < NUM_TRACKS) {
+            ui.pad_seen[ev.track] &= (uint8_t)~(1u << ev.row);
+        }
         if (!ev.down) continue;
         switch (ev.kind) {
             case PANEL_PAD:
-                // Outside the Session view a pad only launches.
-                if (!session_pad(ev.track, ev.row, ui.mode == UI_SESSION)) {
-                    show_notify("SONG MODE");
-                }
+                handle_pad_press(ev.track, ev.row);
                 break;
             case PANEL_SCENE:
                 if (!session_scene(ev.row)) show_notify("SONG MODE");
@@ -477,19 +570,29 @@ static bool apply_step_edit(step_t *st, int8_t e1_amount, int8_t e2_amount,
 }
 
 // For every step in mask: activate it if inactive, then apply_step_edit().
-// Returns true if any step changed; an activation counts. Caller holds seq_lock().
+// Returns true if any step changed; an activation counts. A turn that changed
+// a note on a SYNTH track makes the lowest target's resulting note the track's
+// last note. Caller holds seq_lock().
 static bool edit_held_steps(pattern_t *pat, uint8_t track, uint16_t mask,
                             int8_t e1_amount, int8_t e2_amount,
                             button_event_t e1b, button_event_t e2b) {
     bool changed = false;
+    bool note_changed = false;
+    int lowest = -1;
     for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
         if (!(mask & (1u << s))) continue;
         step_t *st = &pat->steps[track][s];
         if (!(st->flags & STEP_FLAG_ACTIVE)) {
-            pattern_toggle_step(pat, track, s);
+            toggle_step(pat, track, s);
             changed = true;
         }
+        uint8_t note_before = st->note;
         if (apply_step_edit(st, e1_amount, e2_amount, e1b, e2b)) changed = true;
+        if (st->note != note_before) note_changed = true;
+        if (lowest < 0) lowest = s;
+    }
+    if (note_changed && pat->tracks[track].type == TRACK_TYPE_SYNTH) {
+        ui.last_note[track] = pat->steps[track][lowest].note;
     }
     return changed;
 }
@@ -604,7 +707,7 @@ static void handle_step_grid(encoder_turn_t e1, encoder_turn_t e2,
         }
         for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
             if (taps & (1u << s)) {
-                pattern_toggle_step(pat, track, s);
+                toggle_step(pat, track, s);
                 changed = true;
             }
         }
@@ -728,7 +831,11 @@ static void handle_step_edit(encoder_turn_t e1, encoder_turn_t e2,
     pattern_t *pat = &g_seq.patterns[pattern_index];
     step_t *st = &pat->steps[track][ui.edit_step];
 
+    uint8_t note_before = st->note;
     if (apply_step_edit(st, e1.amount, e2.amount, e1b, e2b)) changed = true;
+    if (st->note != note_before && pat->tracks[track].type == TRACK_TYPE_SYNTH) {
+        ui.last_note[track] = st->note;
+    }
 
     // Enc2 press: back to the screen the editor was opened from
     if (e2b == BTN_PRESS) {
@@ -749,7 +856,7 @@ static void handle_step_edit(encoder_turn_t e1, encoder_turn_t e2,
     if (steps->long_pressed) {
         for (int s = 0; s < STEPS_PER_PATTERN; s++) {
             if (steps->long_pressed & (1u << s)) {
-                pattern_toggle_step(pat, track, s);
+                toggle_step(pat, track, s);
                 changed = true;
             }
         }
@@ -843,6 +950,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
         } else {
             show_notify(flash_storage_save() ? "SAVED OK" : "SAVE FAILED");
             drop_step_gestures();   // steps held through the stall do nothing
+            drop_pad_holds();
         }
     }
 
@@ -853,6 +961,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
         } else {
             show_notify(flash_storage_load() ? "LOADED OK" : "LOAD FAILED");
             drop_step_gestures();
+            drop_pad_holds();       // also when nothing was loaded
         }
     }
 
@@ -1382,6 +1491,8 @@ static void render_pattern_view(const transport_snapshot_t *snap) {
         }
         display_draw_pattern_view(pat, track, g_seq.transport.current_track_step[track],
                                   held_step);
+        // A SYNTH roll prints the tempo in its own info column.
+        if (pat->tracks[track].type == TRACK_TYPE_SYNTH) return;
     }
     display_draw_bpm(g_seq.transport.bpm);
 }
@@ -1471,6 +1582,7 @@ void ui_init(void) {
     memset(&ui, 0, sizeof(ui));
     ui.mode = UI_SESSION;
     ui.step_edit_return = UI_SESSION;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) ui.last_note[track] = 60;
     session_init();         // Reads the transport: call after sequencer_init
 }
 

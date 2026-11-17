@@ -385,6 +385,74 @@ TEST(test_pattern_shift_track_left_wraps_16_steps) {
     ASSERT_EQ(p.steps[0][0].flags, 0);
 }
 
+TEST(test_pattern_copy_track_copies_effective_length) {
+    pattern_t src, dst;
+    pattern_init(&src, 0);
+    pattern_init(&dst, 1);
+    src.length = 8;
+    src.track_length[2] = 0;
+    pattern_set_step(&src, 2, 3, 70, 90, STEP_FLAG_ACTIVE | STEP_FLAG_SLIDE);
+    src.kit_steps[2][5] = 0x1234u;
+    ASSERT_EQ(dst.length, 16);
+
+    pattern_copy_track(&dst, &src, 2);
+
+    ASSERT_EQ(dst.track_length[2], 8);
+    ASSERT_EQ(pattern_get_track_length(&dst, 2), pattern_get_track_length(&src, 2));
+    ASSERT_TRUE(memcmp(dst.steps[2], src.steps[2], sizeof(dst.steps[2])) == 0);
+    ASSERT_TRUE(memcmp(dst.kit_steps[2], src.kit_steps[2], sizeof(dst.kit_steps[2])) == 0);
+    ASSERT_EQ(dst.length, 16);
+}
+
+TEST(test_pattern_copy_track_leaves_everything_else) {
+    pattern_t src, dst, before;
+    pattern_init(&src, 0);
+    pattern_init(&dst, 1);
+    src.length = 4;
+    src.track_length[1] = 0;
+    src.swing = 40;
+    src.tracks[1].type = TRACK_TYPE_KIT;
+    src.tracks[1].muted = true;
+    pattern_set_step(&src, 1, 0, 65, 80, STEP_FLAG_ACTIVE);
+    pattern_set_step(&dst, 0, 0, 50, 60, STEP_FLAG_ACTIVE);
+    pattern_set_step(&dst, 3, 4, 52, 60, STEP_FLAG_ACTIVE);
+    dst.swing = 10;
+    dst.track_length[3] = 5;
+    before = dst;
+
+    pattern_copy_track(&dst, &src, 1);
+
+    ASSERT_TRUE(memcmp(dst.steps[0], before.steps[0], sizeof(dst.steps[0])) == 0);
+    ASSERT_TRUE(memcmp(dst.steps[3], before.steps[3], sizeof(dst.steps[3])) == 0);
+    for (int t = 0; t < NUM_TRACKS; t++) {
+        ASSERT_TRUE(memcmp(&dst.tracks[t], &before.tracks[t], sizeof(dst.tracks[t])) == 0);
+        if (t != 1) {
+            ASSERT_EQ(dst.track_length[t], before.track_length[t]);
+            ASSERT_TRUE(memcmp(dst.kit_steps[t], before.kit_steps[t], sizeof(dst.kit_steps[t])) == 0);
+        }
+    }
+    ASSERT_EQ(dst.length, before.length);
+    ASSERT_EQ(dst.swing, 10);
+    ASSERT_STR_EQ(dst.name, before.name);
+    ASSERT_EQ(dst.steps[1][0].note, 65);
+    ASSERT_EQ(dst.track_length[1], 4);
+}
+
+TEST(test_pattern_copy_track_invalid_changes_nothing) {
+    pattern_t src, dst, before;
+    pattern_init(&src, 0);
+    pattern_init(&dst, 1);
+    pattern_set_step(&src, 0, 0, 70, 90, STEP_FLAG_ACTIVE);
+    before = dst;
+
+    pattern_copy_track(&dst, &src, NUM_TRACKS);
+    ASSERT_TRUE(memcmp(&dst, &before, sizeof(dst)) == 0);
+
+    before = src;
+    pattern_copy_track(&src, &src, 0);
+    ASSERT_TRUE(memcmp(&src, &before, sizeof(src)) == 0);
+}
+
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(void) {
@@ -425,6 +493,9 @@ int main(void) {
     RUN(test_pattern_clear_track);
     RUN(test_pattern_shift_track_right_wraps_16_steps);
     RUN(test_pattern_shift_track_left_wraps_16_steps);
+    RUN(test_pattern_copy_track_copies_effective_length);
+    RUN(test_pattern_copy_track_leaves_everything_else);
+    RUN(test_pattern_copy_track_invalid_changes_nothing);
 
     printf("\n  %d/%d tests passed\n\n", tests_passed, tests_run);
     return (tests_passed == tests_run) ? 0 : 1;

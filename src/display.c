@@ -322,7 +322,172 @@ static void draw_mutes_and_queue(uint8_t track) {
     }
 }
 
+// ─── Piano Roll (Pattern view of a SYNTH clip) ─────────────────
+//
+// Time runs top to bottom (4 px per step, step 1 at the top), pitch left to
+// right (4 px per semitone, 26 semitones). The info column takes x 0..23.
+// Every coordinate is an int and is clipped to the roll before it reaches a
+// drawing primitive, because those take uint8_t and would wrap.
+
+#define ROLL_X0         24      // First roll column
+#define ROLL_X1         127     // Last roll column
+#define ROLL_SEMITONES  26
+#define ROLL_STEP_H     4
+#define ROLL_BASE_MAX   (127 - (ROLL_SEMITONES - 1))
+
+static int roll_clamp(int v, int lo, int hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+// A pixel of the roll; anything outside it is dropped.
+static void roll_set(int x, int y, bool on) {
+    if (x < ROLL_X0 || x > ROLL_X1 || y < 0 || y >= OLED_HEIGHT) return;
+    ssd1309_set_pixel((uint8_t)x, (uint8_t)y, on);
+}
+
+static void roll_hline(int x0, int x1, int y) {
+    for (int x = x0; x <= x1; x++) roll_set(x, y, true);
+}
+
+static bool roll_step_on(const pattern_t *p, uint8_t track, int s, uint8_t length) {
+    return s >= 0 && s < (int)length && (p->steps[track][s].flags & STEP_FLAG_ACTIVE);
+}
+
+// The lowest note of the window: a pure function of the clip and the held
+// step, so it needs no state between frames.
+static int roll_window_base(const pattern_t *p, uint8_t track, uint8_t length,
+                            int8_t held_step) {
+    int lo = 127, hi = 0;
+    bool any = false;
+    for (int s = 0; s < STEPS_PER_PATTERN; s++) {
+        if (!roll_step_on(p, track, s, length)) continue;
+        int note = p->steps[track][s].note;
+        if (note < lo) lo = note;
+        if (note > hi) hi = note;
+        any = true;
+    }
+    if (!any) lo = hi = 60;
+
+    int span = hi - lo;
+    int b = span <= ROLL_SEMITONES - 1 ? lo - (ROLL_SEMITONES - 1 - span) / 2 : lo;
+    // A step being edited must never leave the window.
+    if (held_step >= 0 && roll_step_on(p, track, held_step, length)) {
+        int h = p->steps[track][held_step].note;
+        b = roll_clamp(b, h - (ROLL_SEMITONES - 1), h);
+    }
+    return roll_clamp(b, 0, ROLL_BASE_MAX);
+}
+
+// First column of a note's block; a note outside the window gets the edge column.
+static int roll_column(int note, int base) {
+    if (note < base) return ROLL_X0;
+    if (note >= base + ROLL_SEMITONES) return ROLL_X1;
+    return ROLL_X0 + 4 * (note - base);
+}
+
+static void draw_piano_roll(const pattern_t *p, uint8_t track, uint8_t play_step,
+                            int8_t held_step) {
+    uint8_t length = pattern_get_track_length(p, track);
+    if (length > STEPS_PER_PATTERN) length = STEPS_PER_PATTERN;
+    int base = roll_window_base(p, track, length, held_step);
+    bool held = held_step >= 0 && held_step < STEPS_PER_PATTERN;
+
+    // Beat lines first, so that notes draw over them.
+    for (int s = 3; s < STEPS_PER_PATTERN - 1; s += 4) {
+        for (int n = 0; n < ROLL_SEMITONES; n++) {
+            roll_set(ROLL_X0 + 4 * n + 3, s * ROLL_STEP_H + 3, true);
+        }
+    }
+
+    for (int s = 0; s < STEPS_PER_PATTERN; s++) {
+        int y = s * ROLL_STEP_H;
+        if (s >= length) {
+            // Dotted line: the step is outside the clip, and its notes stay hidden.
+            for (int x = ROLL_X0; x <= ROLL_X1; x += 2) roll_set(x, y + 1, true);
+            continue;
+        }
+        if (!roll_step_on(p, track, s, length)) continue;
+
+        const step_t *st = &p->steps[track][s];
+        int x = roll_column(st->note, base);
+        bool inside = st->note >= base && st->note < base + ROLL_SEMITONES;
+        int width = !inside ? 1 : ((st->flags & STEP_FLAG_ACCENT) ? 4 : 3);
+        for (int row = 0; row < 3; row++) roll_hline(x, x + width - 1, y + row);
+
+        // Row y+3 belongs to the slide and the tie.
+        if ((st->flags & STEP_FLAG_SLIDE) && roll_step_on(p, track, s + 1, length)) {
+            uint8_t next = p->steps[track][s + 1].note;
+            int xn = roll_column(next, base);
+            bool next_inside = next >= base && next < base + ROLL_SEMITONES;
+            int from = x < xn ? x : xn;
+            int to = x > xn ? x : xn;
+            // The line ends on the last column of the far block; an edge bar
+            // is one column wide, so the line stops on it.
+            if (x > xn ? inside : next_inside) to += 2;
+            roll_hline(from, to, y + 3);
+        }
+        if (st->flags & STEP_FLAG_TIE) roll_set(x + 1, y + 3, true);
+    }
+
+    // The playing step: invert its four rows, under the old grid's condition.
+    if (play_step < length &&
+        p == seq_playing_pattern(track) &&
+        g_seq.transport.state == TRANSPORT_PLAYING) {
+        for (int y = play_step * ROLL_STEP_H; y < (play_step + 1) * ROLL_STEP_H; y++) {
+            for (int x = ROLL_X0; x <= ROLL_X1; x++) {
+                roll_set(x, y, !ssd1309_get_pixel((uint8_t)x, (uint8_t)y));
+            }
+        }
+    }
+
+    // Info column: four characters per line, lines 8 px apart.
+    char text[8];
+    char label[4];
+    pattern_label(g_seq.active_pattern[track], label, sizeof(label));
+    snprintf(text, sizeof(text), "%.2sT%d", label, track + 1);
+    ssd1309_draw_string(0, 0, text, false);
+    snprintf(text, sizeof(text), "L%u", (unsigned)length);
+    ssd1309_draw_string(0, 8, text, false);
+
+    if (held) {
+        const step_t *st = &p->steps[track][held_step];
+        char note_str[5];
+        note_to_str(st->note, note_str);
+        snprintf(text, sizeof(text), "S%02d", held_step + 1);
+        ssd1309_draw_string(0, 16, text, false);
+        ssd1309_draw_string(0, 24, note_str, false);
+        snprintf(text, sizeof(text), "v%d", st->velocity);
+        ssd1309_draw_string(0, 32, text, false);
+        char flags[4] = "";
+        size_t n = 0;
+        if (st->flags & STEP_FLAG_ACCENT) flags[n++] = 'A';
+        if (st->flags & STEP_FLAG_SLIDE)  flags[n++] = 'S';
+        if (st->flags & STEP_FLAG_TIE)    flags[n++] = 'T';
+        flags[n] = '\0';
+        ssd1309_draw_string(0, 40, flags, false);
+    }
+
+    char note_str[5];
+    note_to_str((uint8_t)base, note_str);
+    ssd1309_draw_string(0, 48, note_str, false);
+    snprintf(text, sizeof(text), "%d", (int)(g_seq.transport.bpm + 0.5f));
+    ssd1309_draw_string(0, 56, text, false);
+
+    // Held step marker in column 23, the spare column of the info column. It
+    // goes last because the text above clears the gap after every character.
+    if (held) {
+        for (int y = held_step * ROLL_STEP_H; y < (held_step + 1) * ROLL_STEP_H; y++) {
+            ssd1309_set_pixel(ROLL_X0 - 1, (uint8_t)y, true);
+        }
+    }
+}
+
 void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step, int8_t held_step) {
+    if (p->tracks[track].type == TRACK_TYPE_SYNTH) {
+        draw_piano_roll(p, track, step, held_step);
+        return;
+    }
+
     // ── Header line ──
     char label[4];
     pattern_label(g_seq.active_pattern[track], label, sizeof(label));

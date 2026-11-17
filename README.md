@@ -112,6 +112,17 @@ buttons edit it.
   pad cancels the queue; pressing the playing pad changes nothing except that
   it cancels a pending queue to another slot of that track. An empty slot
   launches too, which silences the track.
+- **Copy a clip:** hold a pad for half a second, then press another pad of the
+  same track. The first pad's clip (steps, kit steps and length, not the
+  track's routing or mute) is written over the second pad's, and the OLED
+  shows `COPY A1>A3`. The second press does not launch or queue anything, so
+  a clip that is playing or queued stays so and plays the copy. In the
+  Session view the focus moves to the copy. The first pad stands for the
+  clip it had when it was pressed, so changing the bank during the hold
+  copies into another bank. Two pads pressed less than half a second apart are
+  two launches, and a hold that the panel may have lost (after a panic, a
+  save or load, or a panel error) is not trusted: press the source again.
+  An existing clip in the target is overwritten and there is no undo.
 - **SCENE:** launches the row on every track together; tracks already playing
   it keep playing. Pressed while any track is queued to that row, it cancels
   all queues.
@@ -145,6 +156,19 @@ buttons edit it.
 - The step editor returns to the screen it was opened from. In the pattern
   view, encoder 1 long returns to the Session view; in the selector, encoder 2
   long does.
+- The Pattern view of a SYNTH clip is a piano roll: time runs from top to
+  bottom (step 1 at the top, four pixels a step) and pitch from left to right
+  (four pixels a semitone, a window of 26 semitones that follows the clip's
+  lowest and highest notes). A note is a 3x3 block, 4 wide with accent; a line
+  under the block runs to the next note for a slide, and a single dot under it
+  is a tie. A note outside the window is a bar at the left or right edge. Steps
+  beyond the clip's length are a dotted line and show no notes, a row of dots
+  after every fourth step marks the beats, and the step the track is playing is
+  inverted. The four
+  characters at the left show clip and track, length, the note at the window's
+  left edge and the tempo; while a step is held they also show its number,
+  note, velocity and flags (A accent, S slide, T tie), and a mark beside the
+  step's rows. A DRUM clip keeps the step grid, and a kit its lanes.
 - Pattern view step buttons on a SYNTH or DRUM track: a tap shorter than half
   a second toggles the step when the button is released. Hold one or more steps
   and turn encoder 1 for note or encoder 2 for velocity; encoder 1 short/long
@@ -156,6 +180,11 @@ buttons edit it.
   instead (see Editing a kit): a short press cycles it on release, a long press
   opens the kit step editor, and a held kit step takes no encoder, so TRACK
   still walks and VALUE still sets the tempo.
+- A new SYNTH step starts at the note last entered on that track (C4 after
+  power-up), not at C4: the last note is what a turn of encoder 1 on held steps
+  or in the step editor left on the lowest step it changed. Steps that already
+  have a note keep it, and DRUM and kit tracks do not use it. It is not saved.
+  Holding empty steps and turning therefore moves them relative to it.
 - Hold both encoder buttons for Panic: it stops playback and returns to the
   Session view. Release both before issuing another command; keys held through
   the panic or pressed while it is held do nothing afterwards.
