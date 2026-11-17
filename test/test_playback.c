@@ -525,9 +525,18 @@ static void test_full_queue_drains_free_uart_before_dropping(void) {
 
 // ─── The input: the UART interrupt receives into a ring ──────────
 
+// The handler must have read every received byte before it takes the TX lock:
+// core 1 can hold that lock, and the UART keeps only one byte meanwhile.
+static void assert_rx_drained(spin_lock_t *lock) {
+    (void)lock;
+    CHECK(fake_uart_rx_pending() == 0);
+}
+
 static void rx_push(const uint8_t *bytes, unsigned count) {
     fake_uart_rx_push(bytes, count);
+    fake_before_lock = assert_rx_drained;
     fake_irq_handlers[UART0_IRQ]();
+    fake_before_lock = NULL;
 }
 
 static void test_midi_in_irq_stays_enabled(void) {

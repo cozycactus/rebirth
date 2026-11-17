@@ -25,7 +25,9 @@
 // Note On (with the Note Off of a retrigger) leaves at most half the queue used; a Note
 // Off may fill it, as it must not be refused for long.
 #define THRU_ON_QUEUE_MAX  ((MIDI_TX_QUEUE_SIZE - 1u) / 2u)
-#define THRU_OFF_QUEUE_MAX (MIDI_TX_QUEUE_SIZE - 1u)
+// A release may use more of the queue than a new note, but never all of it:
+// the sequencer's own sends must still fit, or the overflow rule stops it.
+#define THRU_OFF_QUEUE_MAX ((MIDI_TX_QUEUE_SIZE - 1u) * 3u / 4u)
 #define THRU_NONE 0xFF
 
 // A pad held this long is a clip copy source for the next pad of its track.
@@ -326,7 +328,7 @@ static void handle_midi_input(const step_buttons_t *steps) {
     uint8_t byte;
     if (ui.panic_latched) {
         // Keys pressed during a panic do nothing, not even once it is released.
-        while (midi_in_read(&byte)) {}
+        midi_in_flush();        // constant time, however fast bytes arrive
         midi_in_parser_reset(&ui.midi_parser);
         ui.midi_dropped_seen = midi_in_dropped();
         return;
@@ -1123,6 +1125,8 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
             show_notify("STOP TO SAVE");
         } else {
             thru_release_all();     // the stall would leave a held key sounding
+            midi_wait_output_idle();    // a release the full queue refused goes out
+            thru_retry_releases();      // now, not after the stall
             show_notify(flash_storage_save() ? "SAVED OK" : "SAVE FAILED");
             midi_in_gap();          // interrupts were off: bytes may be lost
             drop_step_gestures();   // steps held through the stall do nothing
@@ -1136,6 +1140,8 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
             show_notify("STOP TO LOAD");
         } else {
             thru_release_all();
+            midi_wait_output_idle();
+            thru_retry_releases();
             show_notify(flash_storage_load() ? "LOADED OK" : "LOAD FAILED");
             midi_in_gap();
             drop_step_gestures();
@@ -1762,6 +1768,9 @@ void ui_init(void) {
     ui.step_edit_return = UI_SESSION;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) ui.last_note[track] = 60;
     thru_forget();
+    // Bytes that arrived since midi_init() are dropped: if the ring overflowed
+    // meanwhile, a Note On could be in it without its Note Off.
+    midi_in_flush();
     midi_in_parser_reset(&ui.midi_parser);
     ui.midi_dropped_seen = midi_in_dropped();
     session_init();         // Reads the transport: call after sequencer_init

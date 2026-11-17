@@ -3861,6 +3861,59 @@ static void test_midi_note_off_that_finds_the_queue_full_stays_pending(void) {
     CHECK(sent(KEY_OFF, 60) == 1);
 }
 
+// A release must leave room for the sequencer: with the queue three quarters
+// full it waits, and the sequencer's next message still fits.
+static void test_midi_note_off_leaves_room_for_the_sequencer(void) {
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    fake_uart_writable = false;
+    for (unsigned sent_bytes = 0; sent_bytes + 3u <= (MIDI_TX_QUEUE_SIZE - 1u) * 3u / 4u; sent_bytes += 3u) {
+        midi_send_note_on(1, 10, 100);
+    }
+    MIDI_UPDATE(KEY_OFF, 60, 0);            // refused: it would pass the three quarters
+    for (unsigned n = 0; n < 60; n++) midi_send_note_on(1, 11, 100);    // the sequencer still fits
+    CHECK(!midi_output_overflowed());
+    fake_uart_writable = true;
+    ui_update();
+    CHECK(sent(KEY_OFF, 60) == 1);
+}
+
+// Bytes that arrive between midi_init() and ui_init() are thrown away: the ring
+// may have overflowed and lost a Note Off.
+static void test_midi_input_from_before_the_ui_started_is_dropped(void) {
+    uint8_t stream[3 + 61 + 3] = { KEY_ON, 60, 100 };
+    memset(stream + 3, 0xF8, 61);
+    stream[64] = KEY_OFF; stream[65] = 60; stream[66] = 0;     // does not fit the ring
+    fake_uart_rx_push(stream, sizeof(stream));
+    fake_irq_handlers[UART0_IRQ]();
+    CHECK(midi_in_dropped() > 0);
+    ui_init();
+    fake_midi_length = 0;
+    ui_update();
+    ui_update();
+    CHECK(sent(KEY_ON, 60) == 0);
+}
+
+// With the queue full and the UART not taking bytes the release is refused.
+// The UART starts taking bytes again once that has happened: the save must
+// wait for the queue and send the release before the stall, not after it.
+static void uart_resumes_once_a_release_is_pending(spin_lock_t *lock) {
+    (void)lock;
+    if (ui.thru_pending_count) fake_uart_writable = true;
+}
+
+static void test_midi_save_sends_a_refused_release_before_the_stall(void) {
+    ui.mode = UI_PATTERN_SELECT;
+    MIDI_UPDATE(KEY_ON, 60, 100);
+    fake_uart_writable = false;
+    for (unsigned n = 0; n < (MIDI_TX_QUEUE_SIZE - 1u) / 3u; n++) midi_send_note_on(1, 10, 100);
+    fake_before_lock = uart_resumes_once_a_release_is_pending;
+    step_down(1u << 8);                     // save
+    fake_before_lock = NULL;
+    CHECK(strcmp(ui.notify_msg, "SAVED OK") == 0);
+    CHECK(sent(KEY_OFF, 60) == 1);
+    CHECK(fake_uart_wait_midi_length == fake_midi_length);     // nothing left for after the stall
+}
+
 static void test_midi_all_notes_off_from_the_keyboard_releases_every_key(void) {
     MIDI_UPDATE(KEY_ON, 60, 100, 64, 100, 67, 100);
     CHECK(sent(KEY_ON, 60) + sent(KEY_ON, 64) + sent(KEY_ON, 67) == 3);
@@ -4184,6 +4237,9 @@ int main(int argc, char **argv) {
     RUN(test_midi_write_while_playing_is_heard);
     RUN(test_midi_flood_never_overflows_the_queue);
     RUN(test_midi_note_off_that_finds_the_queue_full_stays_pending);
+    RUN(test_midi_note_off_leaves_room_for_the_sequencer);
+    RUN(test_midi_input_from_before_the_ui_started_is_dropped);
+    RUN(test_midi_save_sends_a_refused_release_before_the_stall);
     RUN(test_midi_all_notes_off_from_the_keyboard_releases_every_key);
     RUN(test_midi_lost_bytes_are_a_gap);
     RUN(test_midi_save_releases_the_keys_and_resets_the_parser);

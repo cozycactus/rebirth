@@ -121,12 +121,15 @@ keyboard sends on.
   set that flag. It uses `midi_try_send_bytes_capped()`: a Note On (with the
   Note Off of a retrigger, as one batch) is sent only if the queue then holds
   at most half its capacity; if not, the key is dropped and not entered in
-  the table. A Note Off may fill the queue completely; if even that fails the
-  note stays in the table, marked for release, and the release is tried again
-  on every pass.
+  the table. A Note Off may fill the queue to three quarters, so the
+  sequencer's own sends still fit; if that fails the note stays in the table,
+  marked for release, and the release is tried again on every pass.
 - **Release all** (a gap, `MIDI_IN_ALL_OFF`): every note in the table gets
   its Note Off by the rule above.
-- Before a flash save or load starts, release all; after it, a gap. At a
+- Before a flash save or load starts, release all, wait for the output queue
+  to empty (the transport is stopped there) and retry any refused release, so
+  no Note Off is left for after the stall; after it, a gap. `ui_init()` also
+  empties the ring: bytes from before the UI started may have lost a Note Off. At a
   panic the table is simply cleared: All Notes Off has gone out. The timer's
   own panic (queue overflow) does not tell the UI; the table then holds stale
   entries, which cost one redundant Note Off each when the key is released.
