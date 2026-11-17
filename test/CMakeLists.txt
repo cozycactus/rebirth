@@ -76,6 +76,22 @@ target_compile_definitions(test_sync_gain2 PRIVATE MOCK_HARDWARE=1 CV_DAC_GAIN=2
 add_test(NAME sync_gain2_tests COMMAND test_sync_gain2)
 add_test(NAME song_tests COMMAND test_song)
 
+# Following an external MIDI clock: the sequencer, the UART interrupt and the clock path.
+add_executable(test_clock
+    test_clock.c
+    fakes/fake_hardware.c
+    ${REBIRTH_SRC}/pattern.c
+    ${REBIRTH_SRC}/kit.c
+    ${REBIRTH_SRC}/song.c
+    ${REBIRTH_SRC}/shared_state.c
+    ${REBIRTH_SRC}/midi_out.c
+    ${REBIRTH_SRC}/clock_in.c
+)
+target_include_directories(test_clock PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
+target_compile_definitions(test_clock PRIVATE ${REBIRTH_HOST_DEFS})
+add_test(NAME clock_tests COMMAND test_clock)
+set_tests_properties(clock_tests PROPERTIES TIMEOUT 60)
+
 add_executable(test_storage
     test_storage.c
     fakes/fake_hardware.c

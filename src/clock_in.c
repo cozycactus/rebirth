@@ -148,8 +148,9 @@ uint32_t __not_in_flash_func(clock_est_tick)(clock_est_t *e, uint32_t t_us) {
                                                  : e->shown_x16 - short_x16;
         e->off = diff * 25u > e->shown_x16 ? (uint8_t)(e->off + 1u) : 0;
         if (e->off >= 3) {
-            // A tempo change: restart the window from the last short window.
-            e->window_start = last >= CLOCK_EST_SHORT ? last - CLOCK_EST_SHORT : 0;
+            // A tempo change: restart the window from the last two intervals, which
+            // three Clocks off in a row place after the change.
+            e->window_start = last >= 2u ? last - 2u : 0;
             e->shown_x16 = 0;
             e->off = 0;
         }
