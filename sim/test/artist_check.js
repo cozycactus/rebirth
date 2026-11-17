@@ -123,14 +123,15 @@ function playSong(core, song, form) {
   check(overrunsAfterSave <= 1, 'timer overruns during the preparation: ' + overrunsAfterSave);
 
   // ─── The set ──────────────────────────────────────────────────
+  const where = point => 'bar ' + point.bar + (point.beat ? ' beat ' + point.beat : '');
   for (const point of show.expectedPlaying) {
     run(point.t);
     for (let track = 0; track < 8; track++) {
       check(device.current(track) === point.map[track] - 1,
-        'bar ' + point.bar + ': track ' + (track + 1) + ' plays row ' + (device.current(track) + 1) + ', want ' + point.map[track]);
+        where(point) + ': track ' + (track + 1) + ' plays row ' + (device.current(track) + 1) + ', want ' + point.map[track]);
     }
     check(device.inspect().mutes === point.map.muted,
-      'bar ' + point.bar + ': mutes ' + device.inspect().mutes.toString(2) + ', want ' + point.map.muted.toString(2));
+      where(point) + ': mutes ' + device.inspect().mutes.toString(2) + ', want ' + point.map.muted.toString(2));
   }
   run(show.end + 500000);
   verifyPatterns('end', show.model);
@@ -198,12 +199,23 @@ function playSong(core, song, form) {
       ', the clip holds ' + want.join(' '));
     melodic += got.length;
   }
-  // A track muted for good is silent from the downbeat it leaves on. The kick
-  // and the kit share channel 10: the kick is note 36 there.
+  // A track muted for good is silent from the downbeat it leaves on to the
+  // end of the set. The kick and the kit share channel 10: the kick is note 36 there.
   for (const { bar, track } of show.silent) {
     const channel = track < 2 ? 9 : track;
-    const late = notesIn(bar, channel).filter(m => track >= 2 || (m.d1 === 36) === (track === 0));
+    const late = midi.filter(m => (m.status & 0xF0) === 0x90 && m.d2 > 0 && (m.status & 15) === channel && m.t >= barStart(bar) - 500)
+      .filter(m => track >= 2 || (m.d1 === 36) === (track === 0));
     check(late.length === 0, 'bar ' + bar + ': ' + Artist.TRACK_NAME[track] + ' still played ' + late.length + ' notes after its mute');
+  }
+  // A kick fill is on the wire: steps 15 and 16 in the bar it is written in
+  // and the next, gone again in the bar after.
+  const kickSteps = bar => notesIn(bar, 9).filter(m => m.d1 === 36)
+    .map(m => Math.round((m.t - barStart(bar)) * 16 / show.barUs) + 1);
+  for (const { bar } of show.fills) {
+    for (const [b, want] of [[bar, true], [bar + 1, true], [bar + 2, false]]) {
+      const steps = kickSteps(b), has = steps.includes(15) && steps.includes(16);
+      check(has === want, 'bar ' + b + ': kick fill ' + (want ? 'missing' : 'still there') + ', kick on steps ' + steps.join(' '));
+    }
   }
   console.log('heard: ' + melodic + ' notes in ' + (show.heard.length + (show.edited ? 1 : 0)) + ' clip-bars match the score; ' +
     show.silent.length + ' final mutes land before their downbeat');

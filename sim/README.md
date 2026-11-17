@@ -72,21 +72,29 @@ Resonance, Env Mod, Decay, Accent, Volume) and the waveform switch are the
 model's own, 0 to 1 of a turn, and start where the Bench page starts them; the
 channel strip in `rig.js` brings the level up to the rest of the rig.
 
-Each 303 also has the effects of the Bench page (`BenchFx` in `rig.js`, ported
-from that page's `buildFx`: distortion, a tempo-synced ping-pong delay, a
-reverb with a generated tail), in place of sends to the rig's own delay and
-reverb. Its tempo is the device's MIDI Clock. These eight knobs act when they
-are turned: a move scheduled ahead or stretched over time is taken at once.
+The effects of the Bench page are ported from that page's `buildFx` into
+`rig.js`. Each 303 keeps the distortion (`Distortion`: Drive and Color) in its
+channel, before the fader. The tempo-synced ping-pong delay and the reverb
+with a generated tail (`SendFx`) are the rig's send effects, shared by every
+instrument: each mixer strip has a delay send and a reverb send, taken after
+its fader, and the delay's echoes also reach the reverb. The delay follows the
+device's MIDI Clock, down to its slowest tempo (a 1/2 note at 20 BPM is 6 s).
+The two returns and the feedback glide when the artist moves them over bars;
+Time, Size, Tone, Drive and Color act when they are turned. The returns are
+set so that the mix is as loud as with the rig's earlier delay and reverb
+(checked by rendering the same bars of a set through both).
 
 On the page each 303 is drawn as the Bench page draws its one: the panel with
-its knobs, switch and ladder-current meter, and the Effects board, in that
-page's colours and type (three fonts from Google Fonts; without a network the
-fallbacks are used). Above them is a small mixer: a fader and a mute for every
-instrument, a lamp that shows the device sending it a note, and the master
-with a peak meter. The mixer's mute is not the device's MUTE. Every strip has
-a pan knob and, except the 303s (which have their own delay and reverb), sends
-to the rig's delay and reverb, taken after the fader; they start where the mix
-had them fixed. The 909's reverb send reaches the snare, clap and crash only.
+its knobs, switch and ladder-current meter, and its Distortion board; the
+shared Effects board is drawn the same way above them, in that page's colours
+and type (three fonts from Google Fonts; without a network the fallbacks are
+used). Above it is a small mixer: a fader, a mute, delay and reverb sends and
+a pan for every instrument, a lamp that shows the device sending it a note,
+and the master with a peak meter. The mixer's mute is not the device's MUTE;
+as on a console, it silences the strip and its sends, and what is already in
+the delay and the reverb rings out. The sends and pans start where the mix
+had them fixed; the 909's reverb send reaches the snare, clap and crash only.
+The pad synth has no strip.
 
 ## The artist
 
@@ -113,20 +121,22 @@ four arrangements (`Artist.FORMS`, `options.form`; each song names the one it
 was written for):
 
 - `classic`: from the kick alone to a peak, a break with a riser, the return,
-  the tracks leaving one by one;
+  the tracks leaving one or two at a time;
 - `sunrise`: no kick at first, the melody alone in reverb, then the kick and
   the bass together; the melody leads and leaves last;
 - `twopeaks`: the kick and the bass from the first bar, a short break, a
   first peak, a long break and a second peak;
-- `hypnotic`: no break at all; the acid leads, the kick drops out for a bar
-  now and then.
+- `hypnotic`: no long break; the acid leads, the kick drops out for a bar
+  now and then, and once, with the bass, for two.
 
 A clip on the device has at most 16 steps. The arrangements make longer
 phrases the way the device does: two clips of a track taken in turn, a clip of
-12 or 14 steps against the bar, mutes and scenes. An arrangement is a list of
-the artist's moves written with the helpers of `stage()`; it also records what
-the check should find: the rows and mutes at chosen bars, the clips that play
-whole in a bar, the notes changed live, and the tracks muted for good.
+10 to 14 steps against the bar (an arp of 3 to 7), mutes and scenes. An
+arrangement is a list of the artist's moves written with the helpers of
+`stage()`; it also records what the check should find: the rows and mutes at
+chosen bars and, for a change on the beat, at chosen beats; the clips that
+play whole in a bar; the notes changed live; a kick fill on the wire; and the
+tracks muted for good, silent to the end of the set.
 
 The score has four variants, chosen by what the firmware under test can do
 (`Artist.buildShow(seed, options)`; the checks read `FW2=1`, `KEYS=1` and

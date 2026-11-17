@@ -856,7 +856,7 @@
     const song = s.song, snd = song.sound;
     const BAR_US = barUs(song.bpm), STEP_US = BAR_US / 16;
     const playAt = s.t, t0 = playAt + START_LATENCY_US;
-    const out = { playAt, t0, barUs: BAR_US, expected: [], heard: [], silent: [], edited: null };
+    const out = { playAt, t0, barUs: BAR_US, expected: [], heard: [], silent: [], fills: [], edited: null };
     const state = Object.assign({}, form.start.rows);    // row per track
     let muted = form.start.muted.reduce((bits, track) => bits | (1 << track), 0);
     const st = { s, song, snd };
@@ -910,6 +910,10 @@
     // plays whole in `bar`; a track that is silent from `bar` on; the clip
     // whose live edits should be on the wire from `bar` on.
     st.snapshot = bar => out.expected.push({ t: t0 + (bar - 1) * BAR_US + BAR_US / 2, bar, map: Object.assign({ muted }, state) });
+    // The same half a beat into `beat` of `bar`, for a change on the beat.
+    // Like snapshot, it takes the rows as the script has them when it is called.
+    st.snapshotAt = (bar, beat) => out.expected.push({ t: t0 + ((bar - 1) * 16 + (beat - 1) * 4 + 2) * STEP_US, bar, beat,
+      map: Object.assign({ muted }, state) });
     st.heard = (bar, ...clips) => { for (const [track, row] of clips) out.heard.push({ bar, track, row }); };
     st.silent = (bar, ...tracks) => { for (const track of tracks) out.silent.push({ bar, track }); };
 
@@ -950,6 +954,7 @@
       s.tap(PAD(T.KICK, row), 80, 120);
       s.tap(STEP(15), 60, 80);
       s.tap(STEP(16), 60, 80);
+      out.fills.push({ bar });       // heard in bars bar and bar + 1, gone in bar + 2
       st.at(bar + 2, 2);
       s.say('device', 'Те же кнопки убирают сбивку');
       s.tap(STEP(15), 60, 80);
@@ -960,9 +965,14 @@
       st.at(bar - 1, 3);
       s.say('device', 'VALUE нажать: квантование запуска 1 BAR → 1 BEAT');
       s.tap(VALUE_SW, 80, 150);
+      // Each pad starts its clip on the next beat: a snapshot half a beat
+      // after that, before the next pad's beat, sees it playing.
       st.at(bar, 1, 80); st.pad(T.ARP, 2, 'смена арпеджио по долям');
+      st.snapshotAt(bar, 3);
       st.at(bar, 3, 80); st.pad(T.ARP, 4, 'и обратно');
+      st.snapshotAt(bar + 1, 1);
       st.at(bar + 1, 1, 80); st.pad(T.ARP, 2, 'ещё раз');
+      st.snapshotAt(bar + 1, 3);
       st.at(bar + 1, 3, 80); st.pad(T.ARP, 4, 'и обратно');
       st.at(bar + 2, 1, 100);
       s.say('device', 'VALUE нажать три раза: NEXT STEP, TRACK LOOP и снова 1 BAR');
@@ -985,7 +995,7 @@
   }
 
   // The first set: from the kick alone to a peak, a break with a riser, the
-  // return, and the tracks leaving one by one.
+  // return, and the tracks leaving one or two at a time.
   function playClassic(st) {
     const { s, snd, at, launchFor, onDownbeat, pad, mute, mutePair, scene, rig, snapshot, heard, silent, clipName } = st;
     snapshot(2);
@@ -1030,6 +1040,7 @@
 
     // The drop.
     onDownbeat(47); mute(T.KICK, 'бочка уходит на два такта');
+    snapshot(47); snapshot(48);
     at(47, 2);
     rig('На синтезаторе: срез ACID 1 вверх до упора за два такта', [['acid1.cutoff', snd.acid1.top, 1.8]]);
     launchFor(49); scene(4, 'весь ряд 4 на всех дорожках со следующего такта');
@@ -1074,7 +1085,7 @@
     at(81, 2);
     rig('На синтезаторе: фильтр ACID 2 открывается', [['acid2.cutoff', snd.acid2.open, 4]]);
 
-    // Outro: tracks leave one by one.
+    // Outro: tracks leave one or two at a time.
     onDownbeat(89); mutePair(T.LEAD, T.ARP, 'мелодия и арпеджио уходят');
     silent(89, T.LEAD, T.ARP);
     at(89, 2);
@@ -1271,9 +1282,9 @@
     st.stop(101);
   }
 
-  // Hypnosis: no break at all. The acid leads from the first bar, the kick
-  // drops out for a bar now and then, and the lines change slowly; a clip of
-  // 12 or 14 steps against 16 does the rest.
+  // Hypnosis: no long break. The acid leads from the first bar, the kick
+  // drops out for a bar now and then and once, with the bass, for two, and
+  // the lines change slowly; a clip of 10 to 14 steps against 16 does the rest.
   function playHypnotic(st) {
     const { s, snd, at, launchFor, onDownbeat, pad, mute, mutePair, rig, snapshot, heard, silent } = st;
     at(1, 3);
@@ -1285,6 +1296,7 @@
     snapshot(14);
     heard(14, [T.ACID1, 2]);
     onDownbeat(16); mute(T.KICK, 'бочка пропускает один такт');
+    snapshot(16);
     launchFor(17); pad(T.KIT, 2);
     onDownbeat(17); mute(T.KICK, 'и возвращается');
     snapshot(18);
@@ -1298,6 +1310,7 @@
     st.liveEdits(28);
     snapshot(31);
     onDownbeat(32); mute(T.KICK, 'бочка пропускает такт');
+    snapshot(32);
     launchFor(33); pad(T.ARP, 4, st.clipName(T.ARP, 4)); pad(T.KIT, 3);
     onDownbeat(33); mute(T.KICK, 'и возвращается');
     launchFor(37); pad(T.ACID1, 4, 'плотная линия'); pad(T.ACID2, 3);
@@ -1308,6 +1321,7 @@
 
     // The one drop: two bars without the kick and the bass.
     onDownbeat(47); mutePair(T.KICK, T.BASS, 'бочка и бас уходят на два такта');
+    snapshot(47); snapshot(48);
     at(47, 2);
     rig('На синтезаторе: срез ACID 1 вверх до упора за два такта', [['acid1.cutoff', snd.acid1.top, 1.8]]);
     launchFor(49); pad(T.LEAD, 3, 'мелодия, впервые за сет'); pad(T.KIT, 4);
@@ -1328,6 +1342,7 @@
     snapshot(68);
     heard(68, [T.ARP, 2], [T.ACID2, 4]);
     onDownbeat(72); mute(T.KICK, 'бочка пропускает такт');
+    snapshot(72);
     launchFor(73); pad(T.LEAD, 4, 'мелодия B');
     onDownbeat(73); mute(T.KICK, 'и возвращается');
     at(73, 2);
@@ -1353,7 +1368,7 @@
   // The forms. `start` is where the artist leaves the device before PLAY: the
   // row of each track (row 8 is empty in every song) and the muted tracks.
   const FORMS = [
-    { id: 'classic', title: 'Классика', about: 'от одной бочки к пику, брейк с райзером, возврат, дорожки уходят по одной',
+    { id: 'classic', title: 'Классика', about: 'от одной бочки к пику, брейк с райзером, возврат, дорожки уходят по одной и парами',
       start: { rows: [1, 1, 1, 1, 8, 8, 8, 8], muted: [T.KIT, T.BASS, T.ACID1],
                text: 'сет начнётся с одной бочки' },
       play: playClassic },
@@ -1365,7 +1380,7 @@
       start: { rows: [1, 1, 1, 1, 8, 8, 8, 8], muted: [T.KIT, T.ACID1],
                text: 'сет начнётся с бочки и баса' },
       play: playTwoPeaks },
-    { id: 'hypnotic', title: 'Гипноз', about: 'без брейка: кислота с первого такта, бочка изредка пропускает такт, линии меняются медленно',
+    { id: 'hypnotic', title: 'Гипноз', about: 'без долгого брейка: кислота с первого такта, бочка изредка пропускает такт, один провал на два такта без бочки и баса, линии меняются медленно',
       start: { rows: [1, 1, 1, 1, 8, 8, 8, 8], muted: [T.KIT, T.BASS],
                text: 'сет начнётся с бочки и глухой кислоты' },
       play: playHypnotic },
@@ -1407,9 +1422,10 @@
       form: s.form,
       model: s.model,
       prepModel,
-      expectedPlaying: live.expected,
+      expectedPlaying: live.expected.slice().sort((a, b) => a.t - b.t),
       heard: live.heard,
       silent: live.silent,
+      fills: live.fills,
       edited: live.edited,
       clips: { synth: s.song.synth, drum: s.song.drum, kit: s.song.kit },
     };

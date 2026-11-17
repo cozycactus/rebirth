@@ -71,21 +71,22 @@
       ({ id, label, group, min: min || 0, max: max == null ? 1 : max, value, unit: unit || '' });
     const out = [
       k('master.volume', 'Volume', 'Master', 0.8),
-      k('delay.feedback', 'Delay feedback', 'Master', 0.45, 0, 0.85),
-      k('delay.level', 'Delay level', 'Master', 0.5),
-      k('reverb.level', 'Reverb level', 'Master', 0.35),
+      // The shared Effects board (the Bench page's delay and reverb): the
+      // returns, the delay's division and feedback, the reverb's tail.
+      k('delay.level', 'Delay', 'Effects', 0.5), k('delay.time', 'Time', 'Effects', 0.4),
+      k('delay.feedback', 'Feedback', 'Effects', 0.45, 0, 0.85),
+      k('reverb.level', 'Space', 'Effects', 0.35), k('reverb.size', 'Size', 'Effects', 0.4),
+      k('reverb.tone', 'Tone', 'Effects', 0.5),
     ];
     for (const [x, g] of [['acid1', 'Acid 1'], ['acid2', 'Acid 2']]) {
       out.push(
-        // The seven knobs of the model and the eight of its effects, named and
-        // set as the Bench page has them.
+        // The seven knobs of the model and the two of its distortion, named
+        // and set as the Bench page has them.
         k(x + '.tune', 'Tune', g, 0.5), k(x + '.cutoff', 'Cut off freq', g, 0.35),
         k(x + '.resonance', 'Resonance', g, 0.85), k(x + '.envmod', 'Env mod', g, 0.6),
         k(x + '.decay', 'Decay', g, 0.35), k(x + '.accent', 'Accent', g, 0.8),
         k(x + '.volume', 'Volume', g, 0.75),
         k(x + '.drive', 'Drive', g, 0), k(x + '.color', 'Color', g, 0.5),
-        k(x + '.delay', 'Delay', g, 0.3), k(x + '.time', 'Time', g, 0.4), k(x + '.fdbk', 'Feedback', g, 0.4),
-        k(x + '.space', 'Space', g, 0.5), k(x + '.size', 'Size', g, 0.55), k(x + '.tone', 'Tone', g, 0.5),
         k(x + '.level', 'Level', g, 0.7));
     }
     out.push(
@@ -94,12 +95,13 @@
       k('arp.level', 'Level', 'Arp', 0.5),
       k('drums.level', 'Kit level', 'Drums', 0.85), k('kick.level', 'Kick level', 'Drums', 0.9),
       k('fx.level', 'Level', 'FX', 0.6), k('fx.riserBars', 'Riser length', 'FX', 8, 1, 16, 'bars'));
-    // The mixer strips' pan (0.5 is the centre) and their sends to the rig's
-    // delay and reverb, set where the mix had them fixed before. The 303s
-    // have their own delay and reverb (Bench page effects), so only a pan.
+    // The mixer strips' pan (0.5 is the centre) and their sends to the
+    // shared delay and reverb, set where the mix had them fixed before. The
+    // 303s had an echo and a tail of their own: their delay sends give the
+    // same echo, their reverb sends a drier tail than Space 0.5 gave them.
     for (const [x, g, pan, delay, reverb] of [
       ['kick', 'Kick', 0.5, 0, 0], ['drums', 'Drums', 0.5, 0, 0.18], ['bass', 'Bass', 0.5, 0, 0],
-      ['acid1', 'Acid 1', 0.375], ['acid2', 'Acid 2', 0.625],
+      ['acid1', 'Acid 1', 0.375, 0.35, 0.5], ['acid2', 'Acid 2', 0.625, 0.35, 0.5],
       ['lead', 'Lead', 0.55, 0.6, 0.25], ['arp', 'Arp', 0.45, 0.5, 0.2], ['fx', 'FX', 0.5, 0.3, 0.5]]) {
       out.push(k(x + '.pan', 'Pan', g, pan));
       if (delay != null) out.push(k(x + '.delay', 'Delay send', g, delay), k(x + '.reverb', 'Reverb send', g, reverb));
@@ -214,67 +216,39 @@
   // The model's line output at its Volume 7.5 is quiet beside the rest of the
   // rig (accents peak near 0.3, about 0.03 RMS): the strip brings it up, so
   // that at the master an accent with its echoes peaks about as high as the
-  // kick.
-  const ACID_GAIN = 7;
+  // kick. (7 when each 303 had its own reverb, whose Space 0.5 left the dry
+  // signal at 0.825: 7 x 0.825.)
+  const ACID_GAIN = 5.8;
 
-  // ---- The effects of the Bench page, one set for each 303 -----------------
+  // ---- The effects of the Bench page --------------------------------------
   // Ported from x0xb0x-vcf-bench/index.html (buildFx and what it calls), with
-  // the rig's master in place of its own limiter. The voice first meets the
-  // distortion: a clean path and a WaveShaper path (tanh with a little
-  // asymmetry, 4x oversampled, then a Color low-pass and a DC block),
-  // crossfaded by Drive, so Drive 0 is a true bypass. Then dry, a delay send
-  // and a reverb send. The delay is a ping-pong pair synced to the tempo, each
-  // repeat through a 250 Hz to 3.5 kHz band, and its echoes go to the reverb
-  // too. The reverb send is high-passed, delayed 35 ms and convolved with a
-  // generated stereo tail. These knobs act when they are turned: a move
-  // scheduled ahead or stretched over time is taken at once.
+  // the rig's master in place of its own limiter. Each 303 keeps the
+  // distortion, in its channel before the fader: a clean path and a
+  // WaveShaper path (tanh with a little asymmetry, 4x oversampled, then a
+  // Color low-pass and a DC block), crossfaded by Drive, so Drive 0 is a true
+  // bypass. The delay and the reverb are one shared pair that every mixer
+  // strip sends to.
   const DIVS = [[1, '1/16'], [2, '1/8'], [3, '3/16'], [4, '1/4'], [6, '3/8'], [8, '1/2']];   // sixteenths
   const divOf = (v) => DIVS[Math.round(clamp(v, 0, 1) * (DIVS.length - 1))];
   const rt60 = (size) => 1.2 * Math.pow(10, size);                  // 1.2 s to 12 s
 
-  class BenchFx {
+  class Distortion {
     constructor(rig, id, src) {
       const c = this.c = rig.ctx;
       this.rig = rig;
       this.id = id;
-      const out = this.out = rig.gain(1);
-      const dry = c.createGain(), send = c.createGain(), hp = c.createBiquadFilter(), pre = c.createDelay(0.2);
-      hp.type = 'highpass'; hp.frequency.value = 160; pre.delayTime.value = 0.035;
-      dry.connect(out); send.connect(hp); hp.connect(pre);
-      const dsend = c.createGain(), dhp = c.createBiquadFilter(), dl = c.createDelay(2.5), dr = c.createDelay(2.5);
-      const fbLR = c.createGain(), fbRL = c.createGain(), merge = c.createChannelMerger(2), dout = c.createGain();
-      dhp.type = 'highpass'; dhp.frequency.value = 120;
-      const band = (from, to) => {
-        const h = c.createBiquadFilter(), l = c.createBiquadFilter();
-        h.type = 'highpass'; h.frequency.value = 250; l.type = 'lowpass'; l.frequency.value = 3500;
-        from.connect(h); h.connect(l); l.connect(to);
-      };
-      dsend.connect(dhp); dhp.connect(dl);
-      band(dl, fbLR); fbLR.connect(dr);          // left echo feeds the right
-      band(dr, fbRL); fbRL.connect(dl);          // and the right feeds the left
-      dl.connect(merge, 0, 0); dr.connect(merge, 0, 1);
-      merge.connect(dout); dout.connect(out); dout.connect(send);
       const inp = c.createGain(), clean = c.createGain(), shaper = c.createWaveShaper(), color = c.createBiquadFilter();
-      const dcb = c.createBiquadFilter(), dist = c.createGain(), post = c.createGain();
+      const dcb = c.createBiquadFilter(), dist = c.createGain(), post = this.out = c.createGain();
       shaper.oversample = '4x';
       color.type = 'lowpass'; color.Q.value = 0.7;
       dcb.type = 'highpass'; dcb.frequency.value = 25;
       inp.connect(clean); clean.connect(post);
       inp.connect(shaper); shaper.connect(color); color.connect(dcb); dcb.connect(dist); dist.connect(post);
-      post.connect(dry); post.connect(send); post.connect(dsend);
       src.connect(inp);
-      Object.assign(this, { dry, send, pre, conv: null, tail: null, timer: 0, dsend, dl, dr, fbLR, fbRL, clean, shaper, color, dist, driveDrawn: -1 });
+      Object.assign(this, { clean, shaper, color, dist, driveDrawn: -1 });
       this.setDrive(true);
-      this.swapTail();
-      this.setWet(true);
-      this.setDelay(true);
+      // Drive redraws a curve, so it acts when it is turned.
       for (const name of ['drive', 'color']) rig.watch(id + '.' + name, () => this.setDrive(false));
-      for (const name of ['delay', 'time', 'fdbk']) rig.watch(id + '.' + name, () => this.setDelay(false));
-      rig.watch(id + '.space', () => this.setWet(false));
-      // a new tail is costly to make: wait until the knob rests
-      for (const name of ['size', 'tone']) {
-        rig.watch(id + '.' + name, () => { clearTimeout(this.timer); this.timer = setTimeout(() => this.swapTail(), 150); });
-      }
     }
 
     k(name) { return this.rig.getParam(this.id + '.' + name); }
@@ -296,29 +270,94 @@
       set(this.dist.gain, w * makeup);
       set(this.color.frequency, this.rig.hz(1500 * Math.pow(12, this.k('color'))));
     }
+  }
 
-    setDelay(now, at) {
-      const t = at === undefined ? this.c.currentTime : at;
-      const T = divOf(this.k('time'))[0] * 60 / this.rig.tempo.at(t) / 4;
-      const mix = 0.9 * Math.pow(this.k('delay'), 1.2), fb = 0.85 * this.k('fdbk');
-      const set = (prm, v, tc) => { if (now) prm.value = v; else prm.setTargetAtTime(v, t, tc); };
-      set(this.dl.delayTime, T, 0.05); set(this.dr.delayTime, T, 0.05);   // a tempo change glides, like tape
-      set(this.dsend.gain, mix, 0.02); set(this.fbLR.gain, fb, 0.02); set(this.fbRL.gain, fb, 0.02);
+  // The Bench page's delay and reverb as the rig's send effects: inputs
+  // `delayIn` and `reverbIn`, wet only, returns into the mix. The delay is a
+  // ping-pong pair synced to the device's tempo, each repeat through a 250 Hz
+  // to 3.5 kHz band; its echoes also reach the reverb. The reverb is
+  // high-passed, delayed 35 ms and convolved with a generated stereo tail.
+  // The returns and the feedback are AudioParams, so a move the artist
+  // stretches over bars glides; Time, Size and Tone act when they are turned.
+  const ECHO_TO_REVERB = 0.3;
+  // The tail has unit energy per channel. The rig's reverb before it was a
+  // 2.2 s tail that the ConvolverNode normalised to about 0.38 in energy
+  // terms, with a return of 1.5 x Space; 1.5 x 0.38 keeps a send as wet.
+  const REVERB_GAIN = 0.57;
+  const MAX_DELAY = 6.5;   // a 1/2 note at the device's slowest tempo, 20 BPM, is 6 s
+
+  class SendFx {
+    constructor(rig) {
+      const c = this.c = rig.ctx;
+      this.rig = rig;
+      // the delay
+      const din = this.delayIn = rig.gain(1), dhp = c.createBiquadFilter();
+      const dl = c.createDelay(MAX_DELAY), dr = c.createDelay(MAX_DELAY);
+      const fbLR = c.createGain(), fbRL = c.createGain(), merge = c.createChannelMerger(2), dret = c.createGain();
+      dhp.type = 'highpass'; dhp.frequency.value = 120;
+      const band = (from, to) => {
+        const h = c.createBiquadFilter(), l = c.createBiquadFilter();
+        h.type = 'highpass'; h.frequency.value = 250; l.type = 'lowpass'; l.frequency.value = 3500;
+        from.connect(h); h.connect(l); l.connect(to);
+      };
+      din.connect(dhp); dhp.connect(dl);
+      band(dl, fbLR); fbLR.connect(dr);          // left echo feeds the right
+      band(dr, fbRL); fbRL.connect(dl);          // and the right feeds the left
+      dl.connect(merge, 0, 0); dr.connect(merge, 0, 1);
+      merge.connect(dret); dret.connect(rig.mix);
+      rig.bind('delay.level', dret.gain, (x) => 1.2 * x);
+      rig.bind('delay.feedback', fbLR.gain, (x) => x);
+      rig.bind('delay.feedback', fbRL.gain, (x) => x);
+      this.times = [dl.delayTime, dr.delayTime];
+      const T = this.delayAt(c.currentTime);
+      for (const p of this.times) { p.value = T; p.setValueAtTime(T, c.currentTime); }
+      rig.watch('delay.time', () => this.turnTime());
+      // the reverb
+      const rin = this.reverbIn = rig.gain(1), hp = c.createBiquadFilter(), pre = this.pre = c.createDelay(0.2);
+      const rret = this.rret = c.createGain();
+      hp.type = 'highpass'; hp.frequency.value = 160; pre.delayTime.value = 0.035;
+      rin.connect(hp); hp.connect(pre);
+      rret.connect(rig.mix);
+      rig.bind('reverb.level', rret.gain, (x) => REVERB_GAIN * x);
+      chain(dret, rig.gain(ECHO_TO_REVERB), rin);
+      this.conv = null; this.tail = null; this.timer = 0;
+      // its own noise: the rig's generator also picks where the hats' loop
+      // starts, and a new tail would move that on
+      this.rand = prng(0x7A11);
+      this.swapTail();
+      // a new tail is costly to make: wait until the knob rests
+      for (const name of ['size', 'tone']) {
+        rig.watch('reverb.' + name, () => { clearTimeout(this.timer); this.timer = setTimeout(() => this.swapTail(), 150); });
+      }
     }
 
-    setWet(now) {
-      const sp = this.k('space'), t = this.c.currentTime;
-      const wet = 1.2 * Math.pow(sp, 1.5), dry = 1 - 0.35 * sp;
-      if (now) { this.send.gain.value = wet; this.dry.gain.value = dry; return; }
-      this.send.gain.setTargetAtTime(wet, t, 0.02);
-      this.dry.gain.setTargetAtTime(dry, t, 0.02);
+    // The delay time the Time knob asks for at the tempo of time t.
+    delayAt(t) {
+      return clamp(divOf(this.rig.getParam('delay.time'))[0] * 60 / this.rig.tempo.at(t) / 4, 0.001, MAX_DELAY);
+    }
+
+    // A tempo change at T, which may be ahead of now: only the delay times
+    // move, gliding like tape. A knob is never touched here, so a change the
+    // page scheduled ahead cannot undo a turn made in the meantime.
+    retime(T) {
+      const d = this.delayAt(T);
+      for (const p of this.times) { p.cancelScheduledValues(T); p.setTargetAtTime(d, T, 0.05); }
+    }
+
+    // Time turned now: the new division from now on, and again at every
+    // tempo change already scheduled after now.
+    turnTime() {
+      const now = this.c.currentTime, d = this.delayAt(now);
+      for (const p of this.times) { p.cancelScheduledValues(now); p.setTargetAtTime(d, now, 0.05); }
+      for (const s of this.rig.tempo.segs) if (s.t0 > now) this.retime(s.t0);
     }
 
     makeTail() {
-      const c = this.c, rand = this.rig.rand;
-      const sr = c.sampleRate, T = rt60(this.k('size')), n = Math.ceil(Math.min(T * 1.15, 14) * sr);
+      const c = this.c, rand = this.rand;
+      const size = this.rig.getParam('reverb.size'), tone = this.rig.getParam('reverb.tone');
+      const sr = c.sampleRate, T = rt60(size), n = Math.ceil(Math.min(T * 1.15, 14) * sr);
       const buf = c.createBuffer(2, n, sr);
-      const fc0 = 2500 * Math.pow(6, this.k('tone')), fc1 = fc0 / 6;   // the tail darkens as it decays
+      const fc0 = 2500 * Math.pow(6, tone), fc1 = fc0 / 6;   // the tail darkens as it decays
       for (let ch = 0; ch < 2; ch++) {
         const d = buf.getChannelData(ch);
         let lp = 0, a = 0, e2 = 0;
@@ -342,7 +381,7 @@
       conv.normalize = false;
       conv.buffer = this.makeTail();
       tail.gain.value = this.conv ? 0 : 1;
-      this.pre.connect(conv); conv.connect(tail); tail.connect(this.out);
+      this.pre.connect(conv); conv.connect(tail); tail.connect(this.rret);
       if (this.conv) {   // fade the new tail in and the old one out, so a turn of Size does not cut the sound
         const oldConv = this.conv, oldTail = this.tail;
         tail.gain.setTargetAtTime(1, t, 0.05);
@@ -364,9 +403,10 @@
       this.sink = null;    // takes the line changes once the model runs
       this.ua = 0;         // ladder current, peak over the last 30 ms or so, for a meter
       this.out = rig.gain(1);
-      // Its own delay and reverb, as on the Bench page: no sends to the rig's.
-      this.fx = new BenchFx(rig, id, this.out);
-      rig.strip(this.fx.out, { id, level: id + '.level', k: ACID_GAIN, panned: true, sends: false });
+      // The Bench page's distortion in its channel; its delay and reverb are
+      // the shared ones, through the strip's sends.
+      this.dist = new Distortion(rig, id, this.out);
+      rig.strip(this.dist.out, { id, level: id + '.level', k: ACID_GAIN, panned: true });
     }
 
     send(t, lines) { if (this.sink) this.sink({ t, lines }); }
@@ -742,7 +782,6 @@
   // ---- The rig -------------------------------------------------------------
   // Calibrated so a full mix peaks around -2.5 dBFS (0.76) at master.volume 0.8.
   const MASTER_TRIM = 1.08;
-  const REVERB_GAIN = 1.5;
   const CH_INDEX = [7, 7, 1, 2, 3, 4, 5, 6, 7, 0, 7, 7, 7, 7, 7, 7];
   const LAMPS = 4;   // remembered triggers per instrument (events arrive ahead of time)
 
@@ -762,7 +801,9 @@
       for (let i = 0; i < nd.length; i++) nd[i] = this.rand() * 2 - 1;
 
       this.buildMaster();
-      this.buildSends();
+      this.sendFx = new SendFx(this);
+      this.delayIn = this.sendFx.delayIn;
+      this.reverbIn = this.sendFx.reverbIn;
 
       // Six detuned squares (the 808 cymbal bank), rendered once with polyBLEP
       // edges; hats and cymbals loop it through their own filters.
@@ -908,54 +949,17 @@
         const a = Math.abs(x);
         return a <= 0.85 ? x : Math.sign(x) * (0.85 + 0.13 * Math.tanh((a - 0.85) / 0.13));
       });
-      this.analyser = ctx.createAnalyser();
-      this.analyser.fftSize = 2048;
-      chain(this.mix, satIn, sat, comp, vol, clip, this.analyser, ctx.destination);
-    }
-
-    buildSends() {
-      const ctx = this.ctx;
-      const flat = (type, hz) => {
-        const f = ctx.createBiquadFilter();
-        f.type = type;
-        f.frequency.value = this.hz(hz);
-        f.Q.value = -3;   // dB: Butterworth, no peak inside the feedback loop
-        return f;
-      };
-      // Ping-pong delay, 3/16 note per bounce: in -> L -> R -> back to L.
-      this.delayIn = this.gain(1);
-      const hp = flat('highpass', 220), lp = flat('lowpass', 4200);
-      const dl = ctx.createDelay(2), dr = ctx.createDelay(2), toR = this.gain(0), toL = this.gain(0);
-      const panL = ctx.createStereoPanner(), panR = ctx.createStereoPanner(), ret = this.gain(0);
-      panL.pan.value = -0.75;
-      panR.pan.value = 0.75;
-      this.delays = [dl.delayTime, dr.delayTime];
-      for (const p of this.delays) { p.value = 45 / 145; p.setValueAtTime(45 / 145, 0); }
-      this.bind('delay.feedback', toR.gain, (x) => x);
-      this.bind('delay.feedback', toL.gain, (x) => x);
-      this.bind('delay.level', ret.gain, (x) => 1.2 * x);
-      chain(this.delayIn, hp, lp, dl, toR, dr, toL, hp);
-      chain(dl, panL, ret);
-      chain(dr, panR, ret);
-      ret.connect(this.mix);
-
-      // Reverb: exponentially decaying noise, darker towards the tail.
-      this.reverbIn = this.gain(1);
-      const conv = ctx.createConvolver(), sr = ctx.sampleRate, n = Math.floor(sr * 2.2);
-      const ir = ctx.createBuffer(2, n, sr);
-      for (let c = 0; c < 2; c++) {
-        const d = ir.getChannelData(c);
-        let y = 0;
-        for (let i = 0; i < n; i++) {
-          const x = i / n;
-          y += (0.85 - 0.6 * x) * (this.rand() * 2 - 1 - y);
-          d[i] = y * Math.exp(-6.9 * x) * Math.min(1, i / (0.003 * sr));
-        }
-      }
-      conv.buffer = ir;
-      const rret = this.gain(0);
-      this.bind('reverb.level', rret.gain, (x) => REVERB_GAIN * x);
-      chain(this.reverbIn, flat('highpass', 300), conv, rret, this.mix);
+      chain(this.mix, satIn, sat, comp, vol, clip, ctx.destination);
+      // One analyser per channel: an analyser reads its input mixed down to mono,
+      // which would halve a peak that is on one side only.
+      const split = ctx.createChannelSplitter(2);
+      clip.connect(split);
+      this.analysers = [0, 1].map((ch) => {
+        const a = ctx.createAnalyser();
+        a.fftSize = 2048;
+        split.connect(a, ch);
+        return a;
+      });
     }
 
     // -- public interface
@@ -1016,12 +1020,7 @@
         bpm = clamp(bpm, 20, 400);
         const now = this.ctx.currentTime, T = clamp(num(time, now), now, now + 1e5);
         this.tempo.to(bpm, T, 0, now);
-        const d = clamp(45 / bpm, 0.02, 1.95);   // 3/16 note
-        for (const p of this.delays) {
-          p.cancelScheduledValues(T);
-          p.setTargetAtTime(d, T, 0.03);
-        }
-        for (const inst of this.inst) if (inst.fx) inst.fx.setDelay(false, T);
+        this.sendFx.retime(T);
       } catch (e) { /* ignore */ }
     }
 
