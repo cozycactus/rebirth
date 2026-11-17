@@ -82,6 +82,11 @@ void sim_run_until(double t_us) {
 
 double sim_now(void) { return (double)sim_now_us; }
 
+#ifndef SIM_FEATURES
+#define SIM_FEATURES 0
+#endif
+int sim_features(void) { return SIM_FEATURES; }
+
 // ─── Inspection ─────────────────────────────────────────────────
 
 int sim_dbg_transport_state(void) { return g_seq.transport.state; }

@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>ReBirth — симулятор</title>
+<!-- The type of the x0xb0x VCF Bench page, for the two 303 panels; without a network they fall back. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=B612:wght@400;700&family=B612+Mono&family=Saira+Condensed:wght@500;600;700&display=swap">
 <style>
   :root {
     --bg: #14151a; --card: #1d1f26; --line: #2c2f3a; --text: #e6e8ee; --dim: #9096a6;
@@ -58,7 +62,7 @@
   #caption.warn b { color: var(--warn); }
 
   /* ─── Side column ─── */
-  .side { display: grid; gap: 12px; }
+  .side { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; min-width: 0; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
   .card h2 { margin: 0 0 8px; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--dim); font-weight: 600; }
   h1 { font-size: 18px; margin: 0; }
@@ -70,6 +74,16 @@
   button.btn.primary { background: #2f6b3a; border-color: #3f8a4c; font-weight: 600; }
   button.btn.primary:hover { background: #377a43; }
   button.btn:disabled { opacity: .5; cursor: default; }
+  a.btn { display: inline-block; background: #2b2e39; color: var(--text); border: 1px solid #3b3f4d; border-radius: 8px;
+    padding: 7px 12px; text-decoration: none; }
+  a.btn:hover { background: #343846; }
+  .card select { max-width: 100%; min-width: 0; }
+  #show-song, #show-form { flex: 1 1 200px; }
+  /* One floating hint for whatever carries data-tip (app.js, initTips). */
+  #tip { position: fixed; z-index: 50; max-width: 330px; padding: 7px 10px; border-radius: 8px; background: #0d0e12;
+    border: 1px solid #454a5b; color: var(--text); font-size: 12px; line-height: 1.4; white-space: pre-line;
+    pointer-events: none; box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
+  #tip[hidden] { display: none; }
   select, input[type=checkbox] { accent-color: var(--accent); }
   select { background: #2b2e39; color: var(--text); border: 1px solid #3b3f4d; border-radius: 6px; padding: 4px 6px; font: inherit; }
   #progress { height: 6px; background: #2a2d37; border-radius: 3px; overflow: hidden; margin: 10px 0 6px; }
@@ -82,7 +96,61 @@
   .knobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 14px; }
   .knobs label { display: grid; grid-template-columns: 1fr; font-size: 12px; color: var(--dim); }
   .knobs input[type=range] { width: 100%; accent-color: var(--rig); margin: 2px 0 0; }
-  .lamps { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  /* ─── Mini mixer ─── */
+  .mixer { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 4px; margin-bottom: 12px; }
+  .strip { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 6px 2px; border: 1px solid var(--line);
+    border-radius: 8px; background: #191b22; min-width: 0; }
+  .strip.master { background: #20232c; }
+  .strip .lamp { padding: 2px 4px; font-size: 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .strip .well { display: flex; gap: 3px; align-items: stretch; height: 96px; }
+  .strip input.fader { writing-mode: vertical-lr; direction: rtl; width: 20px; height: 96px; margin: 0; accent-color: var(--rig); }
+  .strip .vu { width: 5px; border-radius: 3px; background: #2a2d37; position: relative; overflow: hidden; }
+  .strip .vu i { position: absolute; left: 0; right: 0; bottom: 0; height: 0; background: var(--accent); }
+  .strip .val { font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .strip button { font: 600 10px/1 inherit; padding: 4px 6px; border-radius: 5px; border: 1px solid #3b3f4d; background: #2b2e39;
+    color: var(--dim); cursor: pointer; }
+  .strip button[aria-pressed="true"] { background: var(--warn); border-color: var(--warn); color: #111; }
+  .strip.muted input.fader { opacity: .35; }
+
+  /* ─── The two 303s, drawn as the x0xb0x VCF Bench page draws its one ───
+     White solder mask, black silkscreen legends, gold for what is set; its own
+     dark palette where the system asks for dark. */
+  .bench { --b-bg: #e6ebe8; --b-mask: #f7f9f8; --b-ink: #141816; --b-muted: #56605b; --b-line: #c3ccc7; --b-gold: #9a6d1c;
+    --b-gold-soft: #e9d6ab; --b-led: #d23a1e;
+    --b-display: "Saira Condensed", "Arial Narrow", "Roboto Condensed", sans-serif;
+    --b-body: "B612", "Segoe UI", system-ui, sans-serif; --b-mono: "B612 Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    container-type: inline-size; display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;
+    color: var(--b-ink); font-family: var(--b-body); font-size: 14px; line-height: 1.45; }
+  @media (prefers-color-scheme: dark) {
+    .bench { --b-bg: #0a0c0c; --b-mask: #141817; --b-ink: #edf1ee; --b-muted: #8e9893; --b-line: #2a302e; --b-gold: #d8a94e;
+      --b-gold-soft: #3a2f19; --b-led: #ff5b3a; }
+  }
+  .bench .board { background: var(--b-mask); border: 1px solid var(--b-line); border-radius: 6px; padding: 14px;
+    display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  .bench .legend { font-family: var(--b-display); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; font-size: 13px; color: var(--b-ink); }
+  .bench .small { font-size: 12px; color: var(--b-muted); }
+  .bench .bhead { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; }
+  .bench .bknobs { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 10px 6px; align-items: start; }
+  @container (max-width: 520px) { .bench .bknobs { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .bench .bcell { display: flex; flex-direction: column; align-items: center; gap: 4px; min-width: 0; }
+  .bench .bknob { width: 100%; max-width: 92px; aspect-ratio: 1; touch-action: none; cursor: ns-resize; border-radius: 50%; }
+  .bench .bknob svg { width: 100%; height: 100%; display: block; overflow: visible; }
+  .bench .bknob:focus-visible, .bench button:focus-visible { outline: 2px solid var(--b-gold); outline-offset: 2px; }
+  .bench .bval { font: 12px var(--b-mono); color: var(--b-muted); font-variant-numeric: tabular-nums; }
+  .bench .bcell .legend { font-size: 12px; text-align: center; line-height: 1.1; min-height: 2.2em; display: flex; align-items: end; }
+  .bench .bswitch { display: flex; flex-direction: column; gap: 6px; width: 100%; max-width: 92px; margin-top: 6px; }
+  .bench button { font: 600 13px var(--b-display); letter-spacing: .08em; text-transform: uppercase; color: var(--b-ink);
+    background: var(--b-mask); border: 1px solid var(--b-line); border-radius: 4px; padding: 6px 0; cursor: pointer; min-height: 34px; }
+  .bench button:hover { border-color: var(--b-muted); }
+  .bench button[aria-pressed="true"] { background: var(--b-gold-soft); border-color: var(--b-gold); }
+  .bench .bmeter { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px 12px; align-items: center; }
+  .bench .bmeter .bbar, .bench .bmeter .bticks { grid-column: 1 / -1; }
+  .bench .bbar { position: relative; height: 14px; background: var(--b-bg); border: 1px solid var(--b-line); border-radius: 3px; overflow: hidden; }
+  .bench .bbar i { position: absolute; inset: 0 auto 0 0; width: 0; background: var(--b-gold); transition: width 60ms linear; }
+  .bench .bticks { position: relative; height: 14px; font: 10px var(--b-mono); color: var(--b-muted); }
+  .bench .bticks span { position: absolute; transform: translateX(-50%); }
+  .bench .breadout { font: 15px var(--b-mono); font-variant-numeric: tabular-nums; min-width: 8ch; text-align: right; }
+  @media (prefers-reduced-motion: reduce) { .bench .bbar i { transition: none; } }
   .lamp { font-size: 11px; padding: 3px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim);
     font-variant-numeric: tabular-nums; }
   .lamp.on { color: #111; background: var(--rig); border-color: var(--rig); }
@@ -116,6 +184,10 @@
     <div class="card">
       <h1>ReBirth — симулятор прибора</h1>
       <div class="sub">Внутри работает настоящая прошивка из <code>src/</code>, собранная в WebAssembly. Смоделировано только железо вокруг неё.</div>
+      <div class="row" style="margin-top:10px">
+        <a class="btn" id="manual" href="manual-ru.pdf" target="_blank" rel="noopener"
+           data-tip="Руководство пользователя ReBirth (PDF, на русском): экраны, органы управления, MIDI и CV/Gate, сохранение. Откроется в новой вкладке.">📖 Руководство пользователя</a>
+      </div>
       <div class="meters" style="margin-top:10px">
         <span>Время прибора <b id="m-time">0.0 с</b></span>
         <span>Транспорт <b id="m-state">стоп</b></span>
@@ -127,20 +199,35 @@
     <div class="card">
       <h2>Гоа-артист</h2>
       <div class="row">
-        <button class="btn primary" id="show-start">▶ Сыграть гоа-сет</button>
-        <button class="btn" id="show-stop" disabled>■ Остановить</button>
-        <button class="btn" id="reboot">⏻ Выключить и включить</button>
+        <button class="btn primary" id="show-start"
+          data-tip="Артист включает прибор заново, набирает на нём клипы выбранной песни и играет её вживую. Любое ваше нажатие на панели забирает управление у артиста.">▶ Сыграть гоа-сет</button>
+        <button class="btn" id="show-stop" disabled
+          data-tip="Останавливает артиста и нажимает PLAY, чтобы музыка стихла. Прибор остаётся в том состоянии, до которого артист дошёл.">■ Остановить</button>
+        <button class="btn" id="reboot"
+          data-tip="Снять и подать питание: память как после включения, виртуальная flash пуста. На настоящем приборе сохранённое во flash остаётся.">⏻ Выключить и включить</button>
       </div>
       <div class="row" style="margin-top:8px">
-        <label><input type="checkbox" id="show-prep" checked> показать подготовку ускоренно</label>
-        <select id="prep-speed"><option value="8">×8</option><option value="16" selected>×16</option><option value="40">×40</option></select>
+        <label for="show-song">Песня:</label>
+        <select id="show-song"
+          data-tip="Что сыграет артист: у каждой песни свои тональность, темп, клипы и звук синтезаторов. Все песни написаны для этой страницы и не повторяют записей."></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label for="show-form">Аранжировка:</label>
+        <select id="show-form"
+          data-tip="Как из клипов песни складывается сет. Клип на приборе не длиннее 16 шагов, поэтому форма строится сменой клипов, MUTE и сценами. У каждой песни есть своя аранжировка, но любую песню можно сыграть в любой."></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label data-tip="С галочкой видно, как артист набирает клипы на остановленном приборе, в ускоренном времени. Без неё подготовка проходит мгновенно."><input type="checkbox" id="show-prep" checked> показать подготовку ускоренно</label>
+        <select id="prep-speed" data-tip="Во сколько раз ускорить подготовку. Сам сет всегда идёт в настоящем времени."><option value="8">×8</option><option value="16" selected>×16</option><option value="40">×40</option></select>
       </div>
       <div class="row" style="margin-top:8px">
         <label for="show-variant">Как артист набирает клипы:</label>
-        <select id="show-variant">
+        <select id="show-variant"
+          data-tip="Способ ввода нот. Доступны только те, что умеет прошивка внутри симулятора: партитура для другой прошивки на ней сбилась бы.">
           <option value="base">каждая нота от «до», каждый клип заново</option>
           <option value="fw2">последняя нота и копирование клипов</option>
           <option value="keys">то же и MIDI-клавиатура</option>
+          <option value="pads">то же и ноты с пэдов (без клавиатуры)</option>
         </select>
       </div>
       <div id="progress"><i></i></div>
@@ -151,15 +238,15 @@
     <div class="card">
       <h2>MIDI-клавиатура (вход прибора)</h2>
       <div class="row">
-        <button class="btn" id="kbd-down" title="Октава ниже">−</button>
+        <button class="btn" id="kbd-down" data-tip="Октава ниже">−</button>
         <span class="sub" id="kbd-range">C3 – C5</span>
-        <button class="btn" id="kbd-up" title="Октава выше">+</button>
-        <label class="sub">Скорость <input type="range" id="kbd-vel" min="1" max="127" value="100"> <b id="kbd-vel-n">100</b></label>
-        <span class="klamp" id="kbd-lamp">MIDI IN</span>
+        <button class="btn" id="kbd-up" data-tip="Октава выше">+</button>
+        <label class="sub" data-tip="Velocity, с которой играют экранные и компьютерные клавиши.">Скорость <input type="range" id="kbd-vel" min="1" max="127" value="100"> <b id="kbd-vel-n">100</b></label>
+        <span class="klamp" id="kbd-lamp" data-tip="Мигает, когда на вход MIDI прибора уходит сообщение.">MIDI IN</span>
       </div>
       <div id="kbd-keys"></div>
       <div class="row">
-        <button class="btn" id="kbd-connect">Подключить MIDI-клавиатуру</button>
+        <button class="btn" id="kbd-connect" data-tip="Настоящая MIDI-клавиатура через Web MIDI: её ноты пойдут на вход MIDI прибора. Браузер спросит разрешение.">Подключить MIDI-клавиатуру</button>
         <span class="sub" id="kbd-status"></span>
       </div>
       <div class="hint">Удержите кнопку шага на экране паттерна (Shift+клик фиксирует её) и нажмите клавишу: шаг получит ноту. Без удержанного шага клавиша звучит через выбранную дорожку.
@@ -170,26 +257,28 @@
     <div class="card">
       <h2>Синтезаторы (не часть прибора)</h2>
       <div class="row" style="margin-bottom:8px">
-        <button class="btn" id="audio-toggle">🔊 Включить звук</button>
+        <button class="btn" id="audio-toggle" data-tip="Включает и выключает синтезаторы страницы. Прибор при этом работает как обычно: он шлёт только MIDI и CV/Gate.">🔊 Включить звук</button>
         <span class="sub">Прибор шлёт только MIDI и CV/Gate; звук делают эти инструменты.</span>
       </div>
-      <div class="lamps" id="lamps"></div>
+      <div class="mixer" id="mixer"></div>
+      <div class="bench" id="acid1"></div>
+      <div class="bench" id="acid2"></div>
       <div class="knobs" id="knobs"></div>
     </div>
 
     <div class="card">
       <h2>Диагностика</h2>
       <div class="meters">
-        <span title="Запись во флеш останавливает оба ядра примерно на секунду, поэтому одно опоздание после сохранения ожидаемо">Опоздания таймера <b id="d-overruns">0</b></span>
-        <span>Переполнение MIDI <b id="d-overflow">нет</b></span>
-        <span>Пропущено кадров LED <b id="d-leds">0</b></span>
-        <span>Ошибки блокировок <b id="d-locks">0</b></span>
-        <span>Gate 1-4 <b id="d-gates">----</b></span>
-        <span>CV 1-4, В <b id="d-cv">0.00 0.00 0.00 0.00</b></span>
+        <span data-tip="Сколько раз таймер секвенсора сработал позже срока. Запись во flash останавливает оба ядра примерно на секунду, поэтому одно опоздание после сохранения ожидаемо.">Опоздания таймера <b id="d-overruns">0</b></span>
+        <span data-tip="Очередь исходящих MIDI-сообщений переполнилась, и часть их потеряна.">Переполнение MIDI <b id="d-overflow">нет</b></span>
+        <span data-tip="Кадры светодиодов, от которых драйвер отказался, потому что прошлый ушёл меньше 3 мс назад.">Пропущено кадров LED <b id="d-leds">0</b></span>
+        <span data-tip="Блокировка взята дважды. В симуляторе всё идёт в одном потоке, поэтому это ошибка, а не ожидание.">Ошибки блокировок <b id="d-locks">0</b></span>
+        <span data-tip="Уровни четырёх выходов Gate.">Gate 1-4 <b id="d-gates">----</b></span>
+        <span data-tip="Напряжения четырёх выходов CV, как их выставил ЦАП.">CV 1-4, В <b id="d-cv">0.00 0.00 0.00 0.00</b></span>
       </div>
       <div class="row" style="margin-top:8px">
-        <button class="btn" id="fault-keys">Сброс сканера пэдов (как от статики)</button>
-        <button class="btn" id="fault-steps">Сброс расширителя кнопок шагов</button>
+        <button class="btn" id="fault-keys" data-tip="Микросхема TCA8418 теряет настройки, как от разряда статики. Прошивка проверяет её раз в секунду и настраивает заново.">Сброс сканера пэдов (как от статики)</button>
+        <button class="btn" id="fault-steps" data-tip="Микросхема MCP23017 теряет настройки: её линии читаются как нажатые. Прошивка не должна принять это за нажатия кнопок шагов.">Сброс расширителя кнопок шагов</button>
       </div>
       <div id="midi"></div>
       <div class="hint">Мышь: нажатие и удержание работают как на приборе. <kbd>Shift</kbd>+клик удерживает кнопку шага, пока не кликнуть ещё раз.
@@ -198,9 +287,12 @@
   </div>
 </div>
 
+<div id="tip" hidden></div>
 <script src="core.js"></script>
 <script src="device.js"></script>
 <script src="artist.js"></script>
+<script src="dsp.js"></script>
+<script src="acid.js"></script>
 <script src="rig.js"></script>
 <script src="app.js"></script>
 </body>

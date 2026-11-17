@@ -11,6 +11,15 @@ cd "$(dirname "$0")/.."
 FIRMWARE=$(ls src/*.c | grep -v -e '^src/main\.c$' -e '^src/rgb_leds\.c$')
 CORE="sim/core/hal.c sim/core/sim_main.c sim/core/sim_rgb_leds.c"
 INCLUDES="-Iinclude -Itest/fakes -Isim/core"
+
+# What the firmware being built can do, for the page to pick a fitting score:
+# 1 new steps start at the last note and clips copy, 2 it reads its MIDI input,
+# 4 the pads are a keyboard while a step is held.
+FEATURES=0
+grep -q 'last_note' src/ui.c && FEATURES=$((FEATURES | 1))
+[ -f src/midi_in.c ] && FEATURES=$((FEATURES | 2))
+grep -q 'pad_key_note' include/led_frame.h && FEATURES=$((FEATURES | 4))
+INCLUDES="$INCLUDES -DSIM_FEATURES=$FEATURES"
 mkdir -p sim/build
 
 native() {

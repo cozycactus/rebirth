@@ -1,8 +1,10 @@
 // Runs the scripted artist against the real firmware (the WebAssembly core)
 // without a browser and checks that the device ended up where the script
 // believes it is: the clips it programmed, the clips playing in each section,
-// the mutes, and that the MIDI it produced is well formed.
-//   node sim/test/artist_check.js
+// the mutes, and that the MIDI it produced is well formed. Every song is
+// played, each on a device of its own.
+//   node sim/test/artist_check.js                     every song in every arrangement
+//   SONG=3 FORM=sunrise node sim/test/artist_check.js  one of each, by index or id
 'use strict';
 const path = require('path');
 const web = path.join(__dirname, '..', 'web');
@@ -18,13 +20,18 @@ function check(ok, message) {
   }
 }
 
-RebirthCore().then(core => {
+function playSong(core, song, form) {
   const device = new Device(core);
   const hands = new Hands(device);
   // FW2=1: the firmware under test starts new steps at the last note and copies clips.
   // KEYS=1 (with FW2=1): the firmware reads a MIDI keyboard and the artist enters pitches from one.
-  const keys = process.env.KEYS === '1';
-  const show = Artist.buildShow(undefined, { fw2: process.env.FW2 === '1' || keys, keys });
+  // PADS=1: the pads are a keyboard while a step is held; the artist uses them.
+  const pads = process.env.PADS === '1';
+  const keys = process.env.KEYS === '1' && !pads;
+  const show = Artist.buildShow(undefined, { song, form, fw2: process.env.FW2 === '1' || keys || pads, keys, pads });
+  const before = failures;
+  console.log('── ' + show.song.id + ' / ' + show.form.id + ': «' + show.song.title + '», ' + show.song.style + ', ' + show.song.key + ', ' +
+    show.bpm + ' BPM, аранжировка «' + show.form.title + '»');
   const said = [];
   const io = { say: (kind, text) => said.push({ t: device.now(), kind, text }), rig: () => {} };
   Artist.schedule(show, device, hands, io);
@@ -90,7 +97,7 @@ RebirthCore().then(core => {
     return checked;
   };
   console.log('after preparation: ' + verifyPatterns('prep', show.prepModel) + ' programmed steps match; tempo ' + info.bpm.toFixed(1));
-  if (keys) {
+  if (keys || pads) {
     // The keys are passed through to the synths while the artist programs:
     // every one of them must have been released again.
     const down = new Map();
@@ -108,7 +115,8 @@ RebirthCore().then(core => {
   } else {
     check(midi.length === 0, 'MIDI was sent while stopped: ' + midi.length);
   }
-  check(device.inspect().mutes === 0b1110, 'mutes before the set: ' + device.inspect().mutes.toString(2));
+  const startMutes = show.form.start.muted.reduce((bits, track) => bits | (1 << track), 0);
+  check(device.inspect().mutes === startMutes, 'mutes before the set: ' + device.inspect().mutes.toString(2) + ', want ' + startMutes.toString(2));
   // The flash save stalls both cores for about 1.3 s, so the timer misses its
   // alarm once. Nothing may be late after that.
   const overrunsAfterSave = device.inspect().overruns;
@@ -155,25 +163,50 @@ RebirthCore().then(core => {
   // What is heard is what was programmed: in a bar where a clip plays whole,
   // the Note Ons on its channel are the clip's notes in step order, accents at
   // velocity 127. (A synth track's channel is its index.)
-  const barStart = bar => show.t0 + (bar - 1) * show.barUs;
+  // Bars are counted from the first note on the wire, whose three bytes end
+  // 960 us after its tick: PLAY's debounce ends on a pass of the main loop, so
+  // the set starts a millisecond or two off the moment the script assumes.
+  const origin = firstNote === null ? show.t0 : firstNote - 960;
+  const barStart = bar => origin + (bar - 1) * show.barUs;
   const notesIn = (bar, channel) => midi.filter(m => (m.status & 0xF0) === 0x90 && m.d2 > 0 && (m.status & 15) === channel &&
     m.t >= barStart(bar) - 500 && m.t < barStart(bar + 1) - 500);
   let melodic = 0;
-  for (const [bar, track, row] of [[22, 2, 2], [22, 3, 2], [30, 4, 2], [30, 6, 2], [50, 2, 4], [50, 3, 4], [50, 4, 4],
-                                   [50, 5, 4], [68, 5, 5], [68, 3, 5]]) {
+  const heardAs = notes => notes.slice().sort((x, y) => x[0] - y[0]).map(n => n[1] + '/' + (n[2].includes('a') ? 127 : 100));
+  for (const { bar, track, row } of show.heard) {
     const clip = show.clips.synth.find(c => c.track === track && c.row === row);
-    const want = clip.notes.slice().sort((x, y) => x[0] - y[0]).map(n => n[1] + '/' + (n[2].includes('a') ? 127 : 100));
+    const want = heardAs(clip.notes);
     const got = notesIn(bar, track).map(m => m.d1 + '/' + m.d2);
     check(got.join(' ') === want.join(' '), 'bar ' + bar + ' ' + Artist.TRACK_NAME[track] + ' row ' + row +
       ': heard ' + got.join(' ') + ', programmed ' + want.join(' '));
     melodic += got.length;
   }
-  // The tracks muted for the outro are silent from the downbeat they leave on.
-  for (const [bar, channel] of [[89, 5], [89, 6], [93, 4], [97, 3], [97, 2], [101, 9]]) {
-    const late = notesIn(bar, channel).filter(m => channel !== 9 || m.d1 !== 36);
-    check(late.length === 0, 'bar ' + bar + ': channel ' + (channel + 1) + ' still played ' + late.length + ' notes after its mute');
+  // The notes changed live are on the wire: one turn of the edited clip,
+  // wherever in its loop the bar starts, holds its notes in step order.
+  if (show.edited) {
+    const { bar, track, row } = show.edited, location = row - 1;
+    const length = show.model.len[location + '/' + track] || 16, notes = [];
+    for (let step = 0; step < length; step++) {
+      const m = show.model.steps[location + '/' + track + '/' + step];
+      if (m && m.active) notes.push([step, m.note, m.accent ? 'a' : '']);
+    }
+    const want = heardAs(notes), from = barStart(bar) - 500, to = from + length * show.barUs / 16;
+    const got = midi.filter(m => (m.status & 0xF0) === 0x90 && m.d2 > 0 && (m.status & 15) === track && m.t >= from && m.t < to)
+      .map(m => m.d1 + '/' + m.d2);
+    let turned = false;
+    for (let i = 0; i < want.length && !turned; i++) turned = want.slice(i).concat(want.slice(0, i)).join(' ') === got.join(' ');
+    check(turned, 'bar ' + bar + ' ' + Artist.TRACK_NAME[track] + ' row ' + row + ' after the live edits: heard ' + got.join(' ') +
+      ', the clip holds ' + want.join(' '));
+    melodic += got.length;
   }
-  console.log('heard: ' + melodic + ' notes in 10 clip-bars match the score; outro mutes land before their downbeat');
+  // A track muted for good is silent from the downbeat it leaves on. The kick
+  // and the kit share channel 10: the kick is note 36 there.
+  for (const { bar, track } of show.silent) {
+    const channel = track < 2 ? 9 : track;
+    const late = notesIn(bar, channel).filter(m => track >= 2 || (m.d1 === 36) === (track === 0));
+    check(late.length === 0, 'bar ' + bar + ': ' + Artist.TRACK_NAME[track] + ' still played ' + late.length + ' notes after its mute');
+  }
+  console.log('heard: ' + melodic + ' notes in ' + (show.heard.length + (show.edited ? 1 : 0)) + ' clip-bars match the score; ' +
+    show.silent.length + ' final mutes land before their downbeat');
 
   const hanging = [...sounding].filter(([, n]) => n > 0);
   check(hanging.length === 0, 'notes left sounding: ' + JSON.stringify(hanging));
@@ -187,6 +220,25 @@ RebirthCore().then(core => {
     JSON.stringify(perChannel));
   console.log('first note ' + ((firstNote - show.playAt) / 1000).toFixed(2) + ' ms after PLAY went down');
   console.log(said.filter(x => x.kind === 'info').map(x => (x.t / 1e6).toFixed(1) + ' s  ' + x.text).join('\n'));
-  console.log(failures ? 'FAILED: ' + failures + ' checks' : 'PASS artist');
+  if (failures > before) console.log('FAILED ' + show.song.id + ': ' + (failures - before) + ' checks');
+}
+
+(async () => {
+  const one = process.env.SONG, oneForm = process.env.FORM;
+  const songs = one === undefined ? Artist.SONGS.map((s, i) => i) : [/^\d+$/.test(one) ? +one : one];
+  // buildShow falls back to the first song: a mistyped SONG must not pass as that one.
+  if (one !== undefined && !(Artist.SONGS[songs[0]] || Artist.SONGS.some(s => s.id === one))) {
+    console.error('unknown SONG ' + one + '; there are ' + Artist.SONGS.length + ': ' + Artist.SONGS.map(s => s.id).join(', '));
+    process.exit(2);
+  }
+  if (oneForm !== undefined && !Artist.FORMS.some(f => f.id === oneForm)) {
+    console.error('unknown FORM ' + oneForm + '; there are: ' + Artist.FORMS.map(f => f.id).join(', '));
+    process.exit(2);
+  }
+  // Every song in every arrangement, unless one is named.
+  const forms = oneForm === undefined ? Artist.FORMS.map(f => f.id) : [oneForm];
+  let shows = 0;
+  for (const song of songs) for (const form of forms) { playSong(await RebirthCore(), song, form); shows++; }
+  console.log(failures ? 'FAILED: ' + failures + ' checks' : 'PASS artist (' + shows + (shows === 1 ? ' show)' : ' shows)'));
   process.exit(failures ? 1 : 0);
-});
+})();

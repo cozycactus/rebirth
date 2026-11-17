@@ -14,7 +14,9 @@ const check = (ok, message) => { if (!ok) { failures++; console.log('FAIL ' + me
 RebirthCore().then(core => {
   const device = new Device(core);
   const hands = new Hands(device);
-  const show = Artist.buildShow(undefined, { fw2: process.env.FW2 === '1' || process.env.KEYS === '1', keys: process.env.KEYS === '1' });
+  const pads = process.env.PADS === '1';
+  const show = Artist.buildShow(undefined, { fw2: process.env.FW2 === '1' || process.env.KEYS === '1' || pads,
+    keys: process.env.KEYS === '1' && !pads, pads });
   Artist.schedule(show, device, hands, null);
   const midi = [];
   const run = until => {

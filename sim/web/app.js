@@ -53,17 +53,20 @@
     const canvas = document.createElement('canvas');
     canvas.id = 'oled'; canvas.width = 128; canvas.height = 64;
     frame.appendChild(canvas);
+    frame.dataset.tip = 'Экран OLED 128 × 64: ровно те точки, что выводит прошивка.';
 
     [[583, 'TRACK'], [770, 'VALUE']].forEach(([cx, name], enc) => {
       const knob = box('knob', cx - 46, 187, 92, 92);
       knob.appendChild(document.createElement('i'));
       els.enc[enc] = knob;
+      knob.dataset.tip = ENC_TIP[enc];
       label(name, cx, 305);
       bindHold(knob, down => device.encoderSwitch(enc, down));
       knob.addEventListener('wheel', e => { e.preventDefault(); wheel(enc, e.deltaY); }, { passive: false });
       [[-1, '◀', cx - 70], [1, '▶', cx + 70]].forEach(([dir, glyph, x]) => {
         const b = document.createElement('button');
         b.className = 'encbtn'; b.textContent = glyph;
+        b.dataset.tip = name + ': один щелчок ' + (dir < 0 ? 'влево' : 'вправо');
         Object.assign(b.style, { left: U(x), top: U(233) });
         b.addEventListener('click', () => userTurn(enc, dir));
         deviceEl.appendChild(b);
@@ -72,8 +75,10 @@
 
     els.play = box('', 955, 200, 67, 67); els.play.id = 'play';
     bindHold(els.play, down => device.play(down));
+    els.play.dataset.tip = 'PLAY: запуск с начала или остановка. Светится зелёным, пока прибор играет. На клавиатуре — пробел.';
     label('PLAY', 989, 305);
     els.beat = box('', 1112, 206, 16, 16); els.beat.id = 'beat';
+    els.beat.dataset.tip = 'Индикатор долей: вспыхивает на каждой четверти, первая доля такта ярче.';
     label('BEAT', 1120, 267);
     label('SCENE', 1072, 337);
 
@@ -84,25 +89,50 @@
         const pad = box('pad', PAD_X(track), PAD_Y(row), 80, 80);
         (els.pad[track] = els.pad[track] || [])[row] = pad;
         bindHold(pad, down => device.pad(track, row, down));
+        pad.dataset.tip = 'Пэд: клип дорожки T' + (track + 1) + ' в ряду ' + (row + 1) + '.\n' +
+          'На остановленном приборе клип выбирается сразу, во время игры встаёт в очередь до границы квантования (мигает). ' +
+          'Ярко светится играющий клип, тускло — клип с шагами. Пустой пэд тоже запускается: дорожка замолкает.';
       }
       const scene = box('scene', 1040, PAD_Y(row) + 7, 65, 65);
       els.scene[row] = scene;
       bindHold(scene, down => device.scene(row, down));
+      scene.dataset.tip = 'SCENE ' + (row + 1) + ': запускает ряд ' + (row + 1) + ' на всех восьми дорожках сразу. ' +
+        'Пока сцена ждёт в очереди, повторное нажатие отменяет все очереди.';
     }
     label('MUTE', 236, 1131);
     for (let track = 0; track < 8; track++) {
       const key = box('mutekey', PAD_X(track), 1113, 80, 37);
       els.mute[track] = key;
       bindHold(key, down => device.mute(track, down));
+      key.dataset.tip = 'MUTE T' + (track + 1) + ': выключает и возвращает дорожку сразу, без ожидания границы такта. Светится, пока дорожка слышна.';
     }
     for (let i = 0; i < 16; i++) {
       els.stepLed[i] = box('stepled', STEP_X(i) + 19, 1173, 14, 14);
+      els.stepLed[i].dataset.tip = 'Индикатор шага ' + (i + 1) + ': шаги клипа в фокусе; бегущий шаг отмечен отдельно.';
       const key = box('stepkey', STEP_X(i), 1212, 52, 58);
       els.step[i] = key;
       bindHold(key, down => device.step(i, down), true);
+      key.dataset.tip = 'Кнопка шага ' + (i + 1) + '.\nКоротко: включить или выключить шаг (на дорожке KIT: выкл → нота → акцент).\n' +
+        'На экране Pattern держать и крутить TRACK: нота; нажать TRACK: акцент; удержать TRACK: слайд.\n' +
+        'На экране SELECT PATTERN: ' + STEP_SELECT_TIP(i) + '.\nShift+клик оставляет кнопку нажатой до следующего клика.';
       label(String(i + 1), STEP_X(i) + 26, 1290);
     }
   }
+
+  // What the controls do, as docs/manual-ru.md describes the firmware.
+  const ENC_TIP = [
+    'TRACK. Колесо мыши или стрелки по бокам — поворот, клик — нажатие, держать полсекунды — удержание.\n' +
+      'Session: поворот — дорожка или линия KIT; нажать — экран Pattern; удержать — следующий банк A-D.\n' +
+      'Pattern, с удержанными шагами: поворот — нота; нажать — акцент; удержать — слайд.\n' +
+      'Обе ручки вместе — Panic.',
+    'VALUE. Колесо мыши или стрелки по бокам — поворот, клик — нажатие, держать полсекунды — удержание.\n' +
+      'Session: поворот — темп (быстрый поворот считает ×4 и ×8); нажать — квантование запуска; удержать — SELECT PATTERN.\n' +
+      'Pattern, с удержанными шагами: поворот — velocity; удержать — TIE.\n' +
+      'Обе ручки вместе — Panic.',
+  ];
+  const STEP_SELECT_TIP = i => i < 8 ? 'коротко — MUTE дорожки ' + (i + 1) + ', удержать — её настройка'
+    : ['SAVE, сохранить всё во flash', 'LOAD, загрузить из flash', 'LEN−, укоротить клип', 'LEN+, удлинить клип',
+       'сброс счётчиков диагностики'][i - 8] || 'нет действия';
 
   // Press and hold with the pointer; Shift+click latches a control down.
   function bindHold(el, set, latchable) {
@@ -282,12 +312,40 @@
   };
 
   // ─── Synths ───────────────────────────────────────────────────
-  const INSTRUMENTS = ['KICK+909', 'BASS', 'ACID 1', 'ACID 2', 'LEAD', 'ARP', 'FX'];
-  const CHANNEL_TO_INSTRUMENT = { 9: 0, 2: 1, 3: 2, 4: 3, 5: 4, 6: 5, 7: 6 };
-  const KNOBS = ['master.volume', 'acid1.cutoff', 'acid1.resonance', 'acid1.envmod', 'acid1.decay',
-                 'acid2.cutoff', 'acid2.resonance', 'bass.cutoff', 'lead.cutoff', 'delay.feedback', 'reverb.level'];
-  const lampHot = new Array(INSTRUMENTS.length).fill(0);
-  const sliders = {};
+  // The mixer's strips: a name, the rig knob that is its fader, and the lamp
+  // that shows the device sending it a note (the kick and the kit share
+  // channel 10; the kick is note 36 there).
+  const STRIPS = [
+    { name: 'KICK', level: 'kick.level' }, { name: '909', level: 'drums.level' }, { name: 'BASS', level: 'bass.level' },
+    { name: 'ACID 1', level: 'acid1.level' }, { name: 'ACID 2', level: 'acid2.level' }, { name: 'LEAD', level: 'lead.level' },
+    { name: 'ARP', level: 'arp.level' }, { name: 'FX', level: 'fx.level' }, { name: 'MASTER', level: 'master.volume' },
+  ];
+  const stripOf = (channel, note) => channel === 9 ? (note === 36 ? 0 : 1) : channel >= 2 && channel <= 7 ? channel : undefined;
+  // The other synths' knobs that stay as plain sliders.
+  const KNOBS = ['bass.cutoff', 'lead.cutoff', 'lead.delay', 'arp.delay', 'delay.feedback', 'delay.level', 'reverb.level'];
+  const KNOB_TIP = {
+    tune: 'Tune: подстройка высоты генератора, в середине — без сдвига.',
+    cutoff: 'Cut off freq: частота среза фильтра. Артист открывает и прикрывает её по ходу сета.',
+    resonance: 'Resonance: насколько фильтр подчёркивает частоту среза, вплоть до свиста.',
+    envmod: 'Env mod: как сильно огибающая открывает фильтр на каждой ноте.',
+    decay: 'Decay: как быстро фильтр закрывается после начала ноты. На акцентах спад всегда короткий.',
+    accent: 'Accent: насколько акцентированная нота громче и ярче обычной.',
+    volume: 'Volume: громкость самого инструмента, как ручка на его панели. В общий микс он идёт через фейдер микшера.',
+    drive: 'Drive: дисторшн после фильтра. В нуле выключен полностью.',
+    color: 'Color: яркость искажённого звука (фильтр после дисторшна).',
+    delay: 'Delay: сколько сигнала уходит в пинг-понг дилей.',
+    time: 'Time: время дилея в долях такта, по темпу прибора (MIDI Clock).',
+    fdbk: 'Feedback: сколько раз повторяется эхо.',
+    space: 'Space: сколько сигнала уходит в ревербератор.',
+    size: 'Size: длина хвоста ревербератора, от 1,2 до 12 секунд.',
+    tone: 'Tone: яркость хвоста ревербератора.',
+    feedback: 'Обратная связь общей задержки: сколько раз повторяется эхо.',
+    level: 'Уровень в общем миксе.',
+  };
+  const NOT_DEVICE = '\nЭто ручка синтезатора, не прибора: прибор CC не шлёт.';
+  const lampHot = new Array(8).fill(0);
+  const sliders = {};             // rig knob id -> something with a `value`: a range input or a drawn knob
+  const meters = [];              // what drawStatus keeps moving: () => void
 
   function audioTime(deviceUs) {
     return Math.max(ctx.currentTime, ctx.currentTime + (deviceUs - playhead) / 1e6);
@@ -306,17 +364,188 @@
       if (slider) slider.value = value;
     }
   }
-  function buildRigPanel() {
-    $('lamps').innerHTML = '';
-    INSTRUMENTS.forEach((name, i) => {
-      const s = document.createElement('span');
-      s.className = 'lamp'; s.textContent = name; s.dataset.i = i;
-      $('lamps').appendChild(s);
+  const userSet = (id, value) => { delete anims[id]; rig.setParam(id, value); };
+
+  // A knob drawn as the x0xb0x VCF Bench page draws its knobs: ticks, a gold
+  // arc for the setting, a pointer. Drag up and down (Shift for fine), arrow
+  // keys, double click for the default. Returns something with a `value`.
+  const SWEEP = 300, START = -150;   // degrees, 0 at twelve o'clock
+  function knobSVG() {
+    const ticks = [];
+    for (let i = 0; i <= 10; i++) {
+      const a = (START + SWEEP * i / 10) * Math.PI / 180;
+      const r1 = 44, r2 = i % 5 === 0 ? 49 : 47;
+      ticks.push(`<line x1="${50 + r1 * Math.sin(a)}" y1="${50 - r1 * Math.cos(a)}" x2="${50 + r2 * Math.sin(a)}" y2="${50 - r2 * Math.cos(a)}" stroke="var(--b-ink)" stroke-width="${i % 5 === 0 ? 1.6 : 1}"/>`);
+    }
+    return `<svg viewBox="0 0 100 100" aria-hidden="true">${ticks.join('')}
+      <path class="arc" fill="none" stroke="var(--b-gold)" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="50" cy="50" r="36" fill="var(--b-bg)" stroke="var(--b-line)" stroke-width="1"/>
+      <circle cx="50" cy="50" r="29" fill="var(--b-mask)" stroke="var(--b-line)" stroke-width="1"/>
+      <line class="ptr" x1="50" y1="50" x2="50" y2="24" stroke="var(--b-ink)" stroke-width="3.2" stroke-linecap="round"/></svg>`;
+  }
+  function arcPath(v) {
+    const r = 40, a0 = START * Math.PI / 180, a1 = (START + SWEEP * v) * Math.PI / 180;
+    const p = (a) => `${50 + r * Math.sin(a)} ${50 - r * Math.cos(a)}`;
+    return v <= 0.001 ? '' : `M ${p(a0)} A ${r} ${r} 0 ${SWEEP * v > 180 ? 1 : 0} 1 ${p(a1)}`;
+  }
+  function benchKnob(container, id, label) {
+    const p = rig.params.find(x => x.id === id), name = id.split('.')[1], format = window.Rig.format[name];
+    const cell = document.createElement('div');
+    cell.className = 'bcell';
+    cell.dataset.tip = KNOB_TIP[name] + '\nТянуть вверх и вниз (с Shift точнее), стрелки на клавиатуре, двойной клик — исходное положение.' + NOT_DEVICE;
+    cell.innerHTML = `<div class="bknob" role="slider" tabindex="0" aria-label="${p.label}" aria-valuemin="0" aria-valuemax="10">${knobSVG()}</div>
+      <span class="bval"></span><span class="legend">${label || p.label}</span>`;
+    container.appendChild(cell);
+    const el = cell.querySelector('.bknob'), shown = cell.querySelector('.bval'), def = p.value;
+    let v = p.value;
+    const draw = () => {
+      el.querySelector('.ptr').setAttribute('transform', `rotate(${START + SWEEP * v} 50 50)`);
+      el.querySelector('.arc').setAttribute('d', arcPath(v));
+      const text = format ? format(v) : (v * 10).toFixed(1);
+      el.setAttribute('aria-valuenow', (v * 10).toFixed(1));
+      el.setAttribute('aria-valuetext', text);
+      shown.textContent = text;
+    };
+    const turn = (to) => { v = Math.min(1, Math.max(0, to)); draw(); userSet(id, v); };
+    let startY = 0, startV = 0, dragging = false;
+    el.addEventListener('pointerdown', (e) => { dragging = true; startY = e.clientY; startV = v; el.setPointerCapture(e.pointerId); e.preventDefault(); });
+    el.addEventListener('pointermove', (e) => { if (dragging) turn(startV + (startY - e.clientY) / (e.shiftKey ? 600 : 180)); });
+    const end = () => { dragging = false; };
+    el.addEventListener('pointerup', end);
+    el.addEventListener('pointercancel', end);
+    el.addEventListener('dblclick', () => turn(def));
+    el.addEventListener('keydown', (e) => {
+      const step = { ArrowUp: 0.01, ArrowRight: 0.01, ArrowDown: -0.01, ArrowLeft: -0.01, PageUp: 0.1, PageDown: -0.1 }[e.key];
+      if (step !== undefined) { e.preventDefault(); turn(v + step); }
+      if (e.key === 'Home') { e.preventDefault(); turn(0); }
+      if (e.key === 'End') { e.preventDefault(); turn(1); }
     });
+    draw();
+    sliders[id] = { get value() { return v; }, set value(to) { v = Math.min(1, Math.max(0, +to)); draw(); } };
+  }
+
+  // One 303 as the Bench page shows it: the panel with its seven knobs, the
+  // waveform switch and the ladder-current meter, and the Effects board.
+  function buildAcid(id, index, title, track) {
+    const voice = rig.inst[index], root = $(id);
+    root.innerHTML = `<section class="board" aria-label="${title}">
+        <div class="bhead"><span class="legend">${title} · x0xb0x</span>
+          <span class="small">Модель из x0xb0x VCF Bench: фильтр, огибающая, акцент, VCA и генератор. Ноты приходят с дорожки T${track} прибора.</span></div>
+        <div class="bknobs"></div>
+        <div class="bmeter" data-tip="Ток диодной лестницы фильтра: чем он больше, тем выше срез. Видно, как его двигают ручки, огибающая и акцент.">
+          <span class="legend">Ladder current, peak over 30 ms</span><span class="breadout">– µA</span>
+          <div class="bbar" aria-hidden="true"><i></i></div><div class="bticks" aria-hidden="true"></div>
+        </div>
+      </section>
+      <section class="board" aria-label="${title}: effects">
+        <div class="bhead"><span class="legend">Effects</span>
+          <span class="small">Дисторшн, дилей и ревербератор со страницы Bench. В самом x0xb0x их нет.</span></div>
+        <div class="bknobs"></div>
+      </section>`;
+    const [panel, effects] = root.querySelectorAll('.bknobs');
+    for (const [name, label] of [['tune'], ['cutoff'], ['resonance', 'Reso­nance'], ['envmod'], ['decay'], ['accent'], ['volume']]) {
+      benchKnob(panel, id + '.' + name, label);
+    }
+    // the SAW / SQR switch sits in the eighth cell
+    const sw = document.createElement('div');
+    sw.className = 'bcell';
+    sw.dataset.tip = 'Форма волны генератора: пила или меандр, как переключатель на панели.';
+    sw.innerHTML = `<div class="bswitch" role="group" aria-label="Waveform"><button type="button">Saw</button><button type="button">Sqr</button></div>
+      <span class="bval">&nbsp;</span><span class="legend">Waveform</span>`;
+    panel.appendChild(sw);
+    const [saw, sqr] = sw.querySelectorAll('button');
+    const setWave = (w) => {
+      voice.setWave(w);
+      saw.setAttribute('aria-pressed', String(voice.wave === 'saw'));
+      sqr.setAttribute('aria-pressed', String(voice.wave === 'square'));
+    };
+    saw.addEventListener('click', () => setWave('saw'));
+    sqr.addEventListener('click', () => setWave('square'));
+    setWave(voice.wave);
+    for (const [name, label] of [['drive'], ['color'], ['delay'], ['time'], ['fdbk', 'Feed­back'], ['space'], ['size'], ['tone']]) {
+      benchKnob(effects, id + '.' + name, label);
+    }
+    // ladder-current meter, log scale 2 to 300 uA
+    const LO = Math.log(2), HI = Math.log(300);
+    const pos = (ua) => Math.min(1, Math.max(0, (Math.log(Math.max(ua, 2)) - LO) / (HI - LO)));
+    const ticks = root.querySelector('.bticks'), bar = root.querySelector('.bbar i'), readout = root.querySelector('.breadout');
+    ticks.innerHTML = [3, 10, 30, 100, 300].map(u => `<span style="left:${(pos(u) * 100).toFixed(1)}%">${u}</span>`).join('');
+    ticks.lastElementChild.style.transform = 'translateX(-100%)';
+    meters.push(() => {
+      const ua = voice.ua;
+      if (!(ua > 0) || !ctx || ctx.state !== 'running') { bar.style.width = '0'; readout.textContent = '– µA'; return; }
+      bar.style.width = (pos(ua) * 100).toFixed(1) + '%';
+      readout.textContent = (ua < 10 ? ua.toFixed(1) : ua.toFixed(0)) + ' µA';
+    });
+  }
+
+  function buildMixer() {
+    const box = $('mixer');
+    box.innerHTML = '';
+    STRIPS.forEach((strip, i) => {
+      const p = rig && rig.params.find(x => x.id === strip.level), master = i === STRIPS.length - 1;
+      const el = document.createElement('div');
+      el.className = 'strip' + (master ? ' master' : '');
+      el.innerHTML = `<span class="lamp">${strip.name}</span><div class="well"><input class="fader" type="range" aria-label="${strip.name}">` +
+        (master ? '<div class="vu"><i></i></div>' : '') + `</div><span class="val"></span>` +
+        (master ? '' : '<button type="button" aria-pressed="false">M</button>');
+      box.appendChild(el);
+      const lamp = el.querySelector('.lamp'), fader = el.querySelector('.fader'), val = el.querySelector('.val'), mute = el.querySelector('button');
+      if (!master) lamp.dataset.i = i;
+      lamp.dataset.tip = master ? 'Общий выход всех синтезаторов.'
+        : 'Вспыхивает, когда прибор шлёт ноту этому инструменту.' + (strip.name.startsWith('ACID') ? ' Это модель x0xb0x (схема TB-303) из x0xb0x VCF Bench.' : '');
+      if (!p) { fader.disabled = true; return; }
+      fader.min = p.min; fader.max = p.max; fader.step = (p.max - p.min) / 100; fader.value = p.value;
+      fader.dataset.tip = (master ? 'Общая громкость.' : 'Уровень канала «' + strip.name + '» в общем миксе.') + NOT_DEVICE;
+      const show = () => { val.textContent = (10 * fader.value / p.max).toFixed(1); };
+      let saved = null;           // the level a muted strip returns to
+      const unmute = () => { saved = null; el.classList.remove('muted'); if (mute) mute.setAttribute('aria-pressed', 'false'); };
+      fader.addEventListener('input', () => { unmute(); userSet(strip.level, +fader.value); show(); });
+      if (mute) {
+        mute.dataset.tip = 'Заглушить канал в микшере страницы. Это не MUTE прибора: прибор продолжает слать ноты.';
+        mute.addEventListener('click', () => {
+          if (saved === null) {
+            saved = +fader.value;
+            el.classList.add('muted');
+            mute.setAttribute('aria-pressed', 'true');
+            userSet(strip.level, 0);
+          } else {
+            const back = saved;
+            unmute();
+            userSet(strip.level, back);
+          }
+        });
+      }
+      show();
+      // a move the artist makes shows on the fader too
+      sliders[strip.level] = { get value() { return fader.value; }, set value(to) { fader.value = to; show(); } };
+      if (master) {
+        const vu = el.querySelector('.vu i'), samples = new Float32Array(rig.analyser.fftSize);
+        el.querySelector('.vu').dataset.tip = 'Пик на выходе, от −40 дБ внизу до полной шкалы вверху.';
+        let held = 0;
+        meters.push(() => {
+          let peak = 0;
+          if (ctx && ctx.state === 'running') {
+            rig.analyser.getFloatTimeDomainData(samples);
+            for (let k = 0; k < samples.length; k++) { const a = Math.abs(samples[k]); if (a > peak) peak = a; }
+          }
+          held = Math.max(peak, held * 0.9);      // falls back by about 1 dB a frame
+          const db = 20 * Math.log10(Math.max(held, 1e-4));
+          vu.style.height = Math.min(100, Math.max(0, (db + 40) * 2.5)) + '%';
+          vu.style.background = held > 0.89 ? 'var(--warn)' : 'var(--accent)';
+        });
+      }
+    });
+  }
+
+  function buildRigPanel() {
+    buildMixer();
     if (!rig) {
       $('knobs').textContent = 'Синтезаторы не загрузились (rig.js).';
       return;
     }
+    buildAcid('acid1', 2, 'ACID 1', 4);
+    buildAcid('acid2', 3, 'ACID 2', 5);
     const byId = {};
     for (const p of rig.params) byId[p.id] = p;
     for (const id of KNOBS) {
@@ -324,9 +553,10 @@
       if (!p) continue;
       const wrap = document.createElement('label');
       wrap.textContent = (p.group ? p.group + ' · ' : '') + (p.label || id);
+      wrap.dataset.tip = (id.endsWith('.delay') ? 'Сколько сигнала инструмента уходит в общую задержку.' : KNOB_TIP[id.split('.')[1]]) + NOT_DEVICE;
       const input = document.createElement('input');
       input.type = 'range'; input.min = p.min; input.max = p.max; input.step = (p.max - p.min) / 200; input.value = p.value;
-      input.addEventListener('input', () => { delete anims[id]; rig.setParam(id, +input.value); });
+      input.addEventListener('input', () => userSet(id, +input.value));
       wrap.appendChild(input);
       $('knobs').appendChild(wrap);
       sliders[id] = input;
@@ -360,7 +590,7 @@
     const channel = m.status & 15, kind = m.status & 0xF0;
     if (sounding()) rig.midi(m.status, m.d1, m.d2, audioTime(m.t));
     if (kind === 0x90 && m.d2 > 0) {
-      const inst = CHANNEL_TO_INSTRUMENT[channel];
+      const inst = stripOf(channel, m.d1);
       if (inst !== undefined) lampHot[inst] = performance.now() + (m.t - playhead) / 1000 + 90;
       midiLines.push((m.t / 1e6).toFixed(3) + '  ch' + String(channel + 1).padStart(2) + '  ' +
         (NOTE[m.d1 % 12] + (Math.floor(m.d1 / 12) - 1)).padEnd(4) + ' vel ' + m.d2);
@@ -473,9 +703,34 @@
     // The artist's score must match what the firmware inside can do. A firmware
     // that listens on its MIDI input also starts new steps at the last note and
     // copies clips; the score written for the older firmware would go wrong on it.
+    const songs = $('show-song');
+    Artist.SONGS.forEach((song, i) => {
+      const option = document.createElement('option');
+      option.value = i;
+      option.textContent = '«' + song.title + '» — ' + song.style + ', ' + song.key + ', ' + song.bpm + ' BPM';
+      songs.appendChild(option);
+    });
+    const forms = $('show-form');
+    const own = document.createElement('option');
+    own.value = '';
+    forms.appendChild(own);
+    for (const form of Artist.FORMS) {
+      const option = document.createElement('option');
+      option.value = form.id;
+      option.textContent = '«' + form.title + '»: ' + form.about;
+      forms.appendChild(option);
+    }
+    const ownForm = () => {
+      const form = Artist.FORMS.find(f => f.id === Artist.SONGS[+songs.value].form);
+      own.textContent = 'как задумано для песни: «' + form.title + '»';
+    };
+    songs.addEventListener('change', ownForm);
+    ownForm();
     const variants = $('show-variant');
-    for (const option of variants.options) option.disabled = hasMidiIn() ? option.value === 'base' : option.value !== 'base';
-    variants.value = hasMidiIn() ? 'keys' : 'base';
+    const can = device.features();
+    const fits = { base: !can.lastNote, fw2: can.lastNote, keys: can.lastNote && can.midiIn, pads: can.lastNote && can.padKeys };
+    for (const option of variants.options) option.disabled = !fits[option.value];
+    variants.value = fits.pads ? 'pads' : fits.keys ? 'keys' : fits.fw2 ? 'fw2' : 'base';
     const box = $('kbd-keys');
     const glide = e => {
       const el = document.elementFromPoint(e.clientX, e.clientY), k = el && el.closest('[data-n]');
@@ -561,7 +816,8 @@
     $('log').innerHTML = '';
     lastLed.fill('');
     const variant = $('show-variant').value;
-    show = Artist.buildShow(undefined, { fw2: variant !== 'base', keys: variant === 'keys' });
+    show = Artist.buildShow(undefined, { song: +$('show-song').value, form: $('show-form').value || undefined,
+                                         fw2: variant !== 'base', keys: variant === 'keys', pads: variant === 'pads' });
     Artist.schedule(show, device, hands, io);
     phase = 'prep';
     speed = $('show-prep').checked ? +$('prep-speed').value : Infinity;
@@ -625,7 +881,8 @@
       $('progress').firstElementChild.style.width = '0';
     }
     const now = performance.now();
-    document.querySelectorAll('#lamps .lamp').forEach(el => {
+    for (const move of meters) move();
+    document.querySelectorAll('#mixer .lamp[data-i]').forEach(el => {
       const i = +el.dataset.i;
       el.classList.toggle('on', lampHot[i] > now && lampHot[i] - now < 400);
     });
@@ -641,6 +898,37 @@
     drawLights();
     drawStatus();
     requestAnimationFrame(frame);
+  }
+
+  // ─── Hints ────────────────────────────────────────────────────
+  // One floating box for every element that carries data-tip. It waits a
+  // moment, so that it does not flicker under a pointer that only passes by,
+  // and goes away on a press: a held pad must stay visible.
+  function initTips() {
+    const tip = $('tip');
+    let over = null, timer = 0;
+    const hide = () => { clearTimeout(timer); over = null; tip.hidden = true; };
+    const place = el => {
+      tip.textContent = el.dataset.tip;
+      tip.hidden = false;
+      const r = el.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+      const below = r.bottom + 8 + h <= window.innerHeight || r.top - 8 - h < 0;
+      tip.style.left = Math.max(8, Math.min(r.left + r.width / 2 - w / 2, window.innerWidth - w - 8)) + 'px';
+      tip.style.top = (below ? r.bottom + 8 : r.top - 8 - h) + 'px';
+    };
+    document.addEventListener('pointerover', e => {
+      const el = e.target.closest ? e.target.closest('[data-tip]') : null;
+      if (el === over) return;
+      hide();
+      if (!el || e.pointerType === 'touch') return;
+      over = el;
+      timer = setTimeout(() => place(el), 400);
+    });
+    document.addEventListener('pointerout', e => { if (!e.relatedTarget) hide(); });
+    document.addEventListener('pointerdown', hide, true);
+    document.addEventListener('keydown', hide, true);
+    window.addEventListener('scroll', hide);     // the page itself, not the log, which scrolls all through a set
+    window.addEventListener('blur', hide);
   }
 
   // ─── Start ────────────────────────────────────────────────────
@@ -659,6 +947,7 @@
     }
     buildRigPanel();
     initKeyboard();
+    initTips();
 
     $('show-start').addEventListener('click', startShow);
     $('show-stop').addEventListener('click', () => {
@@ -683,7 +972,7 @@
       say('warn', 'Расширитель кнопок шагов MCP23017 сброшен. До перенастройки его линии читаются как нажатые; прошивка не должна принять это за нажатия.');
     });
     document.addEventListener('keydown', e => {
-      if (e.code !== 'Space' || e.repeat || e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT') return;
+      if (e.code !== 'Space' || e.repeat || ['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'A'].includes(e.target.tagName)) return;
       e.preventDefault();
       takeOver();
       device.play(true);

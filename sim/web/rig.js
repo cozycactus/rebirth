@@ -1,7 +1,8 @@
 // rig.js: the virtual instruments plugged into the simulated sequencer.
-// Classic script, one global (window.Rig). Everything is synthesized with
-// native Web Audio nodes; nothing is touched at load time, so the file also
-// loads under Node for syntax checks.
+// Classic script, one global (window.Rig). The two 303s are the x0xb0x model
+// of dsp.js (see acid.js); everything else is synthesized with native Web
+// Audio nodes. Nothing is touched at load time, so the file also loads under
+// Node for syntax checks.
 //
 // Scheduling rules that keep the automation sane:
 //  - every AudioParam has exactly one writer (a knob, a voice envelope or a
@@ -13,6 +14,10 @@
 //    rebuilt and so voices can sample a knob at a note's event time.
 (function () {
   'use strict';
+
+  // Where this script came from: acid.js and dsp.js sit beside it.
+  const HERE = typeof document !== 'undefined' && document.currentScript && document.currentScript.src
+    ? document.currentScript.src.replace(/[^/]*$/, '') : '';
 
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
@@ -72,10 +77,16 @@
     ];
     for (const [x, g] of [['acid1', 'Acid 1'], ['acid2', 'Acid 2']]) {
       out.push(
-        k(x + '.cutoff', 'Cutoff', g, 0.35), k(x + '.resonance', 'Resonance', g, 0.7),
-        k(x + '.envmod', 'Env mod', g, 0.6), k(x + '.decay', 'Decay', g, 0.35),
-        k(x + '.accent', 'Accent', g, 0.6), k(x + '.drive', 'Drive', g, 0.3),
-        k(x + '.level', 'Level', g, 0.7), k(x + '.delay', 'Delay send', g, 0.2));
+        // The seven knobs of the model and the eight of its effects, named and
+        // set as the Bench page has them.
+        k(x + '.tune', 'Tune', g, 0.5), k(x + '.cutoff', 'Cut off freq', g, 0.35),
+        k(x + '.resonance', 'Resonance', g, 0.85), k(x + '.envmod', 'Env mod', g, 0.6),
+        k(x + '.decay', 'Decay', g, 0.35), k(x + '.accent', 'Accent', g, 0.8),
+        k(x + '.volume', 'Volume', g, 0.75),
+        k(x + '.drive', 'Drive', g, 0), k(x + '.color', 'Color', g, 0.5),
+        k(x + '.delay', 'Delay', g, 0.3), k(x + '.time', 'Time', g, 0.4), k(x + '.fdbk', 'Feedback', g, 0.4),
+        k(x + '.space', 'Space', g, 0.5), k(x + '.size', 'Size', g, 0.55), k(x + '.tone', 'Tone', g, 0.5),
+        k(x + '.level', 'Level', g, 0.7));
     }
     out.push(
       k('bass.cutoff', 'Cutoff', 'Bass', 0.45), k('bass.level', 'Level', 'Bass', 0.8),
@@ -182,43 +193,247 @@
 
   const velGain = (vel) => 0.5 + 0.5 * Math.min(vel, 100) / 100;
 
-  const CUT_ACID = cents(8000, 80), CUT_BASS = cents(4000, 60), CUT_LEAD = cents(12000, 150);
+  const CUT_BASS = cents(4000, 60), CUT_LEAD = cents(12000, 150);
 
-  function makeAcid(rig, id, wave, pan, toneHz) {
-    const ctx = rig.ctx;
-    const v = new MonoVoice(rig, {
-      oscs: [{ type: wave, gain: wave === 'square' ? 0.6 : 1 }],
-      baseHz: 80, q: [0, 0],
-      trig(vel, t) {
-        const acc = vel >= 120 ? rig.knobAt(id + '.accent', t) : 0;
-        const dec = (0.06 * Math.pow(20, rig.knobAt(id + '.decay', t))) / 3;   // 60..1200 ms to ~5%
-        return {
-          peak: 0.5 * velGain(vel) * (1 + 0.8 * acc), atk: 0.0015, hold: 0.008, sus: 0.7, dec: 1.2, rel: 0.008,
-          fPeak: 1 + 0.7 * acc, fDec: dec + (Math.min(dec, 0.05) - dec) * acc,
-        };
-      },
-    });
-    for (const f of v.filters) rig.bind(id + '.cutoff', f.detune, (x) => x * CUT_ACID);
-    rig.bind(id + '.resonance', v.filters[0].Q, (x) => 2 + 18 * x);   // lowpass Q is in dB
-    rig.bind(id + '.resonance', v.filters[1].Q, (x) => -3 + 5 * x);
-    rig.bind(id + '.envmod', v.envAmt.gain, (x) => 4200 * x);
-    // Overdrive after the filter: one knob moves the gain into a fixed tanh
-    // and a compensating gain after it, so the output stays bounded by `post`.
-    const pre = rig.gain(1), post = rig.gain(1), shaper = ctx.createWaveShaper(), tone = ctx.createBiquadFilter();
-    // A closed filter leaves little of the saw: lean into the drive as the
-    // cutoff knob goes below its default (unity from 0.35 up, about +2.5 dB
-    // at 0.16, +6.5 dB at 0) so the line does not sink when it is closed.
-    const makeup = rig.gain(1);
-    rig.bind(id + '.cutoff', makeup.gain, (x) => 1 + 9 * Math.pow(Math.max(0, 0.35 - x), 2));
-    shaper.curve = rig.tanh3;
-    tone.type = 'lowpass';
-    tone.frequency.value = rig.hz(toneHz);
-    tone.Q.value = -3;
-    rig.bind(id + '.drive', pre.gain, (x) => 0.25 + 0.6 * x);
-    rig.bind(id + '.drive', post.gain, (x) => 0.9 - 0.45 * x);
-    chain(v.out, makeup, pre, shaper, post, tone);
-    rig.strip(tone, { level: id + '.level', k: 1.95, pan, delay: id + '.delay', rev: 0.06 });
-    return v;
+  // ---- The two 303s: the x0xb0x model of dsp.js, run by acid.js -----------
+  // MIDI becomes the four lines a x0xb0x's firmware drives. A note struck
+  // while another is held is a slide: SLIDE goes high and the CV moves, but
+  // the gate stays up, so the envelopes are not struck again. Accent is a
+  // velocity of 120 or more. The knobs are the model's own, 0 to 1 of a turn.
+  const ACID_KNOBS = { cut: 'cutoff', res: 'resonance', env: 'envmod', decay: 'decay', acc: 'accent', tune: 'tune', vol: 'volume' };
+  const cvOf = (note) => 2 + (note - 36) / 12;   // the model's CV: 2 V is C2, a volt an octave
+  // The model's line output at its Volume 7.5 is quiet beside the rest of the
+  // rig (accents peak near 0.3, about 0.03 RMS): the strip brings it up, so
+  // that at the master an accent with its echoes peaks about as high as the
+  // kick.
+  const ACID_GAIN = 7;
+
+  // ---- The effects of the Bench page, one set for each 303 -----------------
+  // Ported from x0xb0x-vcf-bench/index.html (buildFx and what it calls), with
+  // the rig's master in place of its own limiter. The voice first meets the
+  // distortion: a clean path and a WaveShaper path (tanh with a little
+  // asymmetry, 4x oversampled, then a Color low-pass and a DC block),
+  // crossfaded by Drive, so Drive 0 is a true bypass. Then dry, a delay send
+  // and a reverb send. The delay is a ping-pong pair synced to the tempo, each
+  // repeat through a 250 Hz to 3.5 kHz band, and its echoes go to the reverb
+  // too. The reverb send is high-passed, delayed 35 ms and convolved with a
+  // generated stereo tail. These knobs act when they are turned: a move
+  // scheduled ahead or stretched over time is taken at once.
+  const DIVS = [[1, '1/16'], [2, '1/8'], [3, '3/16'], [4, '1/4'], [6, '3/8'], [8, '1/2']];   // sixteenths
+  const divOf = (v) => DIVS[Math.round(clamp(v, 0, 1) * (DIVS.length - 1))];
+  const rt60 = (size) => 1.2 * Math.pow(10, size);                  // 1.2 s to 12 s
+
+  class BenchFx {
+    constructor(rig, id, src) {
+      const c = this.c = rig.ctx;
+      this.rig = rig;
+      this.id = id;
+      const out = this.out = rig.gain(1);
+      const dry = c.createGain(), send = c.createGain(), hp = c.createBiquadFilter(), pre = c.createDelay(0.2);
+      hp.type = 'highpass'; hp.frequency.value = 160; pre.delayTime.value = 0.035;
+      dry.connect(out); send.connect(hp); hp.connect(pre);
+      const dsend = c.createGain(), dhp = c.createBiquadFilter(), dl = c.createDelay(2.5), dr = c.createDelay(2.5);
+      const fbLR = c.createGain(), fbRL = c.createGain(), merge = c.createChannelMerger(2), dout = c.createGain();
+      dhp.type = 'highpass'; dhp.frequency.value = 120;
+      const band = (from, to) => {
+        const h = c.createBiquadFilter(), l = c.createBiquadFilter();
+        h.type = 'highpass'; h.frequency.value = 250; l.type = 'lowpass'; l.frequency.value = 3500;
+        from.connect(h); h.connect(l); l.connect(to);
+      };
+      dsend.connect(dhp); dhp.connect(dl);
+      band(dl, fbLR); fbLR.connect(dr);          // left echo feeds the right
+      band(dr, fbRL); fbRL.connect(dl);          // and the right feeds the left
+      dl.connect(merge, 0, 0); dr.connect(merge, 0, 1);
+      merge.connect(dout); dout.connect(out); dout.connect(send);
+      const inp = c.createGain(), clean = c.createGain(), shaper = c.createWaveShaper(), color = c.createBiquadFilter();
+      const dcb = c.createBiquadFilter(), dist = c.createGain(), post = c.createGain();
+      shaper.oversample = '4x';
+      color.type = 'lowpass'; color.Q.value = 0.7;
+      dcb.type = 'highpass'; dcb.frequency.value = 25;
+      inp.connect(clean); clean.connect(post);
+      inp.connect(shaper); shaper.connect(color); color.connect(dcb); dcb.connect(dist); dist.connect(post);
+      post.connect(dry); post.connect(send); post.connect(dsend);
+      src.connect(inp);
+      Object.assign(this, { dry, send, pre, conv: null, tail: null, timer: 0, dsend, dl, dr, fbLR, fbRL, clean, shaper, color, dist, driveDrawn: -1 });
+      this.setDrive(true);
+      this.swapTail();
+      this.setWet(true);
+      this.setDelay(true);
+      for (const name of ['drive', 'color']) rig.watch(id + '.' + name, () => this.setDrive(false));
+      for (const name of ['delay', 'time', 'fdbk']) rig.watch(id + '.' + name, () => this.setDelay(false));
+      rig.watch(id + '.space', () => this.setWet(false));
+      // a new tail is costly to make: wait until the knob rests
+      for (const name of ['size', 'tone']) {
+        rig.watch(id + '.' + name, () => { clearTimeout(this.timer); this.timer = setTimeout(() => this.swapTail(), 150); });
+      }
+    }
+
+    k(name) { return this.rig.getParam(this.id + '.' + name); }
+
+    setDrive(now) {
+      const d = this.k('drive'), t = this.c.currentTime;
+      const g = 1 + 40 * d * d;   // gain into the curve
+      const shape = (x) => Math.tanh(g * (x + 0.12 * x * x));
+      if (Math.abs(d - this.driveDrawn) > 0.002) {
+        const n = 2048, curve = new Float32Array(n);
+        for (let i = 0; i < n; i++) curve[i] = shape(2 * i / (n - 1) - 1);
+        this.shaper.curve = curve;
+        this.driveDrawn = d;
+      }
+      // the two paths differ in phase (Color, DC block), so cross over within the first 5 % of Drive
+      const w = Math.min(1, d * 20), makeup = Math.pow(g, -0.7);
+      const set = (prm, v) => { if (now) prm.value = v; else prm.setTargetAtTime(v, t, 0.02); };
+      set(this.clean.gain, 1 - w);
+      set(this.dist.gain, w * makeup);
+      set(this.color.frequency, this.rig.hz(1500 * Math.pow(12, this.k('color'))));
+    }
+
+    setDelay(now, at) {
+      const t = at === undefined ? this.c.currentTime : at;
+      const T = divOf(this.k('time'))[0] * 60 / this.rig.tempo.at(t) / 4;
+      const mix = 0.9 * Math.pow(this.k('delay'), 1.2), fb = 0.85 * this.k('fdbk');
+      const set = (prm, v, tc) => { if (now) prm.value = v; else prm.setTargetAtTime(v, t, tc); };
+      set(this.dl.delayTime, T, 0.05); set(this.dr.delayTime, T, 0.05);   // a tempo change glides, like tape
+      set(this.dsend.gain, mix, 0.02); set(this.fbLR.gain, fb, 0.02); set(this.fbRL.gain, fb, 0.02);
+    }
+
+    setWet(now) {
+      const sp = this.k('space'), t = this.c.currentTime;
+      const wet = 1.2 * Math.pow(sp, 1.5), dry = 1 - 0.35 * sp;
+      if (now) { this.send.gain.value = wet; this.dry.gain.value = dry; return; }
+      this.send.gain.setTargetAtTime(wet, t, 0.02);
+      this.dry.gain.setTargetAtTime(dry, t, 0.02);
+    }
+
+    makeTail() {
+      const c = this.c, rand = this.rig.rand;
+      const sr = c.sampleRate, T = rt60(this.k('size')), n = Math.ceil(Math.min(T * 1.15, 14) * sr);
+      const buf = c.createBuffer(2, n, sr);
+      const fc0 = 2500 * Math.pow(6, this.k('tone')), fc1 = fc0 / 6;   // the tail darkens as it decays
+      for (let ch = 0; ch < 2; ch++) {
+        const d = buf.getChannelData(ch);
+        let lp = 0, a = 0, e2 = 0;
+        for (let i = 0; i < n; i++) {
+          const t = i / sr;
+          if ((i & 63) === 0) a = Math.exp(-2 * Math.PI * fc0 * Math.pow(fc1 / fc0, Math.min(t / T, 1)) / sr);
+          lp = (1 - a) * (rand() * 2 - 1) + a * lp;
+          const v = lp * (1 - Math.exp(-t / 0.05)) * Math.exp(-6.91 * t / T);
+          d[i] = v;
+          e2 += v * v;
+        }
+        const k = 1 / Math.sqrt(e2 || 1);
+        for (let i = 0; i < n; i++) d[i] *= k;
+      }
+      return buf;
+    }
+
+    swapTail() {
+      const c = this.c, t = c.currentTime;
+      const conv = c.createConvolver(), tail = c.createGain();
+      conv.normalize = false;
+      conv.buffer = this.makeTail();
+      tail.gain.value = this.conv ? 0 : 1;
+      this.pre.connect(conv); conv.connect(tail); tail.connect(this.out);
+      if (this.conv) {   // fade the new tail in and the old one out, so a turn of Size does not cut the sound
+        const oldConv = this.conv, oldTail = this.tail;
+        tail.gain.setTargetAtTime(1, t, 0.05);
+        oldTail.gain.setTargetAtTime(0, t, 0.05);
+        setTimeout(() => { this.pre.disconnect(oldConv); oldConv.disconnect(); oldTail.disconnect(); }, 400);
+      }
+      this.conv = conv; this.tail = tail;
+    }
+  }
+
+  class AcidVoice {
+    constructor(rig, id, wave, pan) {
+      this.rig = rig;
+      this.id = id;
+      this.wave = wave;
+      this.note = -1;      // sounding note, by event order
+      this.skip = 0;       // note offs to ignore after a same-pitch legato on
+      this.lastT = 0;
+      this.sink = null;    // takes the line changes once the model runs
+      this.ua = 0;         // ladder current, peak over the last 30 ms or so, for a meter
+      this.out = rig.gain(1);
+      // Its own delay and reverb, as on the Bench page: no sends to the rig's.
+      this.fx = new BenchFx(rig, id, this.out);
+      rig.strip(this.fx.out, { level: id + '.level', k: ACID_GAIN, pan });
+    }
+
+    send(t, lines) { if (this.sink) this.sink({ t, lines }); }
+
+    // 'saw' or 'square', as the switch on the panel.
+    setWave(wave) {
+      this.wave = wave === 'square' ? 'square' : 'saw';
+      if (this.sink) this.sink({ wave: this.wave });
+    }
+
+    on(note, vel, t) {
+      // Until the model runs a note is dropped whole: remembering it as held
+      // would turn the first note that does sound into a slide with no gate.
+      if (!this.sink) return;
+      // Events of one voice are taken in arrival (wire) order.
+      t = this.lastT = Math.max(t, this.lastT);
+      const accent = vel >= 120 ? 1 : 0;
+      if (this.note >= 0) {
+        if (note === this.note) {      // tied to itself: nothing moves but the accent line
+          this.skip++;
+          this.send(t, [['slide', 1], ['accent', accent]]);
+          return;
+        }
+        this.note = note;
+        this.skip = 0;
+        this.send(t, [['slide', 1], ['accent', accent], ['cv', cvOf(note)]]);
+        return;
+      }
+      this.note = note;
+      this.skip = 0;
+      this.send(t, [['slide', 0], ['accent', accent], ['cv', cvOf(note)], ['gate', 1]]);
+    }
+
+    off(note, t) {
+      if (!this.sink || note !== this.note) return;   // not this voice's note: the slid-from one, already replaced
+      if (this.skip > 0) { this.skip--; return; }
+      t = this.lastT = Math.max(t, this.lastT);
+      this.note = -1;
+      this.send(t, [['gate', 0]]);
+    }
+
+    // Panic: unlike on/off this cuts at t even if later events are scheduled.
+    kill(t) {
+      this.lastT = t;
+      this.note = -1;
+      this.skip = 0;
+      if (this.sink) this.sink({ t, kill: true });
+    }
+
+    // The model in an AudioWorklet: its knobs are the node's AudioParams.
+    worklet() {
+      const rig = this.rig;
+      const node = new AudioWorkletNode(rig.ctx, 'rebirth-acid', {
+        numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1], processorOptions: { wave: this.wave } });
+      for (const k of Object.keys(ACID_KNOBS)) rig.bind(this.id + '.' + ACID_KNOBS[k], node.parameters.get(k), (x) => x);
+      node.connect(this.out);
+      node.port.onmessage = (e) => { if (e.data.ua !== undefined) this.ua = e.data.ua; };
+      this.node = node;
+      this.sink = (m) => node.port.postMessage(m);
+    }
+
+    // The same model on the main thread, for a page that cannot load a
+    // worklet module (one opened from disk). Costs more and can crackle.
+    inline() {
+      const rig = this.rig, ctx = rig.ctx;
+      const engine = new window.Acid.AcidEngine(ctx.sampleRate, this.wave);
+      const node = ctx.createScriptProcessor(1024, 0, 1);
+      const knob = (k, t) => rig.knobAt(this.id + '.' + ACID_KNOBS[k], t);
+      node.onaudioprocess = (e) => {
+        engine.render(e.outputBuffer.getChannelData(0), e.playbackTime === undefined ? ctx.currentTime : e.playbackTime, knob);
+        this.ua = engine.takeUa();
+      };
+      node.connect(this.out);
+      this.node = node;
+      this.sink = (m) => { if (m.kill) engine.kill(m.t); else if (m.wave) engine.wave(m.wave); else engine.lines(m.t, m.lines); };
+    }
   }
 
   function makeBass(rig) {
@@ -527,10 +742,9 @@
       this.tempo = new Line(145);
       this.params = knobDefs();
       this.knobs = new Map();
-      for (const d of this.params) this.knobs.set(d.id, { desc: d, line: new Line(d.value), binds: [] });
+      for (const d of this.params) this.knobs.set(d.id, { desc: d, line: new Line(d.value), binds: [], watchers: [] });
       this.lampT = new Float64Array(8 * LAMPS).fill(-1e9);
       this.lampV = new Float64Array(8 * LAMPS);
-      this.tanh3 = curve((x) => Math.tanh(3 * x));
 
       this.noise = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 2), ctx.sampleRate);
       const nd = this.noise.getChannelData(0);
@@ -571,9 +785,35 @@
 
       this.inst = [
         new Drums(this), makeBass(this),
-        makeAcid(this, 'acid1', 'sawtooth', -0.25, 9000), makeAcid(this, 'acid2', 'square', 0.25, 4500),
+        new AcidVoice(this, 'acid1', 'saw', -0.25), new AcidVoice(this, 'acid2', 'square', 0.25),
         makeLead(this), makeArp(this), new Fx(this), makePad(this),
       ];
+      // Resolves once the 303s can sound; until then their notes are dropped.
+      this.ready = this.startAcids([this.inst[2], this.inst[3]]);
+    }
+
+    startAcids(acids) {
+      const ctx = this.ctx;
+      const silent = (why) => {
+        console.warn('rig: the 303 model is not loaded, ACID 1 and ACID 2 stay silent', why);
+        return 'none';
+      };
+      const inline = (why) => {
+        if (typeof window === 'undefined' || !window.Acid || !ctx.createScriptProcessor) return silent(why);
+        try {
+          for (const a of acids) if (!a.sink) a.inline();
+          return 'inline';
+        } catch (e) { return silent(e); }
+      };
+      if (!ctx.audioWorklet || typeof AudioWorkletNode === 'undefined') return Promise.resolve(inline());
+      // acid.js first: it gives dsp.js the `module` to export its classes through.
+      // Inside a promise chain, so that an addModule that throws instead of
+      // rejecting still ends in the fallback.
+      return Promise.resolve()
+        .then(() => ctx.audioWorklet.addModule(HERE + 'acid.js'))
+        .then(() => ctx.audioWorklet.addModule(HERE + 'dsp.js'))
+        .then(() => { for (const a of acids) a.worklet(); return 'worklet'; })
+        .catch(inline);
     }
 
     // -- construction helpers
@@ -583,13 +823,27 @@
 
     // Attach an AudioParam to a knob. Each binding keeps its own timeline in
     // the param's units, so a ramp cut short can be reproduced exactly.
+    // A param bound late (the 303s, once their model has loaded) joins the
+    // knob where it is now and takes over what is left of a move in progress.
     bind(id, param, map) {
-      const k = this.knobs.get(id), v = map(k.desc.value);
+      const k = this.knobs.get(id), now = this.ctx.currentTime;
+      const v = map(k.line.at(now));
       param.value = v;
-      param.setValueAtTime(v, 0);
-      k.binds.push({ param, map, line: new Line(v) });
+      param.setValueAtTime(v, now);
+      const line = new Line(v);
+      for (const s of k.line.segs) {
+        if (s.t1 <= now) continue;
+        const T = Math.max(now, s.t0), target = map(s.v1);
+        param.setValueAtTime(map(k.line.at(T)), T);
+        param.linearRampToValueAtTime(target, s.t1);
+        line.to(target, T, s.t1 - T, now);
+      }
+      k.binds.push({ param, map, line });
     }
     knobAt(id, t) { return this.knobs.get(id).line.at(t); }
+    // For what a knob moves that is not an AudioParam (a curve, an impulse
+    // response): fn runs when the knob is set, after its value has changed.
+    watch(id, fn) { this.knobs.get(id).watchers.push(fn); }
 
     // Channel strip: level knob (square taper) -> pan -> mix, plus sends.
     strip(src, o) {
@@ -725,6 +979,7 @@
           p.cancelScheduledValues(T + 1e-7);
           p.linearRampToValueAtTime(target, T + ramp);
         }
+        for (const fn of k.watchers) fn(v);
       } catch (e) { /* ignore */ }
     }
 
@@ -744,6 +999,7 @@
           p.cancelScheduledValues(T);
           p.setTargetAtTime(d, T, 0.03);
         }
+        for (const inst of this.inst) if (inst.fx) inst.fx.setDelay(false, T);
       } catch (e) { /* ignore */ }
     }
 
@@ -777,6 +1033,12 @@
     }
   }
 
+  // How the page should print the two effect knobs that are not 0 to 10.
+  Rig.format = {
+    time: (v) => divOf(v)[1],
+    size: (v) => rt60(v).toFixed(1) + ' s',
+    drive: (v) => (v < 0.005 ? 'off' : (v * 10).toFixed(1)),
+  };
   if (typeof window !== 'undefined') window.Rig = Rig;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rig;
 })();
