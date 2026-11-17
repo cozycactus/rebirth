@@ -91,3 +91,69 @@ jobs:
           name: rp2040-sequencer-uf2
           path: build/firmware-debug/rp2040_sequencer.uf2
           if-no-files-found: error
+
+  simulator:
+    name: Simulator (build and checks)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # Emscripten as sim/build.sh expects it, in sim/emsdk. Only master's runs
+      # save it, so a branch can never hand the build a toolchain of its own.
+      - name: Restore Emscripten
+        id: emsdk
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: sim/emsdk
+          key: emsdk-7.0.0-1693ce73-${{ runner.os }}
+
+      - name: Install Emscripten 7.0.0
+        if: steps.emsdk.outputs.cache-hit != 'true'
+        run: |
+          git clone --quiet https://github.com/emscripten-core/emsdk.git sim/emsdk
+          git -C sim/emsdk checkout --quiet --detach 1693ce7359fc9694f198694f902a2cc061239b86 # tag 7.0.0
+          sim/emsdk/emsdk install 7.0.0
+          sim/emsdk/emsdk activate 7.0.0
+
+      - name: Save Emscripten
+        if: steps.emsdk.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: sim/emsdk
+          key: emsdk-7.0.0-1693ce73-${{ runner.os }}
+
+      - name: Build the native core and its smoke test
+        run: sim/build.sh native
+
+      - name: Build the WebAssembly core
+        run: sim/build.sh web
+
+      # The device check and the artist (every song in every arrangement) for
+      # each score this firmware takes; seconds per score on a runner.
+      - name: Check the simulator
+        run: sim/check.sh
+
+      - name: Keep the artist's logs
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: simulator-logs
+          path: sim/build/*.log
+          if-no-files-found: ignore
+
+      # What the publish workflow puts on the public page (publish-simulator.yml).
+      # Packaged on every build, so a branch already shows that it packages;
+      # uploaded on master only.
+      - name: Package the page
+        run: sim/publish.sh package "$RUNNER_TEMP/simulator-site"
+
+      - name: Upload the page
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: simulator-site
+          path: ${{ runner.temp }}/simulator-site
+          if-no-files-found: error
+          retention-days: 14
