@@ -893,7 +893,8 @@
     lastLed.fill('');
     const variant = $('show-variant').value;
     show = Artist.buildShow(undefined, { song: +$('show-song').value, form: $('show-form').value || undefined,
-                                         fw2: variant !== 'base', keys: variant === 'keys', pads: variant === 'pads' });
+                                         fw2: variant !== 'base', keys: variant === 'keys', pads: variant === 'pads',
+                                         quantMutes: device.features().quantMutes });
     Artist.schedule(show, device, hands, io);
     phase = 'prep';
     speed = $('show-prep').checked ? +$('prep-speed').value : Infinity;

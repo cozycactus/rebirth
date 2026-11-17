@@ -15,8 +15,9 @@ RebirthCore().then(core => {
   const device = new Device(core);
   const hands = new Hands(device);
   const pads = process.env.PADS === '1';
+  const quantMutes = process.env.QMUTE === '1';         // a MUTE press waits for the launch point
   const show = Artist.buildShow(undefined, { fw2: process.env.FW2 === '1' || process.env.KEYS === '1' || pads,
-    keys: process.env.KEYS === '1' && !pads, pads });
+    keys: process.env.KEYS === '1' && !pads, pads, quantMutes });
   Artist.schedule(show, device, hands, null);
   const midi = [];
   const run = until => {
@@ -68,7 +69,26 @@ RebirthCore().then(core => {
   // The controls work again afterwards.
   const tap = (down, up) => { down(); run(device.now() + 90000); up(); run(device.now() + 90000); };
   const mutes = device.inspect().mutes;
-  tap(() => device.mute(7, true), () => device.mute(7, false));
+  if (quantMutes) {
+    // MUTE waits for the next bar (1 BAR). Pressed in the middle of a bar, so
+    // that the press cannot straddle a downbeat, it changes nothing at once
+    // and lands on the next downbeat. 384 pulses make a bar.
+    const runToPulse = pulse => {
+      const give = device.now() + 2 * show.barUs;
+      while (device.inspect().pulse < pulse && device.now() < give) run(device.now() + 1000);
+    };
+    const bar = () => Math.floor(device.inspect().pulse / 384);
+    runToPulse((bar() + 1) * 384 + 192);
+    device.mute(7, true);
+    run(device.now() + 30000);
+    check(device.inspect().mutes === mutes, 'MUTE acted at once, in the middle of a bar');
+    run(device.now() + 60000);
+    device.mute(7, false);
+    runToPulse((bar() + 1) * 384 + 1);
+    run(device.now() + 50000);
+  } else {
+    tap(() => device.mute(7, true), () => device.mute(7, false));
+  }
   check(device.inspect().mutes === (mutes ^ 0x80), 'MUTE does not work after the resets');
   tap(() => device.pad(0, 0, true), () => device.pad(0, 0, false));     // focus: KICK, row 1
   const kick = device.stepData(0, 0, 1).active;

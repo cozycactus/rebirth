@@ -26,9 +26,12 @@ function playSong(core, song, form) {
   // FW2=1: the firmware under test starts new steps at the last note and copies clips.
   // KEYS=1 (with FW2=1): the firmware reads a MIDI keyboard and the artist enters pitches from one.
   // PADS=1: the pads are a keyboard while a step is held; the artist uses them.
+  // QMUTE=1: a MUTE press waits for the launch point; the artist plays a mute
+  // group, and the check also reads the mutes around each downbeat.
   const pads = process.env.PADS === '1';
   const keys = process.env.KEYS === '1' && !pads;
-  const show = Artist.buildShow(undefined, { song, form, fw2: process.env.FW2 === '1' || keys || pads, keys, pads });
+  const show = Artist.buildShow(undefined, { song, form, fw2: process.env.FW2 === '1' || keys || pads, keys, pads,
+    quantMutes: process.env.QMUTE === '1' });
   const before = failures;
   console.log('── ' + show.song.id + ' / ' + show.form.id + ': «' + show.song.title + '», ' + show.song.style + ', ' + show.song.key + ', ' +
     show.bpm + ' BPM, аранжировка «' + show.form.title + '»');
@@ -123,12 +126,29 @@ function playSong(core, song, form) {
   check(overrunsAfterSave <= 1, 'timer overruns during the preparation: ' + overrunsAfterSave);
 
   // ─── The set ──────────────────────────────────────────────────
-  const where = point => 'bar ' + point.bar + (point.beat ? ' beat ' + point.beat : '');
+  // A point is the rows and mutes in the middle of a bar or a beat; with
+  // QMUTE also the mutes alone a few ms from a downbeat (`ms`), and the MUTE
+  // lights of a group while its first key is held, white (the LED budget may
+  // scale a colour down, equally on all three channels).
+  const where = point => 'bar ' + point.bar + (point.beat ? ' beat ' + point.beat : '') +
+    (point.ms ? (point.ms > 0 ? ' +' : ' ') + point.ms + ' ms' : '');
+  const LED_MUTE = track => 72 + track;
   for (const point of show.expectedPlaying) {
     run(point.t);
-    for (let track = 0; track < 8; track++) {
-      check(device.current(track) === point.map[track] - 1,
-        where(point) + ': track ' + (track + 1) + ' plays row ' + (device.current(track) + 1) + ', want ' + point.map[track]);
+    if (point.lights) {
+      const leds = device.leds();
+      for (const track of point.lights) {
+        const [r, g, b] = leds.subarray(LED_MUTE(track) * 3, LED_MUTE(track) * 3 + 3);
+        check(r === g && g === b && r > 0, where(point) + ': MUTE ' + Artist.TRACK_NAME[track] + ' light is ' +
+          [r, g, b].join(',') + ', want white (in the group)');
+      }
+      continue;
+    }
+    if (!point.mutesOnly) {
+      for (let track = 0; track < 8; track++) {
+        check(device.current(track) === point.map[track] - 1,
+          where(point) + ': track ' + (track + 1) + ' plays row ' + (device.current(track) + 1) + ', want ' + point.map[track]);
+      }
     }
     check(device.inspect().mutes === point.map.muted,
       where(point) + ': mutes ' + device.inspect().mutes.toString(2) + ', want ' + point.map.muted.toString(2));
@@ -232,6 +252,10 @@ function playSong(core, song, form) {
     JSON.stringify(perChannel));
   console.log('first note ' + ((firstNote - show.playAt) / 1000).toFixed(2) + ' ms after PLAY went down');
   console.log(said.filter(x => x.kind === 'info').map(x => (x.t / 1e6).toFixed(1) + ' s  ' + x.text).join('\n'));
+  // The MUTE moves of the set as the captions name them (one MUTE, two
+  // fingers, a group held).
+  console.log(said.filter(x => x.kind === 'device' && x.t >= show.playAt && /^(Отпускает )?MUTE /.test(x.text))
+    .map(x => (x.t / 1e6).toFixed(1) + ' s  ' + x.text).join('\n'));
   if (failures > before) console.log('FAILED ' + show.song.id + ': ' + (failures - before) + ' checks');
 }
 
