@@ -296,8 +296,11 @@ pass `quantMutes` to `Artist.buildShow()`, and the page passes it from
 `Device.features()`.
 
 `device_check.js` presses MUTE while the set plays and expects the change
-within 180 ms; with `QMUTE` it checks that nothing changed yet, then runs past
-the next bar and checks the change.
+within 180 ms; on a firmware whose `Device.features()` reports `quantMutes`
+(whatever `QMUTE` says, which only picks the score) it checks that nothing
+changed yet, then runs past the next bar and checks the change. Its chip-reset
+snapshot is taken in the middle of bar 23, after any MUTE the score pressed
+just before that downbeat has landed.
 
 The unchanged score is expected to pass on the new firmware (taps on press;
 `mutePair`'s two fingers are 12 ms apart). The `QMUTE` score keeps every
@@ -313,8 +316,11 @@ compatibility case) and adds:
 - for every mute point, two checks of the mutes alone, about 40 ms before and
   40 ms after the downbeat, which an immediate mute fails; for a group also a
   check after the downbeat its hold crosses (nothing changed there: the held
-  key's change was withdrawn) and a check, while it is held, that both MUTE
-  lights are white.
+  key's change was withdrawn) and two checks, while it is held and a
+  sixteenth apart, that both MUTE lights are bright white (above the dim
+  white of a muted track in focus); one of them falls on an even sixteenth,
+  where a change that only waits shows its normal light. The artist check
+  fails an arrangement none of whose shows played a group.
 
 ## Left to the builder
 

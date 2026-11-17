@@ -188,8 +188,13 @@ the last, the second pressed 650 ms later, the first let go 120 ms before the
 downbeat. The check adds the mutes alone 25 ms before and 40 ms after every
 MUTE's downbeat (an immediate MUTE fails the first, a late one the second),
 and for a group the mutes after the downbeat its hold crosses (unchanged)
-and both MUTE lights white while it is held. `device_check.js` presses MUTE
-in the middle of a bar and expects no change until the next downbeat.
+and both MUTE lights bright white while it is held, at two moments a
+sixteenth apart (one of them is an even sixteenth, where a change that only
+waits shows its normal light). With `QMUTE=1` the artist check also fails an
+arrangement none of whose shows played a group. `device_check.js` takes what
+a MUTE tap does from the core, not from `QMUTE`: on a firmware where MUTE
+waits it presses MUTE in the middle of a bar and expects no change until the
+next downbeat, so it passes with either score.
 
 The page has an on-screen keyboard, computer keys and Web MIDI for the same
 input. With a firmware that does not listen on its DIN input it says so.

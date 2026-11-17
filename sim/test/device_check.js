@@ -15,9 +15,11 @@ RebirthCore().then(core => {
   const device = new Device(core);
   const hands = new Hands(device);
   const pads = process.env.PADS === '1';
-  const quantMutes = process.env.QMUTE === '1';         // a MUTE press waits for the launch point
+  // QMUTE=1 only picks the score (its MUTE moves wait for the launch point);
+  // what a MUTE tap does below is the firmware's, read from the core.
   const show = Artist.buildShow(undefined, { fw2: process.env.FW2 === '1' || process.env.KEYS === '1' || pads,
-    keys: process.env.KEYS === '1' && !pads, pads, quantMutes });
+    keys: process.env.KEYS === '1' && !pads, pads, quantMutes: process.env.QMUTE === '1' });
+  const mutesWait = device.features().quantMutes;       // a MUTE press waits for the launch point
   Artist.schedule(show, device, hands, null);
   const midi = [];
   const run = until => {
@@ -53,6 +55,9 @@ RebirthCore().then(core => {
   }
 
   // ─── A chip that resets while the set plays ───────────────────
+  // From the middle of bar 23: a MUTE the score pressed just before its
+  // downbeat has landed by then, so nothing changes after the snapshot.
+  run(show.t0 + 22.5 * show.barUs);
   const snapshot = () => JSON.stringify({ cur: [0, 1, 2, 3, 4, 5, 6, 7].map(t => device.current(t)),
     q: [0, 1, 2, 3, 4, 5, 6, 7].map(t => device.queued(t)), mutes: device.inspect().mutes,
     steps: [0, 1, 2, 3].map(l => [0, 2, 3].map(t => { let m = 0; for (let s = 0; s < 16; s++) if (device.stepData(l, t, s).active) m |= 1 << s; return m; })) });
@@ -69,7 +74,7 @@ RebirthCore().then(core => {
   // The controls work again afterwards.
   const tap = (down, up) => { down(); run(device.now() + 90000); up(); run(device.now() + 90000); };
   const mutes = device.inspect().mutes;
-  if (quantMutes) {
+  if (mutesWait) {
     // MUTE waits for the next bar (1 BAR). Pressed in the middle of a bar, so
     // that the press cannot straddle a downbeat, it changes nothing at once
     // and lands on the next downbeat. 384 pulses make a bar.

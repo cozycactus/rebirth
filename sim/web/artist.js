@@ -941,7 +941,11 @@
           s.down(MUTE(a));
           s.wait(650);
           s.down(MUTE(b));
+          // Both lights white, at two moments a sixteenth apart: one of them
+          // falls on an even sixteenth, where a change that only waits shows
+          // its normal light and a collected key alone stays white.
           out.expected.push({ t: s.t + 100000, bar: bar - 2, lights: [a, b] });
+          out.expected.push({ t: s.t + 100000 + Math.round(STEP_US), bar: bar - 2, lights: [a, b], later: true });
           s.wait(s.human(80));
           s.up(MUTE(b));
           // Nothing changes on the downbeat the hold crosses.
