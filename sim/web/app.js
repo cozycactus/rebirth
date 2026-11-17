@@ -980,6 +980,18 @@
   // One floating box for every element that carries data-tip. It waits a
   // moment, so that it does not flicker under a pointer that only passes by,
   // and goes away on a press: a held pad must stay visible.
+  // Which firmware this is: the commit sim/build.sh wrote into version.js.
+  function showBuild() {
+    const b = window.SIM_BUILD, el = $('build');
+    if (!el) return;
+    if (!b) { el.textContent = 'Версия прошивки неизвестна: нет version.js (соберите sim/build.sh web).'; return; }
+    const day = b.date ? b.date.slice(0, 10) : '';
+    el.textContent = 'Прошивка: коммит ' + b.short + (day ? ' от ' + day : '') + (b.dirty ? ', с незакоммиченными правками' : '') + '.';
+    el.dataset.tip = (b.subject ? '«' + b.subject + '»\n' : '') + 'Полный коммит ' + b.commit + '. Emscripten ' + b.emscripten + '.' +
+      (location.protocol.startsWith('http') && !/^(localhost|127\.)/.test(location.hostname)
+        ? '\nИсходники этой сборки (GPL-3.0) лежат рядом со страницей, в папке source/.' : '');
+  }
+
   function initTips() {
     const tip = $('tip');
     let over = null, timer = 0;
@@ -1024,6 +1036,7 @@
     buildRigPanel();
     initKeyboard();
     initTips();
+    showBuild();
 
     $('show-start').addEventListener('click', startShow);
     $('show-stop').addEventListener('click', () => {

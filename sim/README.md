@@ -5,23 +5,48 @@ on a virtual board, the panel is drawn from what the firmware drives, and a
 set of software synths plays what leaves the MIDI wire. A scripted Goa trance
 artist can program the device from power-up and play one of eleven songs on it.
 
+The public page, https://cozycactus.github.io/rebirth/, always runs `master`
+(see "The public page" below). To run it locally:
+
 ```bash
 sim/build.sh native        # native core + smoke test, needs only a C compiler
-sim/build.sh web           # WebAssembly core, needs sim/emsdk (see the script)
+sim/build.sh web           # WebAssembly core and version.js, needs sim/emsdk (see the script)
+sim/check.sh               # every check for every score this firmware takes; `quick` for the device check only
 node sim/test/artist_check.js       # every song in every arrangement; SONG=3 FORM=sunrise plays one
 python3 -m http.server 8765 --bind 127.0.0.1 --directory sim/web   # then open http://localhost:8765
 ```
 
-`sim/web/index.html` also opens straight from disk: the page uses classic
-scripts and the WebAssembly is embedded in `core.js`. From disk a browser will
-not load an AudioWorklet module, so the two 303s then run on the main thread
-(the same code, but it costs more and can crackle); served over HTTP they run
-in a worklet.
+`sim/web/core.js` and `sim/web/version.js` are built, not kept in git: run
+`sim/build.sh web` first. The page then shows which commit its firmware is
+from. `sim/web/index.html` also opens straight from disk: the page uses
+classic scripts and the WebAssembly is embedded in `core.js`. From disk a
+browser will not load an AudioWorklet module, so the two 303s then run on the
+main thread (the same code, but it costs more and can crackle); served over
+HTTP they run in a worklet.
 
-The page links to the user manual: `sim/web/manual-ru.pdf` is a symbolic link
-to `output/pdf/rebirth-manual-ru.pdf`, which `tools/build_manual_pdf.py` builds
-from `docs/manual-ru.md`. Hovering over a control of the panel or the page
-shows what it does.
+The page links to the user manual, `manual-ru.pdf` beside it. On the public
+page it is there; in a checkout it is not, unless built: `tools/build_manual_pdf.py`
+builds it from `docs/manual-ru.md` on macOS (it reads the system fonts).
+Hovering over a control of the panel or the page shows what it does.
+
+## The public page
+
+CI (`.github/workflows/ci.yml`, job Simulator) builds the simulator on every
+push and pull request with Emscripten 7.0.0 and runs `sim/check.sh`: the device
+check always, the artist check (every song in every arrangement, for every
+score the firmware takes) on pull requests and on `master`. On a push to
+`master` it also packages the page with `sim/publish.sh package`: the page,
+its scripts asked for with the commit (so a browser never mixes two builds),
+and in `source/` the GPL-3.0 corresponding source of `core.js`.
+
+When CI has succeeded on master's tip, `.github/workflows/publish-simulator.yml`
+lays that package over the site repository, cozycactus/cozycactus.github.io,
+with `sim/publish.sh apply`, and pushes it to `main`; GitHub Pages serves it a
+minute later. It writes only the page's own files and `rebirth/source/`, never
+the manual or the rest of the site. A failed check publishes nothing, and the
+last good page stays. It needs the secret `SITE_DEPLOY_KEY` (a deploy key with
+write access on the site repository) and the repository variable
+`SIM_PUBLISH=on`; run it by hand to publish master's tip again.
 
 ## What is real and what is modelled
 

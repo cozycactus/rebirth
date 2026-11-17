@@ -15,9 +15,12 @@
 (function () {
   'use strict';
 
-  // Where this script came from: acid.js and dsp.js sit beside it.
-  const HERE = typeof document !== 'undefined' && document.currentScript && document.currentScript.src
-    ? document.currentScript.src.replace(/[^/]*$/, '') : '';
+  // Where this script came from: acid.js and dsp.js sit beside it, and are
+  // asked for with the same query (the public page adds the build's commit,
+  // so a browser never mixes files of two builds).
+  const SRC = typeof document !== 'undefined' && document.currentScript && document.currentScript.src || '';
+  const HERE = SRC.replace(/\?.*$/, '').replace(/[^/]*$/, '');
+  const QUERY = (SRC.match(/\?.*$/) || [''])[0];
 
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
@@ -862,8 +865,8 @@
       // Inside a promise chain, so that an addModule that throws instead of
       // rejecting still ends in the fallback.
       return Promise.resolve()
-        .then(() => ctx.audioWorklet.addModule(HERE + 'acid.js'))
-        .then(() => ctx.audioWorklet.addModule(HERE + 'dsp.js'))
+        .then(() => ctx.audioWorklet.addModule(HERE + 'acid.js' + QUERY))
+        .then(() => ctx.audioWorklet.addModule(HERE + 'dsp.js' + QUERY))
         .then(() => { for (const a of acids) a.worklet(); return 'worklet'; })
         .catch(inline);
     }
