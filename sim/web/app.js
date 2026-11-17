@@ -266,6 +266,13 @@
     say,
     touch(a) {
       if (a.op === 'edge') { knobAngle[a.enc] += a.dir * 3.75; return; }
+      if (a.op === 'key') {
+        // The artist's own keyboard: the lamp, and the key if it is on screen.
+        lightMidiLamp();
+        const key = document.querySelector('#kbd-keys [data-n="' + a.note + '"]');
+        if (key) key.classList.toggle('kdown', a.down);
+        return;
+      }
       const el = elementFor(a);
       if (!el) return;
       el.classList.toggle('finger', a.down);
@@ -372,12 +379,15 @@
   // may be one that never reads its DIN input.
   const hasMidiIn = () => !!device && typeof device.midiIn === 'function' &&
     (typeof device.midiInListening !== 'function' || device.midiInListening());
-  function sendMidiIn(bytes) {
-    if (!hasMidiIn()) return false;
-    device.midiIn(bytes);
+  function lightMidiLamp() {
     $('kbd-lamp').classList.add('on');
     clearTimeout(lampTimer);
     lampTimer = setTimeout(() => $('kbd-lamp').classList.remove('on'), 120);
+  }
+  function sendMidiIn(bytes) {
+    if (!hasMidiIn()) return false;
+    device.midiIn(bytes);
+    lightMidiLamp();
     return true;
   }
   function press(src, key, on, off) {
@@ -460,6 +470,12 @@
   function initKeyboard() {
     buildKeys();
     $('kbd-nofw').hidden = hasMidiIn();
+    // The artist's score must match what the firmware inside can do. A firmware
+    // that listens on its MIDI input also starts new steps at the last note and
+    // copies clips; the score written for the older firmware would go wrong on it.
+    const variants = $('show-variant');
+    for (const option of variants.options) option.disabled = hasMidiIn() ? option.value === 'base' : option.value !== 'base';
+    variants.value = hasMidiIn() ? 'keys' : 'base';
     const box = $('kbd-keys');
     const glide = e => {
       const el = document.elementFromPoint(e.clientX, e.clientY), k = el && el.closest('[data-n]');
@@ -544,7 +560,8 @@
     silence();      // a note the old device state left sounding gets no Note Off any more
     $('log').innerHTML = '';
     lastLed.fill('');
-    show = Artist.buildShow();
+    const variant = $('show-variant').value;
+    show = Artist.buildShow(undefined, { fw2: variant !== 'base', keys: variant === 'keys' });
     Artist.schedule(show, device, hands, io);
     phase = 'prep';
     speed = $('show-prep').checked ? +$('prep-speed').value : Infinity;
