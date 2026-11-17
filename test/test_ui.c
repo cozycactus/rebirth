@@ -2020,8 +2020,9 @@ static void test_roll_inverts_only_the_playing_step(void) {
     roll_expect_inversion(8, false);                    // beyond the length
     roll_expect_inversion(12, false);
     // Viewing another location than the one the track plays.
+    // The viewed clip has a note on the step, so an inversion would show.
     g_seq.patterns[3].tracks[0].type = TRACK_TYPE_SYNTH;
-    roll_note(2, 64, 0);
+    pattern_set_step(&g_seq.patterns[3], 0, 2, 64, 100, STEP_FLAG_ACTIVE);
     display_clear();
     display_draw_pattern_view(&g_seq.patterns[3], 0, NO_QUEUED_PATTERN, -1);
     uint8_t plain[OLED_BUF_SIZE];
