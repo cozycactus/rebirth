@@ -2,7 +2,7 @@
 # Checks the built simulator (sim/web/core.js) the way the page will use it:
 # for every score the page offers on this firmware, the device check and,
 # unless `quick`, the artist check (every song in every arrangement).
-#   sim/check.sh          - all of it, a few minutes per score
+#   sim/check.sh          - all of it, seconds per score
 #   sim/check.sh quick    - the device check only
 # Which scores fit is read from the core, as the page does (app.js, initKeyboard):
 # the base score before the last-note rule, then fw2, keys with MIDI input,

@@ -130,19 +130,10 @@ jobs:
       - name: Build the WebAssembly core
         run: sim/build.sh web
 
-      # The artist plays every song in every arrangement for each score this
-      # firmware takes, a few minutes each: on master, on pull requests and on
-      # request. A push to any other branch gets the device check only.
+      # The device check and the artist (every song in every arrangement) for
+      # each score this firmware takes; seconds per score on a runner.
       - name: Check the simulator
-        env:
-          EVENT: ${{ github.event_name }}
-          REF: ${{ github.ref }}
-        run: |
-          if [ "$EVENT" = pull_request ] || [ "$EVENT" = workflow_dispatch ] || [ "$REF" = refs/heads/master ]; then
-            sim/check.sh
-          else
-            sim/check.sh quick
-          fi
+        run: sim/check.sh
 
       - name: Keep the artist's logs
         if: failure()

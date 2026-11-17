@@ -33,8 +33,9 @@ Hovering over a control of the panel or the page shows what it does.
 
 CI (`.github/workflows/ci.yml`, job Simulator) builds the simulator on every
 push and pull request with Emscripten 7.0.0 and runs `sim/check.sh`: the device
-check always, the artist check (every song in every arrangement, for every
-score the firmware takes) on pull requests and on `master`. On a push to
+check and the artist check (every song in every arrangement) for every score
+the firmware takes. A firmware change that breaks the artist's gestures shows
+there, on its own pull request. On a push to
 `master` it also packages the page with `sim/publish.sh package`: the page,
 its scripts asked for with the commit (so a browser never mixes two builds),
 and in `source/` the GPL-3.0 corresponding source of `core.js`.
