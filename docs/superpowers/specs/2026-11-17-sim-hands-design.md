@@ -272,7 +272,8 @@ targets (see "Poses and fitting").
   up to 1 mm into its own target (a fingertip pressed into silicone), never
   below the plate.
 - Encoder turn: thumb and index contact points on opposite sides of the
-  knob, 8 mm above the plate; the grip at a twist is the grip at twist 0
+  knob, 12 mm above the plate (the knob is 14.5 mm tall), the hand free to
+  roll up to 20° thumb side up; the grip at a twist is the grip at twist 0
   turned about the knob's axis. The hand's twist follows the knob angle (15° a detent, as
   `app.js` draws the knob) within a window of ±35°; inside a fast burst the
   fingers slide on the knob and the twist eases back toward the middle of
