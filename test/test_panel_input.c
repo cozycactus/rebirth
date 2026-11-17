@@ -615,6 +615,94 @@ static void test_dead_bus_is_retried_at_most_every_100_ms(void) {
     CHECK(drain(e, 8) == 1 && e[0].kind == PANEL_PLAY && e[0].down);
 }
 
+static void test_pad_down_follows_the_accepted_press(void) {
+    reset();
+    panel_event_t e[8];
+    CHECK(!panel_input_pad_down(5, 2));
+    key_press(2, 5);
+    poll_range(0, 7);
+    CHECK(!panel_input_pad_down(5, 2));         // still in its debounce time
+    poll_range(8, 20);
+    CHECK(panel_input_pad_down(5, 2));
+    CHECK(!panel_input_pad_down(2, 5));         // track and row are not swapped
+    CHECK(drain(e, 8) == 1);
+    key_release(2, 5);
+    poll_range(21, 27);
+    CHECK(panel_input_pad_down(5, 2));
+    poll_range(28, 40);
+    CHECK(!panel_input_pad_down(5, 2));
+}
+
+static void test_pad_down_refuses_arguments_out_of_range(void) {
+    reset();
+    key_press(0, 0);
+    poll_range(0, 20);
+    CHECK(panel_input_pad_down(0, 0));
+    CHECK(!panel_input_pad_down(8, 0));
+    CHECK(!panel_input_pad_down(0, 8));
+    CHECK(!panel_input_pad_down(255, 255));
+}
+
+static void test_pad_down_is_false_after_a_resync(void) {
+    reset();
+    key_press(1, 3);
+    poll_range(0, 20);
+    CHECK(panel_input_pad_down(3, 1));
+    panel_input_resync();
+    CHECK(!panel_input_pad_down(3, 1));
+}
+
+static void test_pad_down_is_false_after_an_overflow_drain(void) {
+    reset();
+    key_press(1, 3);
+    poll_range(0, 20);
+    CHECK(panel_input_pad_down(3, 1));
+    for (int i = 0; i < 12; i++) key_press(4 + i % 4, i % 8);
+    poll_range(21, 60);
+    CHECK(!panel_input_pad_down(3, 1));
+}
+
+static void test_generation_changes_when_key_state_may_be_lost(void) {
+    reset();
+    uint32_t g = panel_input_generation();
+    panel_input_resync();
+    CHECK(panel_input_generation() != g);
+
+    g = panel_input_generation();
+    for (int i = 0; i < 12; i++) key_press(i % 8, i % 10);
+    poll_range(0, 30);                              // overflow: sync lost
+    CHECK(panel_input_generation() != g);
+
+    reset();
+    g = panel_input_generation();
+    chip_fail_count = 1;                            // the count read fails
+    panel_input_poll(0);
+    CHECK(panel_input_generation() != g);
+
+    reset();
+    poll_range(0, 20);
+    g = panel_input_generation();
+    memset(chip_regs, 0, sizeof(chip_regs));        // the chip reset
+    poll_range(21, 1100);
+    CHECK(panel_input_generation() != g);
+
+    reset();
+    g = panel_input_generation();
+    panel_input_init();
+    CHECK(panel_input_generation() != g);
+}
+
+static void test_generation_is_steady_through_ordinary_polls(void) {
+    reset();
+    uint32_t g = panel_input_generation();
+    key_press(0, 0);
+    key_press(3, 4);
+    poll_range(0, 30);
+    key_release(0, 0);
+    poll_range(31, 60);
+    CHECK(panel_input_generation() == g);
+}
+
 int main(void) {
     RUN(test_init_configures_keypad);
     RUN(test_key_codes_map_to_controls);
@@ -646,5 +734,11 @@ int main(void) {
     RUN(test_i2c_error_reconfigures_before_reading);
     RUN(test_reset_chip_is_reconfigured);
     RUN(test_dead_bus_is_retried_at_most_every_100_ms);
+    RUN(test_pad_down_follows_the_accepted_press);
+    RUN(test_pad_down_refuses_arguments_out_of_range);
+    RUN(test_pad_down_is_false_after_a_resync);
+    RUN(test_pad_down_is_false_after_an_overflow_drain);
+    RUN(test_generation_changes_when_key_state_may_be_lost);
+    RUN(test_generation_is_steady_through_ordinary_polls);
     return 0;
 }

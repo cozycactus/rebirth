@@ -112,6 +112,17 @@ buttons edit it.
   pad cancels the queue; pressing the playing pad changes nothing except that
   it cancels a pending queue to another slot of that track. An empty slot
   launches too, which silences the track.
+- **Copy a clip:** hold a pad for half a second, then press another pad of the
+  same track. The first pad's clip (steps, kit steps and length, not the
+  track's routing or mute) is written over the second pad's, and the OLED
+  shows `COPY A1>A3`. The second press does not launch or queue anything, so
+  a clip that is playing or queued stays so and plays the copy. In the
+  Session view the focus moves to the copy. The first pad stands for the
+  clip it had when it was pressed, so changing the bank during the hold
+  copies into another bank. Two pads pressed less than half a second apart are
+  two launches, and a hold that the panel may have lost (after a panic, a
+  save or load, or a panel error) is not trusted: press the source again.
+  An existing clip in the target is overwritten and there is no undo.
 - **SCENE:** launches the row on every track together; tracks already playing
   it keep playing. Pressed while any track is queued to that row, it cancels
   all queues.

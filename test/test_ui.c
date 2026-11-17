@@ -91,6 +91,10 @@ static panel_event_t panel_queue[PANEL_QUEUE];
 static unsigned panel_head, panel_tail, panel_resyncs;
 static panel_event_t debouncing;
 static unsigned debounce_polls;
+// What the panel layer reports for each pad, and its sync generation. A queued
+// press sets the pad down, a queued release clears it; a resync forgets both.
+static bool pads_down[NUM_TRACKS][8];
+static uint32_t panel_generation;
 static void push_panel(panel_kind_t kind, uint8_t track, uint8_t row);
 void panel_input_init(void) {}
 void panel_input_poll(uint32_t now_ms) {
@@ -104,15 +108,25 @@ bool panel_input_next(panel_event_t *out) {
     *out = panel_queue[panel_head++];
     return true;
 }
+bool panel_input_pad_down(uint8_t track, uint8_t row) {
+    return track < NUM_TRACKS && row < 8 && pads_down[track][row];
+}
+uint32_t panel_input_generation(void) { return panel_generation; }
 void panel_input_resync(void) {
     panel_head = panel_tail = 0;
     debounce_polls = 0;
+    memset(pads_down, 0, sizeof(pads_down));
+    panel_generation++;
     panel_resyncs++;
 }
+static void push_panel_event(panel_kind_t kind, uint8_t track, uint8_t row, bool down) {
+    CHECK(panel_tail + 1 <= PANEL_QUEUE);
+    panel_queue[panel_tail++] = (panel_event_t){kind, track, row, down};
+    if (kind == PANEL_PAD) pads_down[track][row] = down;
+}
 static void push_panel(panel_kind_t kind, uint8_t track, uint8_t row) {
-    CHECK(panel_tail + 2 <= PANEL_QUEUE);
-    panel_queue[panel_tail++] = (panel_event_t){kind, track, row, true};
-    panel_queue[panel_tail++] = (panel_event_t){kind, track, row, false};
+    push_panel_event(kind, track, row, true);
+    push_panel_event(kind, track, row, false);
 }
 static void debounce_panel(panel_kind_t kind, uint8_t track, uint8_t row, unsigned polls) {
     debouncing = (panel_event_t){kind, track, row, true};
@@ -145,6 +159,8 @@ static void reset(void) {
     memset(held, 0, sizeof(held));
     panel_head = panel_tail = panel_resyncs = 0;
     debounce_polls = 0;
+    memset(pads_down, 0, sizeof(pads_down));
+    panel_generation = 1;
     encoder_resyncs = mcp_resyncs = 0;
     memset(shown, 0, sizeof(shown));
     rgb_inits = 0;
@@ -1384,6 +1400,254 @@ static void test_last_note_drum_tap_takes_drum_note(void) {
     step_up(1u << 6);
     CHECK(STEP(4, 6).note == 40);
     CHECK(ui.last_note[4] == 60);
+}
+
+// ─── Clip copy ─────────────────────────────────────────────────
+
+static void hold_pad(uint8_t track, uint8_t row) {
+    push_panel_event(PANEL_PAD, track, row, true);
+    ui_update();
+}
+
+static void let_go_pad(uint8_t track, uint8_t row) {
+    push_panel_event(PANEL_PAD, track, row, false);
+    ui_update();
+}
+
+static transport_snapshot_t transport_now(void) {
+    transport_snapshot_t snapshot;
+    sequencer_snapshot(&snapshot);
+    return snapshot;
+}
+
+static bool same_transport(const transport_snapshot_t *a, const transport_snapshot_t *b) {
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        if (a->current[t] != b->current[t] || a->queued[t] != b->queued[t]) return false;
+    }
+    return true;
+}
+
+// Location 0 of track 0 gets two steps, a kit word and a length of 8; every
+// other location is left as pattern_init made it.
+static void fill_source_clip(uint8_t location) {
+    pattern_t *p = &g_seq.patterns[location];
+    pattern_set_step(p, 0, 3, 70, 90, STEP_FLAG_ACTIVE | STEP_FLAG_SLIDE);
+    pattern_set_step(p, 0, 9, 55, 40, STEP_FLAG_ACTIVE | STEP_FLAG_ACCENT);
+    p->kit_steps[0][2] = 0x155u;
+    pattern_set_track_length(p, 0, 8);
+}
+
+static bool clip_equals(uint8_t a, uint8_t b, uint8_t track) {
+    const pattern_t *pa = &g_seq.patterns[a];
+    const pattern_t *pb = &g_seq.patterns[b];
+    return memcmp(pa->steps[track], pb->steps[track], sizeof(pa->steps[track])) == 0 &&
+           memcmp(pa->kit_steps[track], pb->kit_steps[track], sizeof(pa->kit_steps[track])) == 0 &&
+           pattern_get_track_length(pa, track) == pattern_get_track_length(pb, track);
+}
+
+static void test_copy_hold_then_press_copies_the_clip(void) {
+    fill_source_clip(0);
+    hold_pad(0, 0);
+    transport_snapshot_t before = transport_now();
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 2);
+    CHECK(clip_equals(0, 2, 0));
+    CHECK(g_seq.patterns[2].steps[0][3].note == 70);
+    CHECK(g_seq.patterns[2].kit_steps[0][2] == 0x155u);
+    CHECK(pattern_get_track_length(&g_seq.patterns[2], 0) == 8);
+    transport_snapshot_t after = transport_now();
+    CHECK(same_transport(&before, &after));
+    session_focus_t focus = session_get_focus();
+    CHECK(focus.track == 0 && focus.location == 2);
+    CHECK(strcmp(ui.notify_msg, "COPY A1>A3") == 0);
+    CHECK(clip_equals(0, 0, 0));
+    CHECK(sequencer_clip_mask(0) & (1ull << 2));       // the target's row is prepared
+}
+
+static void test_copy_leaves_a_playing_or_queued_target_alone(void) {
+    fill_source_clip(1);
+    transport_start();
+    tick();
+    hold_pad(0, 1);                                     // queues A2 behind the loop
+    CHECK(transport_now().queued[0] == 1);
+    transport_snapshot_t before = transport_now();
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 0);                                     // the playing clip is the target
+    CHECK(clip_equals(1, 0, 0));
+    transport_snapshot_t after = transport_now();
+    CHECK(same_transport(&before, &after));
+    CHECK(before.current[0] == 0 && before.queued[0] == 1);
+
+    // A queued target: queue row 4 by hand, then copy onto it.
+    reset();
+    fill_source_clip(1);
+    transport_start();
+    tick();
+    hold_pad(0, 1);
+    CHECK(transport_queue_track_pattern(0, 3));
+    before = transport_now();
+    CHECK(before.queued[0] == 3);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 3);
+    CHECK(clip_equals(1, 3, 0));
+    after = transport_now();
+    CHECK(same_transport(&before, &after));
+}
+
+static void test_copy_needs_the_full_hold_time(void) {
+    fill_source_clip(0);
+    hold_pad(0, 0);
+    sleep_ms(PAD_COPY_HOLD_MS - 1);
+    hold_pad(0, 2);
+    CHECK(!clip_equals(0, 2, 0));
+    CHECK(transport_now().current[0] == 2);             // an ordinary launch
+    CHECK(strcmp(ui.notify_msg, "") == 0);
+}
+
+static void test_copy_two_presses_in_one_update_are_two_launches(void) {
+    fill_source_clip(0);
+    sleep_ms(10000);
+    push_panel_event(PANEL_PAD, 0, 0, true);
+    push_panel_event(PANEL_PAD, 0, 2, true);
+    ui_update();
+    CHECK(!clip_equals(0, 2, 0));
+    CHECK(transport_now().current[0] == 2);
+}
+
+static void test_copy_ignores_a_pad_of_another_track(void) {
+    fill_source_clip(0);
+    hold_pad(0, 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(1, 2);
+    CHECK(transport_now().current[1] == 2);
+    CHECK(clip_equals(0, 2, 0) == false);
+    CHECK(strcmp(ui.notify_msg, "") == 0);
+}
+
+static void test_copy_needs_the_panel_to_report_the_source_down(void) {
+    fill_source_clip(0);
+    hold_pad(0, 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    pads_down[0][0] = false;                            // forgotten without a release
+    hold_pad(0, 2);
+    CHECK(!clip_equals(0, 2, 0));
+    CHECK(transport_now().current[0] == 2);
+}
+
+static void test_copy_ignores_a_hold_from_before_a_recovery(void) {
+    fill_source_clip(0);
+    hold_pad(0, 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    panel_generation++;                                 // the pad still reads down
+    CHECK(pads_down[0][0]);
+    hold_pad(0, 2);
+    CHECK(!clip_equals(0, 2, 0));
+    CHECK(transport_now().current[0] == 2);
+}
+
+static void test_copy_ignores_a_pad_reported_down_without_a_press(void) {
+    fill_source_clip(0);
+    hold_pad(0, 0);
+    let_go_pad(0, 0);                                   // the release is handled
+    sleep_ms(PAD_COPY_HOLD_MS);
+    pads_down[0][0] = true;
+    hold_pad(0, 2);
+    CHECK(!clip_equals(0, 2, 0));
+    CHECK(transport_now().current[0] == 2);
+}
+
+static void test_copy_takes_the_longest_held_source(void) {
+    fill_source_clip(1);                                // the longer-held pad, a higher row
+    pattern_set_step(&g_seq.patterns[0], 0, 5, 80, 100, STEP_FLAG_ACTIVE);
+    hold_pad(0, 1);
+    sleep_ms(200);
+    hold_pad(0, 0);
+    sleep_ms(600);
+    hold_pad(0, 2);
+    CHECK(clip_equals(1, 2, 0));
+    CHECK(g_seq.patterns[2].steps[0][5].flags == 0);
+    hold_pad(0, 3);                                     // a third press copies the same source
+    CHECK(clip_equals(1, 3, 0));
+    CHECK(strcmp(ui.notify_msg, "COPY A2>A4") == 0);
+}
+
+static void test_copy_source_stays_put_when_the_bank_changes(void) {
+    fill_source_clip(0);
+    hold_pad(0, 0);
+    press_encoder(0, BTN_LONG_PRESS);                   // bank B
+    CHECK(session_bank() == 1);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 2);
+    CHECK(strcmp(ui.notify_msg, "COPY A1>B3") == 0);
+    CHECK(clip_equals(0, 10, 0));
+    CHECK(!clip_equals(0, 8, 0));
+    CHECK(session_get_focus().location == 10);
+}
+
+static void test_copy_in_song_mode_still_copies(void) {
+    fill_source_clip(0);
+    transport_set_mode(PLAY_MODE_SONG);
+    hold_pad(0, 0);
+    CHECK(strcmp(ui.notify_msg, "SONG MODE") == 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 2);
+    CHECK(strcmp(ui.notify_msg, "COPY A1>A3") == 0);
+    CHECK(clip_equals(0, 2, 0));
+    CHECK(transport_now().current[0] == 0);
+}
+
+static void test_copy_outside_the_session_view_keeps_the_focus(void) {
+    fill_source_clip(0);
+    enter_pattern_view();
+    session_focus_t before = session_get_focus();
+    hold_pad(0, 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 2);
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    CHECK(clip_equals(0, 2, 0));
+    session_focus_t after = session_get_focus();
+    CHECK(after.track == before.track && after.location == before.location);
+    CHECK(strcmp(ui.notify_msg, "COPY A1>A3") == 0);
+}
+
+static void test_copy_leaves_a_held_step_on_its_cell(void) {
+    hold_pad(0, 0);
+    step_down(1u << 4);                                 // bound to A1
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 2);
+    CHECK(session_get_focus().location == 2);
+    step_up(1u << 4);
+    CHECK(g_seq.patterns[0].steps[0][4].flags == STEP_FLAG_ACTIVE);
+    CHECK(g_seq.patterns[2].steps[0][4].flags == 0);
+    step_down(1u << 5);                                 // pressed after the copy
+    step_up(1u << 5);
+    CHECK(g_seq.patterns[2].steps[0][5].flags == STEP_FLAG_ACTIVE);
+    CHECK(g_seq.patterns[0].steps[0][5].flags == 0);
+}
+
+static void test_copy_over_the_playing_clip_is_heard(void) {
+    pattern_set_step(&g_seq.patterns[1], 0, 1, 72, 100, STEP_FLAG_ACTIVE);
+    transport_start();
+    timer_hw->alarm[0] = pulse_interval_us;
+    tick();                                             // step 1 plays; nothing is on it
+    hold_pad(0, 1);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(0, 0);                                     // onto the clip that is playing
+    fake_midi_length = 0;
+    for (unsigned i = 0; i < PULSES_PER_STEP; i++) tick();
+    CHECK(count_note_on(72, 100) == 1);
+}
+
+static void test_copy_takes_a_kit_clips_kit_steps(void) {
+    g_seq.patterns[0].tracks[1].type = TRACK_TYPE_KIT;
+    g_seq.patterns[0].kit_steps[1][3] = kit_press(0, KIT_LANE_BD);
+    CHECK(g_seq.patterns[0].kit_steps[1][3] != 0);
+    hold_pad(1, 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(1, 2);
+    CHECK(g_seq.patterns[2].kit_steps[1][3] == g_seq.patterns[0].kit_steps[1][3]);
+    CHECK(clip_equals(0, 2, 1));
+    CHECK(strcmp(ui.notify_msg, "COPY A1>A3") == 0);
 }
 
 static void render(void) {
@@ -2864,6 +3128,21 @@ int main(int argc, char **argv) {
     RUN(test_last_note_joining_step_is_not_edited);
     RUN(test_last_note_ignores_drums_velocity_and_clamped_turns);
     RUN(test_last_note_drum_tap_takes_drum_note);
+    RUN(test_copy_hold_then_press_copies_the_clip);
+    RUN(test_copy_leaves_a_playing_or_queued_target_alone);
+    RUN(test_copy_needs_the_full_hold_time);
+    RUN(test_copy_two_presses_in_one_update_are_two_launches);
+    RUN(test_copy_ignores_a_pad_of_another_track);
+    RUN(test_copy_needs_the_panel_to_report_the_source_down);
+    RUN(test_copy_ignores_a_hold_from_before_a_recovery);
+    RUN(test_copy_ignores_a_pad_reported_down_without_a_press);
+    RUN(test_copy_takes_the_longest_held_source);
+    RUN(test_copy_source_stays_put_when_the_bank_changes);
+    RUN(test_copy_in_song_mode_still_copies);
+    RUN(test_copy_outside_the_session_view_keeps_the_focus);
+    RUN(test_copy_leaves_a_held_step_on_its_cell);
+    RUN(test_copy_over_the_playing_clip_is_heard);
+    RUN(test_copy_takes_a_kit_clips_kit_steps);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS the six base OLED screens render (the four kit screens: test_render_kit_*)");

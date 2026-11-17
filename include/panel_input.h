@@ -41,4 +41,12 @@ bool panel_input_next(panel_event_t *out);
 // it was down or is down now.
 void panel_input_resync(void);
 
+// True while the pad is reported down (debounced, accepted). False for a
+// track or row out of range.
+bool panel_input_pad_down(uint8_t track, uint8_t row);
+// Changes whenever key state may have been lost: a chip (re)initialisation,
+// a lost sync, a resync, any I2C error. A hold recorded under an older value
+// must not be trusted.
+uint32_t panel_input_generation(void);
+
 #endif

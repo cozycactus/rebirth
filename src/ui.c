@@ -18,6 +18,10 @@
 #define TEMPO_LED_PIN   25
 #define TEMPO_LED_MS    30      // LED on-time per beat
 
+// A pad held this long is a clip copy source for the next pad of its track.
+#define PAD_COPY_HOLD_MS 500
+#define PAD_ROWS 8
+
 // ─── UI Modes ──────────────────────────────────────────────────
 
 typedef enum {
@@ -72,6 +76,15 @@ typedef struct {
     bool     led_on;
     uint32_t led_anim_ms;
     bool     led_anim_phase;
+
+    // Pad presses the UI has handled and not yet seen released, per track (bit
+    // = row), and what each was when pressed: the time, the location it stood
+    // for and the panel layer's sync generation. Only a pad in pad_seen can
+    // be a copy source; see find_copy_source().
+    uint8_t  pad_seen[NUM_TRACKS];
+    uint32_t pad_down_ms[NUM_TRACKS][PAD_ROWS];
+    uint8_t  pad_location[NUM_TRACKS][PAD_ROWS];
+    uint32_t pad_generation[NUM_TRACKS][PAD_ROWS];
 
     // The pitch last entered on each track: a new SYNTH step starts there.
     // UI RAM only; not saved, not cleared by Stop, Panic or load.
@@ -238,18 +251,76 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
 
 // ─── Global panel controls (every screen) ──────────────────────
 
+// The pad of `track` that is a copy source for a press now, or -1: one whose
+// press the UI handled and whose release it has not, that the panel layer
+// still reports down with no recovery since, held at least PAD_COPY_HOLD_MS.
+// The longest held wins. Each condition covers a way a hold can be unreal: a
+// pad accepted in the same poll as the one pressed now, a release the panel
+// layer lost, a key state it forgot.
+static int find_copy_source(uint8_t track, uint8_t target_row, uint32_t now) {
+    int source = -1;
+    uint32_t longest = 0;
+    for (uint8_t row = 0; row < PAD_ROWS; row++) {
+        if (row == target_row || !(ui.pad_seen[track] & (1u << row))) continue;
+        if (!panel_input_pad_down(track, row)) continue;
+        if (ui.pad_generation[track][row] != panel_input_generation()) continue;
+        uint32_t held = (uint32_t)(now - ui.pad_down_ms[track][row]);
+        if (held < PAD_COPY_HOLD_MS || (source >= 0 && held <= longest)) continue;
+        source = row;
+        longest = held;
+    }
+    return source;
+}
+
+// Copies the clip of `track` at `src` over `dst` and refreshes the target's
+// playback. Takes seq_lock: call with no lock held. The transport is not
+// touched; in the Session view the focus moves to the copy.
+static void copy_clip(uint8_t track, uint8_t src, uint8_t dst) {
+    uint32_t lock_state = seq_lock();
+    pattern_copy_track(&g_seq.patterns[dst], &g_seq.patterns[src], track);
+    seq_unlock(lock_state);
+    sequencer_refresh_track_playback(track, dst);
+    if (ui.mode == UI_SESSION) session_set_focus(track, dst);
+    char msg[17];
+    snprintf(msg, sizeof(msg), "COPY %c%d>%c%d", 'A' + pattern_bank(src),
+             pattern_slot(src) + 1, 'A' + pattern_bank(dst), pattern_slot(dst) + 1);
+    show_notify(msg);
+}
+
+// A pad press: a copy when another pad of the track is a source, else the
+// ordinary launch. Either way the press is recorded, so it can be a source.
+static void handle_pad_press(uint8_t track, uint8_t row) {
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    uint8_t target = pattern_make_index(session_bank(), row);
+    int source = find_copy_source(track, row, now);
+    uint8_t source_location = source >= 0 ? ui.pad_location[track][source] : 0;
+
+    ui.pad_seen[track] |= (uint8_t)(1u << row);
+    ui.pad_down_ms[track][row] = now;
+    ui.pad_location[track][row] = target;
+    ui.pad_generation[track][row] = panel_input_generation();
+
+    if (source >= 0) {
+        copy_clip(track, source_location, target);
+        return;
+    }
+    // Outside the Session view a pad only launches.
+    if (!session_pad(track, row, ui.mode == UI_SESSION)) show_notify("SONG MODE");
+}
+
 // Pads, SCENE, MUTE and PLAY. Called with no lock held: every session_* and
-// transport call below takes the locks itself.
+// transport call below takes the locks itself. A pad release only ends the
+// hold the UI tracks for copying; SCENE, MUTE and PLAY act on press.
 static void handle_panel_events(void) {
     panel_event_t ev;
     while (panel_input_next(&ev)) {
+        if (ev.kind == PANEL_PAD && !ev.down && ev.track < NUM_TRACKS) {
+            ui.pad_seen[ev.track] &= (uint8_t)~(1u << ev.row);
+        }
         if (!ev.down) continue;
         switch (ev.kind) {
             case PANEL_PAD:
-                // Outside the Session view a pad only launches.
-                if (!session_pad(ev.track, ev.row, ui.mode == UI_SESSION)) {
-                    show_notify("SONG MODE");
-                }
+                handle_pad_press(ev.track, ev.row);
                 break;
             case PANEL_SCENE:
                 if (!session_scene(ev.row)) show_notify("SONG MODE");

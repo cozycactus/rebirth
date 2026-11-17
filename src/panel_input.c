@@ -48,6 +48,8 @@ static bool retry_armed;      // the last recovery attempt failed
 static uint32_t retry_from_ms;
 static bool check_started;    // the CFG readback clock runs from the first poll
 static uint32_t check_ms;
+// Bumped whenever key state may have been lost; see panel_input_generation().
+static uint32_t generation;
 
 static panel_event_t ring[EVENT_RING_SIZE];
 static uint8_t ring_head;
@@ -133,10 +135,16 @@ static void forget_play(void) {
 static bool chip_ready(uint32_t now_ms) {
     if (chip_configured && chip_synced) return true;
     if (retry_armed && (uint32_t)(now_ms - retry_from_ms) < PANEL_RETRY_MS) return false;
-    if (!chip_configured) chip_configured = tca8418_init();
+    if (!chip_configured) {
+        chip_configured = tca8418_init();
+        if (chip_configured) generation++;          // a fresh chip state
+    }
     if (chip_configured && !chip_synced) {
         chip_synced = tca8418_flush();
-        if (!chip_synced) chip_configured = false;  // re-init on the next attempt
+        if (!chip_synced) {
+            chip_configured = false;                // re-init on the next attempt
+            generation++;
+        }
     }
     retry_armed = !(chip_configured && chip_synced);
     retry_from_ms = now_ms;
@@ -147,6 +155,7 @@ static bool chip_ready(uint32_t now_ms) {
 // configured chip was only drained; after a re-init they stay suppressed.
 static void lose_sync(uint32_t now_ms) {
     bool kept_config = chip_configured;
+    generation++;
     chip_synced = false;
     drop_key_events();
     chip_ready(now_ms);
@@ -171,6 +180,7 @@ void panel_input_init(void) {
     gpio_init(PLAY_BUTTON_PIN);
     gpio_set_dir(PLAY_BUTTON_PIN, GPIO_IN);
     gpio_pull_up(PLAY_BUTTON_PIN);
+    generation++;
     memset(keys, 0, sizeof(keys));
     memset(&play, 0, sizeof(play));
     ring_head = 0;
@@ -184,6 +194,7 @@ void panel_input_init(void) {
 }
 
 void panel_input_resync(void) {
+    generation++;
     forget_play();
     ring_count = 0;             // PLAY events too: nothing from the stall is a command
     // A working chip only needs its FIFO drained; it is re-initialised (next
@@ -232,6 +243,7 @@ void panel_input_poll(uint32_t now_ms) {
         bool configured;
         if (!tca8418_read_config(&configured)) {
             chip_configured = false;
+            generation++;
             return;
         }
         if (!configured) {
@@ -248,9 +260,13 @@ void panel_input_poll(uint32_t now_ms) {
     if (count == TCA8418_READ_FAILED) {
         // Nothing was consumed: re-init (the chip may have reset), then read again.
         chip_configured = false;
+        generation++;
     } else if (count == TCA8418_READ_UNCERTAIN || overflow) {
         // Events were lost or the batch is incomplete: none of it is reported.
-        if (count == TCA8418_READ_UNCERTAIN) chip_configured = false;
+        if (count == TCA8418_READ_UNCERTAIN) {
+            chip_configured = false;
+            generation++;
+        }
         lose_sync(now_ms);
         return;
     } else {
@@ -265,4 +281,19 @@ bool panel_input_next(panel_event_t *out) {
     ring_head = (ring_head + 1) % EVENT_RING_SIZE;
     ring_count--;
     return true;
+}
+
+bool panel_input_pad_down(uint8_t track, uint8_t row) {
+    if (track >= 8 || row >= 8) return false;
+    for (uint8_t i = 0; i < PANEL_KEYS; i++) {
+        const key_control_t *control = &key_map[i / PANEL_COLS][i % PANEL_COLS];
+        if (control->kind == PANEL_PAD && control->track == track && control->row == row) {
+            return keys[i].accepted;
+        }
+    }
+    return false;
+}
+
+uint32_t panel_input_generation(void) {
+    return generation;
 }
