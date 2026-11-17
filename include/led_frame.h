@@ -36,7 +36,16 @@ typedef struct {
     uint8_t  focus_track;
     bool     playing;
     uint32_t pulse;                   // pulse_count while playing; a 120 BPM pulse clock when stopped
+    bool     keys;                    // the pads are shown as a keyboard, not as clips
+    uint8_t  keys_base;               // the C of the bottom-left pad
+    uint8_t  keys_track;              // whose hue
+    uint8_t  keys_note;               // the note to mark, 0xFF = none
 } led_state_t;
+
+// The note of pad (track column, row) in a keyboard whose bottom-left pad is
+// the C `base`, or 0xFF for a pad without a note (or an argument out of range).
+// The UI and the frame builder both read the layout from here.
+uint8_t pad_key_note(uint8_t base, uint8_t column, uint8_t row);
 
 void led_frame_build(const led_state_t *s, rgb_t out[LED_COUNT]);
 

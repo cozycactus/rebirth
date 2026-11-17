@@ -120,10 +120,29 @@ static rgb_t beat_light(const led_state_t *s) {
     return OFF;
 }
 
+uint8_t pad_key_note(uint8_t base, uint8_t column, uint8_t row) {
+    // Semitones above the octave's C; -1 is a pad without a note. The last
+    // white pad is the C of the octave above.
+    static const int8_t WHITE_KEY[8] = {0, 2, 4, 5, 7, 9, 11, 12};
+    static const int8_t BLACK_KEY[8] = {-1, 1, 3, -1, 6, 8, 10, -1};
+    if (column >= 8 || row >= 8) return 0xFF;
+    int semitone = (row % 2 == 1) ? WHITE_KEY[column] : BLACK_KEY[column];
+    if (semitone < 0) return 0xFF;
+    int note = base + 12 * ((7 - row) / 2) + semitone;
+    return note > 127 ? 0xFF : (uint8_t)note;
+}
+
+static rgb_t key_light(const led_state_t *s, uint8_t column, uint8_t row) {
+    uint8_t note = pad_key_note(s->keys_base, column, row);
+    if (note == 0xFF) return OFF;
+    if (note == s->keys_note) return shade(WHITE, LED_LEVEL_FULL);
+    return shade(TRACK_HUE[s->keys_track], row % 2 == 1 ? LED_LEVEL_HALF : LED_LEVEL_DIM);
+}
+
 void led_frame_build(const led_state_t *s, rgb_t out[LED_COUNT]) {
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         for (uint8_t row = 0; row < PATTERNS_PER_BANK; row++) {
-            out[LED_PAD(track, row)] = pad_light(s, track, row);
+            out[LED_PAD(track, row)] = s->keys ? key_light(s, track, row) : pad_light(s, track, row);
         }
         out[LED_MUTE(track)] = mute_light(s, track);
     }
