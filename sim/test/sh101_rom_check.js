@@ -136,6 +136,17 @@ async function testROM(image) {
   seq.tap('play'); seq.pulse();
   assert.equal(seq.state().mode, null);
   assert.equal(seq.state().gate, false);
+  seq.tap('play'); seq.pulse();
+  assert.equal(seq.state().gate, true);
+  seq.board.powerOn();
+  assert.equal(seq.board.cycles, 0);
+  seq.advance();
+  assert.equal(seq.state().mode, null, 'POWER restarts the ROM idle');
+  assert.equal(seq.state().gate, false);
+  seq.tap('play'); seq.pulse();
+  assert.equal(seq.state().pitch, 17, 'battery-backed sequence survives POWER');
+  seq.pulse();
+  assert.equal(seq.state().pitch, 24);
 
   const internal = await setup({ external: false, rate: 4 });
   internal.advance(170); internal.tap('up');
@@ -176,7 +187,7 @@ async function main() {
   const fixture = process.env.SH101_ROM || path.join(__dirname, '../web/sh101.rom');
   if (process.env.SH101_ROM || fs.existsSync(fixture)) {
     await testROM(fs.readFileSync(fixture));
-    console.log('SH-101 ROM: bus/DAC, 32 keys, priority, transpose, ARP/HOLD, SEQ/LEGATO/REST, clocks and gated audio OK');
+    console.log('SH-101 ROM: bus/DAC, 32 keys, priority, transpose, ARP/HOLD, SEQ/LEGATO/REST, POWER, clocks and gated audio OK');
   } else {
     console.log('SH-101 ROM: bus/DAC OK; original ROM scenarios require SH101_ROM=/path/to/sh101.rom');
   }

@@ -98,9 +98,12 @@
       k('drums.level', 'Kit level', 'Drums', 0.85), k('kick.level', 'Kick level', 'Drums', 0.9),
       k('fx.level', 'Level', 'FX', 0.6), k('fx.riserBars', 'Riser length', 'FX', 8, 1, 16, 'bars'));
     if (SH101) {
-      for (const role of ['bass', 'lead', 'rom']) {
+      for (const role of ['bass', 'lead', 'arp', 'rom']) {
         const patch = SH101.defaults(role);
-        for (const def of SH101.controls) out.push(k(role + '.' + def.id, def.label, role.toUpperCase(), patch[def.id], 0, SH101.max(def)));
+        for (const def of SH101.controls) {
+          if (def.romOnly && role !== 'rom') continue;
+          out.push(k(role + '.' + def.id, def.label, role.toUpperCase(), patch[def.id], 0, SH101.max(def)));
+        }
       }
       out.push(k('fx.diodes', 'D30/D31', 'FX', 0, 0, 1));
     }
@@ -494,6 +497,8 @@
     }
   }
 
+  const SH101_STRIP_GAIN = { bass: 3.4, lead: 5.7, arp: 4.5 };
+
   class SH101Voice {
     constructor(rig, role, effectBus) {
       this.rig = rig;
@@ -505,7 +510,7 @@
     async start() {
       const rig = this.rig, ctx = rig.ctx, role = this.role;
       const effects = role === 'fx', rom = role === 'rom';
-      const parameters = effects ? ['diodes'] : SH101.controls.map(({ id }) => id);
+      const parameters = effects ? ['diodes'] : SH101.controls.filter(def => rom || !def.romOnly).map(def => def.id);
       let node, send, mode;
       try {
         if (await rig.sh101Module) {
@@ -538,7 +543,7 @@
       if (!node) return 'none';
       if (effects) chain(node, rig.gain(3.3), this.effectBus);
       else if (rom) rig.strip(node, { k: 4.5 });
-      else rig.strip(node, { id: role, level: role + '.level', k: role === 'bass' ? 3.4 : 5.7, panned: role === 'lead' });
+      else rig.strip(node, { id: role, level: role + '.level', k: SH101_STRIP_GAIN[role], panned: role !== 'bass' });
       this.node = node;
       this.send = send;
       return mode;
@@ -548,19 +553,6 @@
     off(note, t) { this.send?.({ type: 'note', note, down: false, t }); }
     bend(value, t) { this.send?.({ type: 'bend', value, t }); }
     kill(t) { this.send?.({ type: 'kill', t }); }
-  }
-
-  function makeArp(rig) {
-    const v = new MonoVoice(rig, {
-      oscs: [{ type: 'square', gain: 0.45 }, { type: 'sawtooth', gain: 0.4 }],
-      baseHz: 900, q: [5], envCents: 3000,
-      trig(vel) {
-        return { peak: 0.7 * velGain(vel), atk: 0.0015, hold: 0.006, sus: 0.12, dec: 0.04, rel: 0.03,
-                 fPeak: 1, fDec: 0.02 };
-      },
-    });
-    rig.strip(v.out, { id: 'arp', level: 'arp.level', k: 2.2, panned: true });
-    return v;
   }
 
   function makePad(rig) {
@@ -889,12 +881,12 @@
       this.sh101Module = SH101 && ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined'
         ? Promise.resolve().then(() => ctx.audioWorklet.addModule(HERE + 'sh101.js' + QUERY)).then(() => true, () => false)
         : Promise.resolve(false);
-      this.sh101 = { bass: new SH101Voice(this, 'bass'), lead: new SH101Voice(this, 'lead') };
+      this.sh101 = Object.fromEntries(['bass', 'lead', 'arp'].map(role => [role, new SH101Voice(this, role)]));
       this.fx = new Fx(this);
       this.inst = [
         new Drums(this), this.sh101.bass,
         new AcidVoice(this, 'acid1', 'saw'), new AcidVoice(this, 'acid2', 'square'),
-        this.sh101.lead, makeArp(this), this.fx, makePad(this),
+        this.sh101.lead, this.sh101.arp, this.fx, makePad(this),
       ];
       // Resolves once the 303s can sound; until then their notes are dropped.
       this.ready = this.startAcids([this.inst[2], this.inst[3]]);

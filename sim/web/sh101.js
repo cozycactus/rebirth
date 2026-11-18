@@ -4,7 +4,12 @@
   'use strict';
 
   const groups = [
-    ['VCO и микшер', [
+    ['MODULATOR', [
+      { id: 'lfoRate', label: 'LFO/CLK RATE', value: 0.47, tip: 'Скорость LFO, арпеджио и секвенсора от 0,1 до 30 Гц.' },
+      { id: 'lfoWave', label: 'WAVE FORM', value: 0, options: ['Triangle', 'Square', 'Random', 'Noise'],
+        tip: 'Форма сигнала для VCO MOD и MOD VCF. PWM и рычаг BENDER используют треугольник.' },
+    ]],
+    ['VCO', [
       { id: 'range', label: 'Диапазон', value: 1, options: ['16′', '8′', '4′', '2′'] },
       { id: 'tune', label: 'Tune', value: 0.5 },
       { id: 'vcoMod', label: 'VCO MOD', value: 0, tip: 'Глубина модуляции высоты тона выбранной формой LFO.' },
@@ -12,6 +17,8 @@
         tip: 'Ширину импульса задаёт огибающая, ползунок Pulse width или треугольник LFO.' },
       { id: 'pwm', label: 'Pulse width', value: 0.38,
         tip: 'Ширина импульса в MAN и глубина её модуляции в ENV и LFO. Слышно при поднятом Pulse.' },
+    ]],
+    ['SOURCE MIXER', [
       { id: 'pulse', label: 'Pulse', value: 0.32 },
       { id: 'saw', label: 'Saw', value: 0.9 },
       { id: 'sub', label: 'Sub', value: 0.2 },
@@ -27,32 +34,45 @@
       { id: 'vcfMod', label: 'MOD VCF', value: 0, tip: 'Глубина модуляции частоты среза выбранной формой LFO.' },
       { id: 'keyFollow', label: 'KYBD', value: 0.5 },
     ]],
-    ['Огибающая и VCA', [
+    ['VCA', [
+      { id: 'vca', label: 'Режим VCA', value: 0, options: ['ENV', 'GATE'] },
+    ]],
+    ['ENV', [
       { id: 'trigger', label: 'Запуск огибающей', value: 0, options: ['GATE + TRIG', 'GATE', 'LFO'],
         tip: 'GATE + TRIG запускает атаку на каждой ноте. GATE сохраняет огибающую в легато. LFO повторяет её, пока клавиша нажата.' },
       { id: 'attack', label: 'Attack', value: 0.1 },
       { id: 'decay', label: 'Decay', value: 0.51 },
       { id: 'sustain', label: 'Sustain', value: 0.65 },
       { id: 'release', label: 'Release', value: 0.49 },
-      { id: 'vca', label: 'Управление VCA', value: 0, options: ['ENV', 'GATE'] },
-      { id: 'volume', label: 'Volume SH-101', value: 0.75 },
     ]],
-    ['Модуляция и портаменто', [
-      { id: 'lfoRate', label: 'LFO Rate', value: 0.47, tip: 'Частота LFO от 0,1 до 30 Гц. В режиме Random задаёт частоту обновления случайного значения.' },
-      { id: 'lfoWave', label: 'Форма LFO', value: 0, options: ['Triangle', 'Square', 'Random', 'Noise'],
-        tip: 'Форма сигнала для VCO MOD и MOD VCF. В режиме PWM от LFO используется треугольник.' },
+    ['CONTROLLERS', [
+      { id: 'volume', label: 'VOLUME', value: 0.75 },
       { id: 'portaMode', label: 'Режим портаменто', value: 1, options: ['OFF', 'AUTO', 'ON'] },
-      { id: 'portaTime', label: 'Portamento', value: 0.14 },
-      { id: 'transpose', label: 'Транспонирование', value: 1, options: ['L', 'M', 'H'] },
+      { id: 'portaTime', label: 'PORTAMENTO', value: 0.14 },
+      { id: 'transpose', label: 'TRANSPOSE', value: 1, options: ['L', 'M', 'H'] },
+    ]],
+    ['BENDER', [
+      { id: 'bendVco', label: 'VCO BEND SENS', value: 1, romOnly: true, tip: 'Диапазон рычага по высоте до ±12 полутонов.' },
+      { id: 'bendVcf', label: 'VCF BEND SENS', value: 0, romOnly: true, tip: 'Глубина воздействия рычага на частоту среза фильтра.' },
+      { id: 'bendLfo', label: 'LFO MOD DEPTH', value: 0.25, romOnly: true, tip: 'Глубина модуляции VCO и VCF треугольником при удержании LFO MOD.' },
     ]],
   ];
-  const controls = groups.flatMap(([, entries]) => entries);
+  const controls = [
+    ...groups.flatMap(([, entries]) => entries),
+    { id: 'bender', label: 'BENDER', value: 0.5, romOnly: true },
+    { id: 'bendLfoPressed', label: 'LFO MOD', value: 0, romOnly: true },
+  ];
   function defaults(role) {
     const p = Object.fromEntries(controls.map(({ id, value }) => [id, value]));
     if (role === 'bass') Object.assign(p, {
       saw: 0.8, sub: 0.56, pulse: 0.15, pwmMode: 1, pwm: 0.18, cutoff: 0.49,
       resonance: 0.38, envMod: 0.36, attack: 0, decay: 0.48, sustain: 0.48,
       release: 0.34, portaTime: 0.12,
+    });
+    if (role === 'arp') Object.assign(p, {
+      saw: 0.48, pulse: 0.58, sub: 0, pwmMode: 1, pwm: 0.05, cutoff: 0.59,
+      resonance: 0.32, envMod: 0.4, keyFollow: 0.25, attack: 0, decay: 0.35,
+      sustain: 0.13, release: 0.32, portaTime: 0.095,
     });
     if (role === 'rom') p.diodes = 1;
     return p;
@@ -76,6 +96,9 @@
   const CHARGE_RAIL = (CONTROL_RAIL - VIRTUAL_GROUND) / ENV_PEAK;
   const ATTACK_THRESHOLD = -Math.log1p(-1 / CHARGE_RAIL);
   const T90 = Math.log(10);
+  // Bender Board OPH178-1. The switched LFO feeds VCO and VCF separately
+  // from the horizontal bend. Use a nominal AC swing at VR6.
+  const BENDER_LFO_PEAK = 0.5;
 
   // Service Notes p. 7: C47/C48/C50/C51, 68k feedback and 560-ohm
   // attenuators. Pin 1 is the +5 V signal reference on this board.
@@ -328,6 +351,14 @@
       this.envOctaves = p.envMod * ENV_PEAK * 150 / 100;
       this.vcfModOctaves = p.vcfMod * 2.5 * 150 / 100;
       this.vcoModOctaves = p.vcoMod * 2.5 * 100 / 4700;  // R89/R90
+      if (this.rom) {
+        const bendVolts = 2 * p.bender - 1;  // nominal ±1 V at full travel
+        this.panelPitchBend = bendVolts * p.bendVco;
+        this.panelFilterBend = bendVolts * p.bendVcf * 150 / 100;  // R193/R185
+        const lfoVolts = BENDER_LFO_PEAK * p.bendLfo * p.bendLfoPressed;
+        this.panelPitchLfo = lfoVolts * 100 / 150;   // Bender R3/R2
+        this.panelFilterLfo = lfoVolts * 150 / 220;  // R193/R184
+      }
       const saw = mixLeg(p.saw, 100, 470000), pulse = mixLeg(p.pulse, 68000, 680000);
       const sub = mixLeg(p.sub, 47000, 820000), noise = mixLeg(p.noise, 100, 150000);
       this.sawGain = saw.scale * 10;    // CEM3340 pin 8: 2/3 of +15 V
@@ -372,9 +403,10 @@
       if (this.lfoWave === 3) mod = this.noise;
       const keyboard = (this.cv - 69) / 12;
       const range = this.rom ? this.romRange : this.vcoOffset;
-      // MIDI pitch bend is a two-semitone adapter for the virtual instrument.
+      const pitchBend = this.rom ? this.panelPitchBend + this.panelPitchLfo * triangle : this.bend / 6;
+      const filterBend = this.rom ? this.panelFilterBend + this.panelFilterLfo * triangle : 0;
       const freq = this.effect ? this.effectPitch
-        : 440 * 2 ** (keyboard + range + this.tune + this.bend / 6 + this.vcoModOctaves * mod);
+        : 440 * 2 ** (keyboard + range + this.tune + pitchBend + this.vcoModOctaves * mod);
       const advance = Math.min(0.24, freq / this.rate);
       const phase = wrap(this.phase);
       const saw = phase - 0.5 * blep(phase, advance);
@@ -386,8 +418,9 @@
       this.phase = (this.phase + advance) % 4;
       const mix = this.sawGain * saw + this.pulseGain * pulse + this.subGain * sub + this.noiseGain * this.noise;
       this.mixDC += this.mixDCRate * (mix - this.mixDC);
+      const filterOctaves = p.keyFollow * keyboard + this.envOctaves * this.env + this.vcfModOctaves * mod + filterBend;
       const hz = this.effect ? this.effectCutoff
-        : clamp(this.cutoff * 2 ** (p.keyFollow * keyboard + this.envOctaves * this.env + this.vcfModOctaves * mod), MIN_CUTOFF, MAX_CUTOFF);
+        : clamp(this.cutoff * 2 ** filterOctaves, MIN_CUTOFF, MAX_CUTOFF);
       const filtered = this.filter.step(mix - this.mixDC + 1e-7 * white, hz, p.resonance);
       // TR26's emitter adds an in-phase path at R132, alongside the dry
       // filter output at R130. BA662A sees the two 150k legs through C53/R139.

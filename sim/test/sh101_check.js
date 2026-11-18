@@ -58,6 +58,25 @@ for (const [source, subMode, expected] of [['saw', 0, 440], ['sub', 0, 220], ['s
   assert.ok(Math.abs(frequency(samples.subarray(fs / 2), fs) - expected) <= 2, source + ' tracks the oscillator');
 }
 
+{
+  const renderBender = (controls) => {
+    const v = new Voice(fs, false, true), samples = new Float32Array(fs);
+    const patch = { ...defaults('rom'), saw: 1, pulse: 0, sub: 0, cutoff: 0.6, resonance: 0,
+      envMod: 0, keyFollow: 0, portaMode: 0, vca: 1, lfoWave: 1, ...controls };
+    v.enqueue({ type: 'romClock', phase: 0.5, hz: 0, t: 0 });
+    v.enqueue({ type: 'rom', pitch: 33, range: 24, gate: true, t: 0 });
+    v.render(samples, 0, patch);
+    return { pitch: frequency(samples.subarray(fs / 2), fs), cutoff: v.filter.lastHz };
+  };
+  const neutral = renderBender({});
+  const pitchBend = renderBender({ bender: 1 });
+  const filterBend = renderBender({ bender: 1, bendVco: 0, bendVcf: 1 });
+  const modulation = renderBender({ bendVco: 0, bendLfo: 1, bendLfoPressed: 1 });
+  assert.ok(Math.abs(pitchBend.pitch - 880) <= 2 && pitchBend.cutoff === neutral.cutoff, 'VCO BEND SENS bends one octave');
+  assert.ok(Math.abs(filterBend.pitch - 440) <= 2 && filterBend.cutoff > neutral.cutoff, 'VCF BEND SENS opens the filter');
+  assert.ok(modulation.pitch > 500 && modulation.cutoff > neutral.cutoff, 'LFO MOD pushes triangle to VCO and VCF');
+}
+
 for (const trigger of [0, 1, 2]) {
   const v = new Voice(fs), quantum = new Float32Array(128);
   const p = { ...defaults(), trigger, attack: 0, sustain: 0.5 };
@@ -100,4 +119,4 @@ for (const rise of [false, true]) {
   assert.equal(lead.note, 69, 'the lead and effect have independent gates');
   assert.ok(rms(tail) > 0.005, 'the lead keeps sounding through the sweep');
 }
-console.log('SH-101: four-pole response, diode selection, bounded resonance, divider pitch, note priority, panic and FX sweeps OK');
+console.log('SH-101: four-pole response, diode selection, bounded resonance, divider pitch, bender, note priority, panic and FX sweeps OK');

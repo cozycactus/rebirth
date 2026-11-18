@@ -124,13 +124,13 @@ The pad synth has no strip.
 
 ## SH-101
 
-The BASS (MIDI channel 3) and LEAD (channel 6) strips each have an independent
-SH-101 voice. The **Голос** selector in the SH-101 panel switches the editable
-patch. **Пробная нота** enables audio and plays C2 for BASS or C4 for LEAD.
-The score's old cutoff ranges in Hz are mapped onto each patch's FREQ
-slider, and each instrument uses its own fader, pan, mute and sends.
+The BASS (MIDI channel 3), LEAD (channel 6) and ARP (channel 7) strips each
+have an independent SH-101 voice. The **Голос** selector switches the
+editable patch. **Пробная нота** enables audio and plays C2 for BASS, C4 for
+LEAD or C5 for ARP. The score's old cutoff ranges in Hz are mapped onto the
+BASS and LEAD FREQ sliders. Each instrument has its own fader, pan, mute and sends.
 
-The default **Звук FX → SH-101** puts a third voice on the FX strip (MIDI channel 8).
+The default **Звук FX → SH-101** puts an independent voice on the FX strip (MIDI channel 8).
 A plain trigger sweeps pitch and cutoff down. An accent runs a noise and VCO
 riser for the number of bars set by the score, using MIDI Clock. The FX strip
 can also use the **ReBirth FX** patch.
@@ -141,7 +141,8 @@ charge and discharge. GATE+TRIG uses last-note priority, while GATE and
 LFO use low-note priority. AUTO portamento follows overlapping MIDI notes.
 VCO MOD and MOD VCF take the selected LFO waveform. PWM taps the triangle
 directly. BASS starts with static PWM and a stronger sub; LEAD starts with
-LFO PWM. Both patches use A440 to match the rig.
+LFO PWM. ARP starts with a short-decay pulse and saw patch. The voices use
+A440 to match the rig.
 
 - **D30/D31** selects the diode pair per voice. The MIDI voices and FX start
   with Roland's 1S2473. The ROM panel starts with Rev-A's 1N4148. The 1N4148
@@ -180,10 +181,18 @@ The 32-key matrix, panel buttons, HOLD pedal and LFO or manual EXT CLK feed
 the virtual U6. Its keyboard CV, oscillator RANGE, random DAC, Gate, portamento and
 clock-reset outputs drive the same SH-101 audio model. [MCS-48 decoder source](https://github.com/cozycactus/sh101_midi/blob/8142852/src/mcs48_core.h)
 
+Use **SH-101 · ARPEGGIO** to open the ROM panel. Select **DOWN**, **U&D** or
+**UP**, then Shift-click a chord. **LFO/CLK RATE** sets the speed and its LED
+shows the internal clock. The spring-return **BENDER** has independent VCO
+and VCF sensitivities. Hold **LFO MOD** to send triangle modulation to both
+paths. The modulation amplitude is nominal. **POWER** restarts the ROM with
+the sequence RAM retained in the open page.
+[Photo of the original panel](https://commons.wikimedia.org/wiki/File:SH-101.jpg)
+
 For a tied sequencer note, hold HOLD while entering the new note and
 select the GATE envelope mode for playback. KEY TRANSPOSE enters a rest
 while LOAD is active. Shift-click holds a virtual key or switch and a
-second click releases it. Sequence RAM lives in the open page.
+second click releases it.
 [Roland SH-101 Owner's Manual, pp. 33–38](https://cdn.roland.com/assets/media/pdf/SH-101_OM.pdf)
 
 The Rev-A netlist has active-low Gate through Q9, P24 wired to the Q7/Q6

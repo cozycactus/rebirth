@@ -57,6 +57,14 @@ void sh101_reset(void) {
     count = 0;
 }
 
+void sh101_power_on(void) {
+    // Battery backup retains the internal sequence RAM across POWER cycles.
+    uint8_t ram[sizeof(cpu.ram)];
+    memcpy(ram, cpu.ram, sizeof(ram));
+    sh101_reset();
+    memcpy(cpu.ram, ram, sizeof(ram));
+}
+
 void bus_out(uint8_t value) {
     cpu.bus = value;
     unsigned channel = value >> 6;

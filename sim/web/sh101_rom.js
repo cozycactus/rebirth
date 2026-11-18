@@ -45,6 +45,12 @@
     get phase() { return this.core._sh101_phase(); }
     get state() { return this.core._sh101_state(); }
 
+    powerOn() {
+      this.core._sh101_power_on();
+      this.keys = this.buttons = 0;
+      this.pedal = this.clockHigh = false;
+    }
+
     advanceTo(target, onChange) {
       const c = this.core;
       // Raw P1 bits seen when DB4 is low. The ROM decodes range and mode.
