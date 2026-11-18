@@ -52,26 +52,48 @@ static void test_load_resyncs_panel_input(void) {
 
 #define IMG (fake_flash + STORE_OFFSET)
 
-// Serialize the RAM patterns and song as a version 4 or 5 image.
+// Serialize the RAM patterns and song as a version 4, 5 or 6 image.
 static void write_legacy_image(uint8_t version) {
-    memset(IMG, 0xFF, STORE_ERASE);
-    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
-        pattern_v5_t record;
-        memcpy(&record, &g_seq.patterns[pattern], sizeof(record));
-        memcpy(IMG + PAT_OFFSET + pattern * sizeof(record), &record, sizeof(record));
+    memset(IMG, 0xff, STORE_ERASE);
+    uint8_t *old = fake_flash + OLD_STORE;
+    memset(old, 0xff, 128u * 1024);
+    for (uint8_t i = 0; i < MAX_PATTERNS; i++) {
+        const pattern_t *p = &g_seq.patterns[i];
+        pattern_v6_t record = {0};
+        memcpy(record.steps, p->steps, sizeof(record.steps));
+        memcpy(record.tracks, p->tracks, sizeof(record.tracks));
+        memcpy(record.track_length, p->track_length, sizeof(record.track_length));
+        memcpy(record.name, p->name, sizeof(record.name));
+        record.swing = p->swing;
+        record.length = p->length;
+        memcpy(record.kit_steps, p->kit_steps, sizeof(record.kit_steps));
+        size_t stride = version == 6 ? sizeof(record) : sizeof(pattern_v5_t);
+        memcpy(old + PAT_OFFSET + i * stride, &record, stride);
     }
-    memcpy(IMG + V5_SONG_OFFSET, &g_seq.song, sizeof(song_t));
-    store_header_t *header = (store_header_t *)IMG;
-    memset(header, 0xFF, sizeof(*header));
+    old_song_t song = {0};
+    song.length = g_seq.song.length;
+    song.end_mode = g_seq.song.end_mode;
+    memcpy(song.name, g_seq.song.name, sizeof(song.name));
+    for (unsigned i = 0; i < song.length; i++) {
+        memcpy(song.entries[i].pattern_index, g_seq.song.entries[i].pattern_index, OLD_TRACKS);
+        song.entries[i].repeats = g_seq.song.entries[i].repeats;
+    }
+    memcpy(old + (version == 6 ? V6_SONG_OFFSET : V5_SONG_OFFSET), &song, sizeof(song));
+    store_header_t *header = (store_header_t *)old;
     header->magic = MAGIC;
     header->version = version;
-    if (version == V5_VERSION) {
-        header->checksum = payload_checksum_v5(IMG + PAT_OFFSET, IMG + V5_SONG_OFFSET);
+    if (version == 5) header->checksum = payload_checksum_v5(old + PAT_OFFSET, &song);
+    if (version == 6) {
+        const size_t bytes = OLD_TRACKS * sizeof(kit_config_t);
+        memcpy(old + V6_KIT_OFFSET, g_seq.kit_config, bytes);
+        uint32_t crc = crc32_update(UINT32_MAX, old + PAT_OFFSET, V6_PAT_BYTES);
+        crc = crc32_update(crc, &song, sizeof(song));
+        header->checksum = ~crc32_update(crc, old + V6_KIT_OFFSET, bytes);
     }
 }
 
-// Recompute the version 6 checksum after a test edited the image.
-static void reseal_v6(void) {
+// Recompute the current checksum after a test edited the image.
+static void reseal_v7(void) {
     store_header_t *header = (store_header_t *)IMG;
     header->checksum = payload_checksum(IMG + PAT_OFFSET, IMG + SONG_OFFSET, IMG + KIT_OFFSET);
 }
@@ -109,7 +131,7 @@ static void set_kit_tracks(uint8_t track_a, uint8_t track_b) {
     }
 }
 
-static void test_v6_round_trip(void) {
+static void test_v7_round_trip(void) {
     set_kit_tracks(1, 4);
     g_seq.patterns[5].kit_steps[1][3] = kit_set(0, 2, 3);
     g_seq.patterns[31].kit_steps[4][15] = kit_set(kit_set(0, 0, 1), 7, 2);
@@ -119,6 +141,8 @@ static void test_v6_round_trip(void) {
     cfg.vel_normal = 70;
     cfg.flam_pulses = 5;
     seq_set_kit_config(1, &cfg);
+    pattern_set_step(&g_seq.patterns[23], 63, 15, 74, 99, STEP_FLAG_ACTIVE);
+    g_seq.song.entries[0].pattern_index[63] = 23;
     CHECK(flash_storage_save());
     CHECK(((store_header_t *)IMG)->version == VERSION);
     ram_take();
@@ -132,7 +156,8 @@ static void test_v6_round_trip(void) {
     CHECK(g_seq.kit_config[1].note[0] == 40);
     CHECK(g_seq.kit_config[1].vel_normal == 70);
     CHECK(g_seq.kit_config[1].flam_pulses == 5);
-    snap.song = g_seq.song;     // song_clear above changed it; only compare patterns and kits
+    CHECK(g_seq.song.entries[0].pattern_index[63] == 23);
+    CHECK(g_seq.patterns[23].steps[63][15].note == 74);
     CHECK(memcmp(snap.patterns, g_seq.patterns, sizeof(snap.patterns)) == 0);
     CHECK(memcmp(snap.kits, g_seq.kit_config, sizeof(snap.kits)) == 0);
 }
@@ -143,7 +168,7 @@ static void expect_legacy_load(uint8_t version) {
         for (uint8_t track = 0; track < NUM_TRACKS; track++) {
             g_seq.patterns[pattern].tracks[track].type =
                 track == 5 ? TRACK_TYPE_DRUM : TRACK_TYPE_SYNTH;
-            memset(g_seq.patterns[pattern].kit_steps[track], 0,
+            if (track < KIT_TRACK_SLOTS) memset(g_seq.patterns[pattern].kit_steps[track], 0,
                    sizeof(g_seq.patterns[pattern].kit_steps[track]));
         }
     }
@@ -167,14 +192,19 @@ static void expect_legacy_load(uint8_t version) {
     for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
         CHECK(memcmp(&g_seq.patterns[pattern], &snap.patterns[pattern],
                      sizeof(pattern_v5_t)) == 0);
-        for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        for (uint8_t track = 0; track < KIT_TRACK_SLOTS; track++) {
             for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
                 CHECK(g_seq.patterns[pattern].kit_steps[track][step] == 0);
             }
         }
     }
     CHECK(g_seq.patterns[9].steps[3][4].note == 61);
-    CHECK(memcmp(&g_seq.song, &snap.song, sizeof(song_t)) == 0);
+    CHECK(g_seq.song.length == snap.song.length && g_seq.song.end_mode == snap.song.end_mode);
+    for (unsigned i = 0; i < snap.song.length; i++) {
+        CHECK(g_seq.song.entries[i].repeats == snap.song.entries[i].repeats);
+        CHECK(!memcmp(g_seq.song.entries[i].pattern_index, snap.song.entries[i].pattern_index, OLD_TRACKS));
+        for (unsigned t = OLD_TRACKS; t < NUM_TRACKS; t++) CHECK(g_seq.song.entries[i].pattern_index[t] == 0);
+    }
     kit_config_t defaults;
     kit_config_defaults(&defaults);
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
@@ -183,28 +213,41 @@ static void expect_legacy_load(uint8_t version) {
 }
 
 static void test_legacy_images(void) {
+    set_kit_tracks(1, 4);
+    g_seq.patterns[31].kit_steps[4][15] = kit_set(0, 7, 2);
+    g_seq.kit_config[1].note[0] = 42;
+    write_legacy_image(6);
+    g_seq.patterns[31].kit_steps[4][15] = 0;
+    g_seq.kit_config[1].note[0] = 0;
+    CHECK(flash_storage_load());
+    CHECK(g_seq.patterns[31].tracks[4].type == TRACK_TYPE_KIT);
+    CHECK(g_seq.patterns[31].kit_steps[4][15] == kit_set(0, 7, 2));
+    CHECK(g_seq.kit_config[1].note[0] == 42);
+    CHECK(!(g_seq.patterns[23].steps[63][15].flags & STEP_FLAG_ACTIVE));
+    (fake_flash + OLD_STORE)[V6_KIT_OFFSET] ^= 1;
+    CHECK(!flash_storage_load());
     expect_legacy_load(V5_VERSION);
     // A flipped byte fails the v5 checksum.
     write_legacy_image(V5_VERSION);
-    IMG[PAT_OFFSET + 3 * sizeof(pattern_v5_t)] ^= 1;
+    (fake_flash + OLD_STORE)[PAT_OFFSET + 3 * sizeof(pattern_v5_t)] ^= 1;
     ram_take();
     CHECK(!flash_storage_is_valid());
     CHECK(!flash_storage_load());
     CHECK(ram_unchanged());
     // A v4 image has no checksum: any checksum field loads.
     write_legacy_image(LEGACY_VERSION);
-    ((store_header_t *)IMG)->checksum = 0x12345678u;
+    ((store_header_t *)(fake_flash + OLD_STORE))->checksum = 0x12345678u;
     CHECK(flash_storage_load());
     expect_legacy_load(LEGACY_VERSION);
     // A kit type is not valid in a legacy image.
     write_legacy_image(V5_VERSION);
-    ((pattern_v5_t *)(IMG + PAT_OFFSET))[2].tracks[1].type = TRACK_TYPE_KIT;
-    ((store_header_t *)IMG)->checksum =
-        payload_checksum_v5(IMG + PAT_OFFSET, IMG + V5_SONG_OFFSET);
+    ((pattern_v5_t *)((fake_flash + OLD_STORE) + PAT_OFFSET))[2].tracks[1].type = TRACK_TYPE_KIT;
+    ((store_header_t *)(fake_flash + OLD_STORE))->checksum =
+        payload_checksum_v5((fake_flash + OLD_STORE) + PAT_OFFSET, (fake_flash + OLD_STORE) + V5_SONG_OFFSET);
     CHECK(!flash_storage_is_valid());
     // A song past the limit in a v4 image is rejected.
     write_legacy_image(LEGACY_VERSION);
-    ((song_t *)(IMG + V5_SONG_OFFSET))->length = MAX_SONG_ENTRIES + 1;
+    ((old_song_t *)((fake_flash + OLD_STORE) + V5_SONG_OFFSET))->length = MAX_SONG_ENTRIES + 1;
     CHECK(!flash_storage_load());
 }
 
@@ -237,7 +280,7 @@ static void test_v6_rejections(void) {
         CHECK(flash_storage_save());
         ram_take();
         apply_bad(which, img_patterns(), img_kits());
-        reseal_v6();
+        reseal_v7();
         CHECK(!flash_storage_is_valid());
         CHECK(!flash_storage_load());
         CHECK(ram_unchanged());
@@ -316,9 +359,9 @@ static void test_copies_one_pattern_per_lock_section(void) {
     song_clear();
     CHECK(song_append(3, 2));
 
-    watch(pattern_buf);
+    watch(g_seq.patterns);
     CHECK(flash_storage_save());
-    CHECK(most_changed == 1);
+    CHECK(most_changed == 0);
     CHECK(seq_sections_midi_pending == 0);
     ram_take();
 
@@ -335,7 +378,12 @@ static void test_copies_one_pattern_per_lock_section(void) {
     CHECK(flash_storage_load());
     CHECK(most_changed == 1);
     CHECK(seq_sections_midi_pending == 0);
-    CHECK(memcmp(&g_seq.song, &snap.song, sizeof(song_t)) == 0);
+    CHECK(g_seq.song.length == snap.song.length && g_seq.song.end_mode == snap.song.end_mode);
+    for (unsigned i = 0; i < snap.song.length; i++) {
+        CHECK(g_seq.song.entries[i].repeats == snap.song.entries[i].repeats);
+        CHECK(!memcmp(g_seq.song.entries[i].pattern_index, snap.song.entries[i].pattern_index, OLD_TRACKS));
+        for (unsigned t = OLD_TRACKS; t < NUM_TRACKS; t++) CHECK(g_seq.song.entries[i].pattern_index[t] == 0);
+    }
     for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
         CHECK(memcmp(&g_seq.patterns[pattern], &snap.patterns[pattern], sizeof(pattern_v5_t)) == 0);
         CHECK(g_seq.patterns[pattern].kit_steps[7][15] == 0);
@@ -386,7 +434,7 @@ int main(void) {
     store_header_t *header = (store_header_t *)(fake_flash + STORE_OFFSET);
     write_legacy_image(LEGACY_VERSION);
     CHECK(flash_storage_load());
-    song_t *saved_song = (song_t *)(fake_flash + STORE_OFFSET + V5_SONG_OFFSET);
+    old_song_t *saved_song = (old_song_t *)(fake_flash + OLD_STORE + V5_SONG_OFFSET);
     saved_song->length = MAX_SONG_ENTRIES + 1;
     CHECK(!flash_storage_load());
     CHECK(g_seq.song.length == 1);
@@ -410,7 +458,7 @@ int main(void) {
     fake_before_lockout = NULL;
     test_save_resyncs_panel_input();
     test_load_resyncs_panel_input();
-    test_v6_round_trip();
+    test_v7_round_trip();
     test_legacy_images();
     test_v6_rejections();
     test_copies_one_pattern_per_lock_section();

@@ -107,9 +107,9 @@ typedef struct {
 static kit_runtime_t kit_runtime[NUM_TRACKS];
 
 static prepared_playback_t prepared_playback;
-static prepared_track_pattern_t prepared_patterns[MAX_PATTERNS][NUM_TRACKS];
+static prepared_track_pattern_t prepared_patterns[MAX_PATTERNS][KIT_TRACK_SLOTS];
 static uint32_t prepared_revision[MAX_PATTERNS][NUM_TRACKS];
-static uint64_t clip_mask[PATTERN_BANKS];
+static uint64_t clip_mask[PATTERN_BANKS][NUM_TRACKS / PANEL_TRACKS];
 static uint32_t playback_revision[NUM_TRACKS];
 static uint8_t playback_pattern[NUM_TRACKS];
 
@@ -214,55 +214,63 @@ static inline uint8_t clamp_pattern_steps(uint8_t steps) {
     return steps;
 }
 
-static bool fill_prepared_track(prepared_track_pattern_t *dst,
-                                uint8_t track,
-                                uint8_t pattern_index) {
-    step_t steps[STEPS_PER_PATTERN];
-    uint32_t words[STEPS_PER_PATTERN];
-    kit_config_t kit;
-    uint32_t lock_state = seq_lock();
-    const pattern_t *pat = &g_seq.patterns[pattern_index];
-    dst->length = pattern_get_track_length(pat, track);
-    track_config_t config = pat->tracks[track];
-    // Only what the cell's own type plays.
-    bool is_kit = kit_is_cell(pat, track);
-    if (is_kit) {
-        memcpy(words, pat->kit_steps[track], sizeof(words));
-        kit = g_seq.kit_config[track];
-    } else {
-        memcpy(steps, pat->steps[track], sizeof(steps));
-    }
-    seq_unlock(lock_state);
+typedef struct {
+    track_config_t config;
+    uint8_t length;
+    bool is_kit;
+    union {
+        step_t steps[STEPS_PER_PATTERN];
+        struct {
+            uint32_t words[STEPS_PER_PATTERN];
+            kit_config_t kit;
+        };
+    };
+} track_snapshot_t;
 
-    uint8_t gate_pulses = (config.gate_length_pct * PULSES_PER_STEP) / 100;
+static void snapshot_row_locked(track_snapshot_t *row, uint8_t track, uint8_t pattern) {
+    const pattern_t *pat = &g_seq.patterns[pattern];
+    row->config = pat->tracks[track];
+    row->length = pattern_get_track_length(pat, track);
+    row->is_kit = kit_is_cell(pat, track);
+    if (row->is_kit) {
+        memcpy(row->words, pat->kit_steps[track], sizeof(row->words));
+        row->kit = g_seq.kit_config[track];
+    } else {
+        memcpy(row->steps, pat->steps[track], sizeof(row->steps));
+    }
+}
+
+static bool prepare_row(prepared_track_pattern_t *dst, const track_snapshot_t *row) {
+    dst->length = row->length;
+    const track_config_t *tc = &row->config;
+    uint8_t gate_pulses = (tc->gate_length_pct * PULSES_PER_STEP) / 100;
     if (gate_pulses < 1) gate_pulses = 1;
 
-    if (is_kit) {
+    if (row->is_kit) {
         dst->kind = PREPARED_KIT;
         for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
-            dst->kit.lanes[step] = (config.muted || step >= dst->length) ? 0 : words[step];
+            dst->kit.lanes[step] = (tc->muted || step >= dst->length) ? 0 : row->words[step];
         }
         // Masked here so the ISR builds its release bytes from them as they are.
-        for (uint8_t v = 0; v < KIT_VOICES; v++) dst->kit.note[v] = kit.note[v] & 0x7F;
-        dst->kit.vel[0] = kit.vel_normal;
-        dst->kit.vel[1] = kit.vel_accent;
-        dst->kit.vel[2] = kit.vel_max;
-        dst->kit.channel = config.midi_channel & 0x0F;
+        for (uint8_t v = 0; v < KIT_VOICES; v++) dst->kit.note[v] = row->kit.note[v] & 0x7F;
+        dst->kit.vel[0] = row->kit.vel_normal;
+        dst->kit.vel[1] = row->kit.vel_accent;
+        dst->kit.vel[2] = row->kit.vel_max;
+        dst->kit.channel = tc->midi_channel & 0x0F;
         dst->kit.gate_pulses = gate_pulses;
-        dst->kit.flam_pulses = kit.flam_pulses;
+        dst->kit.flam_pulses = row->kit.flam_pulses;
         // From the words before the blanking: a stored mute does not hide the clip.
-        return kit_cell_has_clip(words, dst->length);
+        return kit_cell_has_clip(row->words, dst->length);
     }
 
     dst->kind = PREPARED_EVENTS;
     bool has_clip = false;
     for (uint8_t step = 0; step < dst->length; step++) {
-        if (steps[step].flags & STEP_FLAG_ACTIVE) has_clip = true;
+        if (row->steps[step].flags & STEP_FLAG_ACTIVE) has_clip = true;
     }
 
     for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
-        const step_t *src_step = &steps[step];
-        const track_config_t *tc = &config;
+        const step_t *src_step = &row->steps[step];
         prepared_track_event_t *dst_event = &dst->step[step];
 
         dst_event->flags = src_step->flags;
@@ -326,9 +334,9 @@ static void prepare_note_off(uint8_t track) {
 }
 
 static void prepare_trigger(uint8_t track, const prepared_track_event_t *event,
-                            uint8_t track_mutes) {
+                            track_mask_t track_mutes) {
     // Check global mute bitmask
-    if (track_mutes & (1u << track)) return;
+    if (track_mutes & TRACK_BIT(track)) return;
     if (!(event->flags & STEP_FLAG_ACTIVE)) return;
 
     uint8_t note = event->note;
@@ -436,9 +444,9 @@ static void __not_in_flash_func(kit_release)(uint8_t track) {
 // bytes and may overtake it on the wire; it still goes before the next run's notes.
 // Its buffer is guarded by the playback lock all callers hold.
 static void kit_release_all(void) {
-    static uint8_t message[NUM_TRACKS * KIT_VOICES * 3];
+    static uint8_t message[KIT_TRACK_SLOTS * KIT_VOICES * 3];
     uint16_t length = 0;
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+    for (uint8_t track = 0; track < KIT_TRACK_SLOTS; track++) {
         length += kit_take_release(track, &message[length]);
     }
     if (length) midi_send_bytes(message, length);
@@ -526,13 +534,22 @@ static void load_prepared_track(uint8_t track) {
     uint32_t lock_state = seq_lock();
     uint8_t pattern = g_seq.transport.current_pattern[track];
     if (pattern >= MAX_PATTERNS) pattern = 0;
-    if (playback_pattern[track] != pattern ||
-        playback_revision[track] != prepared_revision[pattern][track]) {
-        prepared_playback.track[track] = prepared_patterns[pattern][track];
-        playback_revision[track] = prepared_revision[pattern][track];
-        playback_pattern[track] = pattern;
+    uint32_t revision = prepared_revision[pattern][track];
+    if (playback_pattern[track] == pattern && playback_revision[track] == revision) {
+        seq_unlock(lock_state);
+        return;
     }
-    seq_unlock(lock_state);
+    if (track < KIT_TRACK_SLOTS) {
+        prepared_playback.track[track] = prepared_patterns[pattern][track];
+        seq_unlock(lock_state);
+    } else {
+        track_snapshot_t row;
+        snapshot_row_locked(&row, track, pattern);
+        seq_unlock(lock_state);
+        prepare_row(&prepared_playback.track[track], &row);
+    }
+    playback_revision[track] = revision;
+    playback_pattern[track] = pattern;
     if (prepared_playback.track[track].kind == old_kind) return;
     if (old_kind == PREPARED_KIT) {
         kit_release(track);
@@ -603,9 +620,9 @@ static void panic_playback(void) {
 
 // ─── Song mode advancement ──────────────────────────────────────
 
-static uint8_t advance_song_position(void) {
+static track_mask_t advance_song_position(void) {
     bool should_stop = false;
-    uint8_t changed_mask = 0;
+    track_mask_t changed_mask = 0;
     uint32_t lock_state = seq_lock();
     transport_t *t = (transport_t *)&g_seq.transport;
     const song_t *s = &g_seq.song;
@@ -665,7 +682,7 @@ static uint8_t advance_song_position(void) {
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         uint8_t next_pattern = s->entries[t->song_position].pattern_index[track];
         if (t->current_pattern[track] != next_pattern) {
-            changed_mask |= (uint8_t)(1u << track);
+            changed_mask |= TRACK_BIT(track);
             t->current_pattern[track] = next_pattern;
         }
     }
@@ -708,9 +725,11 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
 
     // A mute cuts an already sounding note on the next internal pulse. A kit with
     // nothing sounding and no flam pending has nothing to release.
-    uint8_t track_mutes = g_seq.track_mutes;
+    uint32_t mute_lock = seq_lock();
+    track_mask_t track_mutes = g_seq.track_mutes;
+    seq_unlock(mute_lock);
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if (track_mutes & (1u << track)) {
+        if (track_mutes & TRACK_BIT(track)) {
             send_note_off_if_active(track);
             if (kit_runtime[track].sounding || kit_runtime[track].flam_countdown) {
                 kit_release(track);
@@ -748,12 +767,12 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
         if (t->mode == PLAY_MODE_SONG &&
             t->pulse_count > 0 &&
             (global_step_count % STEPS_PER_PATTERN) == 0) {
-            uint8_t changed_mask = advance_song_position();
+            track_mask_t changed_mask = advance_song_position();
             if (t->state != TRANSPORT_PLAYING) {
                 goto isr_done;
             }
             for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
-                if (changed_mask & (1u << tr)) {
+                if (changed_mask & TRACK_BIT(tr)) {
                     t->track_step_count[tr] = 0;
                 }
             }
@@ -803,10 +822,10 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
             const prepared_track_pattern_t *row = &prepared->track[tr];
             if (row->kind == PREPARED_KIT) {
                 // A live mute released the voices in this pulse already.
-                if (!(track_mutes & (1u << tr))) play_kit_step((uint8_t)tr, row, track_step);
+                if (!(track_mutes & TRACK_BIT(tr))) play_kit_step((uint8_t)tr, row, track_step);
             } else {
                 const prepared_track_event_t *event = &row->step[track_step];
-                if (!(event->flags & STEP_FLAG_ACTIVE) || (track_mutes & (1u << tr))) {
+                if (!(event->flags & STEP_FLAG_ACTIVE) || (track_mutes & TRACK_BIT(tr))) {
                     prepare_note_off(tr);
                 } else {
                     prepare_trigger(tr, event, track_mutes);
@@ -1057,7 +1076,7 @@ launch_quant_t transport_get_launch_quant(void) {
     return (launch_quant_t)g_seq.launch_quant;
 }
 
-static bool queue_patterns(uint8_t track_mask, uint8_t pattern_index) {
+static bool queue_patterns(track_mask_t track_mask, uint8_t pattern_index) {
     if (pattern_index >= MAX_PATTERNS) return false;
     uint32_t playback_irq_state = playback_lock();
     if (g_seq.transport.mode != PLAY_MODE_PATTERN) {
@@ -1067,7 +1086,7 @@ static bool queue_patterns(uint8_t track_mask, uint8_t pattern_index) {
     uint32_t lock_state = seq_lock();
     transport_t *t = (transport_t *)&g_seq.transport;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if (!(track_mask & (1u << track))) continue;
+        if (!(track_mask & TRACK_BIT(track))) continue;
         if (t->state == TRANSPORT_PLAYING) {
             t->queued_pattern[track] = pattern_index;
         } else {
@@ -1083,15 +1102,15 @@ static bool queue_patterns(uint8_t track_mask, uint8_t pattern_index) {
 }
 
 bool transport_queue_pattern(uint8_t pattern_index) {
-    return queue_patterns(UINT8_MAX, pattern_index);
+    return queue_patterns(ALL_TRACKS, pattern_index);
 }
 
 bool transport_queue_track_pattern(uint8_t track, uint8_t pattern_index) {
     if (track >= NUM_TRACKS) return false;
-    return queue_patterns((uint8_t)(1u << track), pattern_index);
+    return queue_patterns(TRACK_BIT(track), pattern_index);
 }
 
-bool transport_launch(uint8_t track_mask, uint8_t pattern_index) {
+bool transport_launch(track_mask_t track_mask, uint8_t pattern_index) {
     if (pattern_index >= MAX_PATTERNS) return false;
     // The decision reads current and queued under the same locks as the write,
     // so the timer cannot apply a queue between the two.
@@ -1104,12 +1123,12 @@ bool transport_launch(uint8_t track_mask, uint8_t pattern_index) {
     transport_t *t = (transport_t *)&g_seq.transport;
     bool cancel = false;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if ((track_mask & (1u << track)) && t->queued_pattern[track] == pattern_index) {
+        if ((track_mask & TRACK_BIT(track)) && t->queued_pattern[track] == pattern_index) {
             cancel = true;
         }
     }
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if (!(track_mask & (1u << track))) continue;
+        if (!(track_mask & TRACK_BIT(track))) continue;
         if (cancel || t->current_pattern[track] == pattern_index) {
             t->queued_pattern[track] = NO_QUEUED_PATTERN;
         } else if (t->state == TRANSPORT_PLAYING) {
@@ -1145,7 +1164,7 @@ void __not_in_flash_func(sequencer_snapshot)(transport_snapshot_t *out) {
         out->track_step[track] = t->current_track_step[track];
         uint8_t pattern = t->current_pattern[track];
         if (pattern < MAX_PATTERNS && g_seq.patterns[pattern].tracks[track].muted) {
-            out->stored_mutes |= (uint8_t)(1u << track);
+            out->stored_mutes |= TRACK_BIT(track);
         }
     }
     seq_unlock(lock_state);
@@ -1153,9 +1172,13 @@ void __not_in_flash_func(sequencer_snapshot)(transport_snapshot_t *out) {
 }
 
 uint64_t sequencer_clip_mask(uint8_t bank) {
-    if (bank >= PATTERN_BANKS) return 0;
+    return sequencer_page_clips(bank, 0);
+}
+
+uint64_t sequencer_page_clips(uint8_t bank, uint8_t page) {
+    if (bank >= PATTERN_BANKS || page >= NUM_TRACKS / PANEL_TRACKS) return 0;
     uint32_t lock_state = seq_lock();
-    uint64_t mask = clip_mask[bank];
+    uint64_t mask = clip_mask[bank][page];
     seq_unlock(lock_state);
     return mask;
 }
@@ -1186,13 +1209,17 @@ void sequencer_refresh_track_playback(uint8_t track, uint8_t pattern_index) {
     if (pattern_index >= MAX_PATTERNS) return;
 
     prepared_track_pattern_t updated;
-    bool has_clip = fill_prepared_track(&updated, track, pattern_index);
-
     uint32_t lock_state = seq_lock();
-    uint64_t bit = 1ull << (track * 8 + pattern_index % PATTERNS_PER_BANK);
+    track_snapshot_t row;
+    snapshot_row_locked(&row, track, pattern_index);
+    seq_unlock(lock_state);
+    bool has_clip = prepare_row(&updated, &row);
+    lock_state = seq_lock();
+    uint64_t bit = 1ull << ((track % PANEL_TRACKS) * 8 + pattern_index % PATTERNS_PER_BANK);
     uint8_t bank = pattern_index / PATTERNS_PER_BANK;
-    clip_mask[bank] = has_clip ? (clip_mask[bank] | bit) : (clip_mask[bank] & ~bit);
-    prepared_patterns[pattern_index][track] = updated;
+    uint64_t *page = &clip_mask[bank][track / PANEL_TRACKS];
+    *page = has_clip ? (*page | bit) : (*page & ~bit);
+    if (track < KIT_TRACK_SLOTS) prepared_patterns[pattern_index][track] = updated;
     prepared_revision[pattern_index][track]++;
     seq_unlock(lock_state);
 }

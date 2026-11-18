@@ -98,20 +98,20 @@ int sim_midi_song_open(void) { return ui_open_midi_song(); }
 int sim_dbg_transport_state(void) { return g_seq.transport.state; }
 double sim_dbg_bpm(void) { return g_seq.transport.bpm; }
 uint32_t sim_dbg_pulse(void) { return g_seq.transport.pulse_count; }
-int sim_dbg_current(int track) { return g_seq.transport.current_pattern[track & 7]; }
-int sim_dbg_queued(int track) { return g_seq.transport.queued_pattern[track & 7]; }
+int sim_dbg_current(int track) { return g_seq.transport.current_pattern[track & (NUM_TRACKS - 1)]; }
+int sim_dbg_queued(int track) { return g_seq.transport.queued_pattern[track & (NUM_TRACKS - 1)]; }
 uint32_t sim_dbg_step(int location, int track, int step) {
-    const step_t *s = &g_seq.patterns[location & 31].steps[track & 7][step & 15];
+    const step_t *s = &g_seq.patterns[location & 31].steps[track & (NUM_TRACKS - 1)][step & 15];
     return s->note | ((uint32_t)s->velocity << 8) | ((uint32_t)s->flags << 16);
 }
 uint32_t sim_dbg_kit_step(int location, int track, int step) {
-    return g_seq.patterns[location & 31].kit_steps[track & 7][step & 15];
+    return (unsigned)track < KIT_TRACK_SLOTS ? g_seq.patterns[location & 31].kit_steps[track][step & 15] : 0;
 }
 int sim_dbg_track_length(int location, int track) {
-    return pattern_get_track_length(&g_seq.patterns[location & 31], track & 7);
+    return pattern_get_track_length(&g_seq.patterns[location & 31], track & (NUM_TRACKS - 1));
 }
 uint32_t sim_dbg_track_config(int track) {
-    const track_config_t *c = &g_seq.patterns[0].tracks[track & 7];
+    const track_config_t *c = &g_seq.patterns[0].tracks[track & (NUM_TRACKS - 1)];
     return (uint32_t)c->type | ((uint32_t)c->midi_channel << 8) |
            ((uint32_t)c->gate_length_pct << 16) | ((uint32_t)c->output_mode << 24) |
            ((uint32_t)c->cv_channel << 26);

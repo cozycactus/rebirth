@@ -16,26 +16,14 @@
 
 // ─── Flash layout ──────────────────────────────────────────────
 //
-// Last 128 KB of the 2 MB Pico flash is reserved for storage.
-//
-// Version 6 (written):
-//   Byte 0              : Header (1 page = 256 bytes)
-//   Byte 256            : Patterns (4 banks x 8 slots x sizeof(pattern_t))
-//   Byte 256+PAT        : Song (padded to page boundary)
-//   Byte 256+PAT+SONG   : Kit settings, kit_config[NUM_TRACKS] (page-padded)
-//
-// Versions 4 and 5 (load only): the same header, then patterns as
-// pattern_v5_t records, then the song at 256 + page-rounded legacy patterns.
-// Version 4 has no checksum; version 5 checksums legacy patterns + song.
-//
-// RP2040 flash constants (always these values for the Pico):
+// v7 lives immediately before the MIDI Song slot. A new save leaves the
+// last 128 KiB intact so the original eight-track firmware can still read it.
 #define FLASH_PAGE      256u
-#define FLASH_SECTOR    4096u
-
-#define FLASH_SZ        (2u * 1024u * 1024u)
-#define STORE_RESERVED  (128u * 1024u)
-#define STORE_OFFSET    (FLASH_SZ - STORE_RESERVED)   // raw flash offset
-#define STORE_ERASE     STORE_RESERVED                 // erase the full 128 KB
+#define STORE_OFFSET    0x000b0000u
+#define STORE_RESERVED  0x00030000u
+#define STORE_ERASE     STORE_RESERVED
+#define OLD_STORE       0x001e0000u
+#define OLD_TRACKS      8
 
 #define PAGE_ROUND(n)   (((n) + FLASH_PAGE - 1u) & ~(FLASH_PAGE - 1u))
 
@@ -54,50 +42,43 @@
 #define KIT_BYTES       (sizeof(kit_config_t) * NUM_TRACKS)
 #define KIT_SIZE        PAGE_ROUND(KIT_BYTES)
 
-// Versions 4 and 5: patterns were pattern_t before kit_steps was added.
-// Frozen: this is the pre-v6 pattern_t, the record v4 and v5 saves were written
-// with. Never change it to follow pattern_t; and step_t and track_config_t, which
-// it embeds, must not change size or layout, or v4/v5 saves no longer load.
+// On-flash records from the eight-track firmware, including its ABI padding.
 typedef struct {
-    step_t         steps[NUM_TRACKS][STEPS_PER_PATTERN];
-    track_config_t tracks[NUM_TRACKS];
-    uint8_t        length;
-    uint8_t        track_length[NUM_TRACKS];
-    uint8_t        swing;
-    char           name[9];
+    step_t steps[OLD_TRACKS][STEPS_PER_PATTERN];
+    track_config_t tracks[OLD_TRACKS];
+    uint8_t length, track_length[OLD_TRACKS], swing;
+    char name[9];
 } pattern_v5_t;
+typedef struct {
+    step_t steps[OLD_TRACKS][STEPS_PER_PATTERN];
+    track_config_t tracks[OLD_TRACKS];
+    uint8_t length, track_length[OLD_TRACKS], swing;
+    char name[9];
+    uint32_t kit_steps[OLD_TRACKS][STEPS_PER_PATTERN];
+} pattern_v6_t;
+typedef struct {
+    struct { uint8_t pattern_index[OLD_TRACKS], repeats; } entries[MAX_SONG_ENTRIES];
+    uint16_t length;
+    song_end_mode_t end_mode;
+    char name[9];
+} old_song_t;
 
-// A legacy record is the start of today's pattern_t, field for field.
-_Static_assert(offsetof(pattern_v5_t, steps) == offsetof(pattern_t, steps), "v5 steps");
-_Static_assert(offsetof(pattern_v5_t, tracks) == offsetof(pattern_t, tracks), "v5 tracks");
-_Static_assert(offsetof(pattern_v5_t, length) == offsetof(pattern_t, length), "v5 length");
-_Static_assert(offsetof(pattern_v5_t, track_length) == offsetof(pattern_t, track_length),
-               "v5 track_length");
-_Static_assert(offsetof(pattern_v5_t, swing) == offsetof(pattern_t, swing), "v5 swing");
-_Static_assert(offsetof(pattern_v5_t, name) == offsetof(pattern_t, name), "v5 name");
-_Static_assert(sizeof(pattern_v5_t) <= offsetof(pattern_t, kit_steps),
-               "a v5 record must end before kit_steps");
-// The records as the RP2040 (short enums) writes them: saves made by earlier firmware
-// must keep loading. A host build with -fshort-enums (CI) runs the same code.
 #if defined(__arm__)
-_Static_assert(sizeof(pattern_v5_t) == 459, "v4/v5 pattern record on the RP2040");
-_Static_assert(offsetof(pattern_t, kit_steps) == 460, "v6 kit_steps offset on the RP2040");
-_Static_assert(sizeof(pattern_t) == 972, "v6 pattern record on the RP2040");
+_Static_assert(sizeof(pattern_v5_t) == 459 && sizeof(pattern_v6_t) == 972, "legacy pattern ABI");
+_Static_assert(sizeof(old_song_t) == 2316, "legacy song ABI");
 #endif
-
 #define V5_PAT_BYTES    (sizeof(pattern_v5_t) * MAX_PATTERNS)
 #define V5_SONG_OFFSET  (PAT_OFFSET + PAGE_ROUND(V5_PAT_BYTES))
-
-// Sanity: total storage fits in reserved region
+#define V6_PAT_BYTES    (sizeof(pattern_v6_t) * MAX_PATTERNS)
+#define V6_SONG_OFFSET  (PAT_OFFSET + PAGE_ROUND(V6_PAT_BYTES))
+#define V6_KIT_OFFSET   (V6_SONG_OFFSET + PAGE_ROUND(sizeof(old_song_t)))
 _Static_assert(HDR_SIZE + PAT_SIZE + SONG_SIZE + KIT_SIZE <= STORE_RESERVED,
-               "flash storage too large for reserved region");
-_Static_assert(V5_SONG_OFFSET + PAGE_ROUND(sizeof(song_t)) <= STORE_RESERVED,
-               "legacy flash storage too large for reserved region");
+               "64-track save exceeds its flash slot");
 
 // ─── Header ────────────────────────────────────────────────────
 
 #define MAGIC   0x52425448u     // 'RBTH'
-#define VERSION 6u
+#define VERSION 7u
 #define V5_VERSION 5u
 #define LEGACY_VERSION 4u
 
@@ -115,8 +96,19 @@ _Static_assert(sizeof(store_header_t) == FLASH_PAGE,
 // ─── API ───────────────────────────────────────────────────────
 
 #ifndef MOCK_HARDWARE
-// The save's copy of the patterns, padded to whole flash pages.
-static uint8_t pattern_buf[PAT_SIZE];
+// Program complete pages directly from the stopped sequencer's RAM. Only a
+// partial final page needs padding. The caller has parked Core 1.
+static void program_payload(uint32_t offset, const void *data, size_t bytes) {
+    const uint8_t *src = data;
+    size_t aligned = bytes - bytes % FLASH_PAGE;
+    if (aligned) flash_range_program(offset, src, aligned);
+    if (aligned < bytes) {
+        uint8_t tail[FLASH_PAGE];
+        memset(tail, 0xff, sizeof(tail));
+        memcpy(tail, src + aligned, bytes - aligned);
+        flash_range_program(offset + aligned, tail, sizeof(tail));
+    }
+}
 
 // Panel keys, step buttons and encoder buttons held or changed during the
 // stall must not fire afterwards.
@@ -137,7 +129,7 @@ static uint32_t crc32_update(uint32_t crc, const void *data, size_t length) {
     return crc;
 }
 
-// Version 6: patterns + song + kit settings.
+// Version 7: patterns + song + kit settings.
 static uint32_t payload_checksum(const void *patterns, const void *song, const void *kits) {
     uint32_t crc = crc32_update(UINT32_MAX, patterns, PAT_BYTES);
     crc = crc32_update(crc, song, SONG_BYTES);
@@ -146,7 +138,7 @@ static uint32_t payload_checksum(const void *patterns, const void *song, const v
 
 // Version 5: legacy patterns + song.
 static uint32_t payload_checksum_v5(const void *patterns, const void *song) {
-    return ~crc32_update(crc32_update(UINT32_MAX, patterns, V5_PAT_BYTES), song, SONG_BYTES);
+    return ~crc32_update(crc32_update(UINT32_MAX, patterns, V5_PAT_BYTES), song, sizeof(old_song_t));
 }
 
 static bool song_valid(const song_t *song) {
@@ -160,23 +152,23 @@ static bool song_valid(const song_t *song) {
     return true;
 }
 
-// The part of a pattern record that versions 4, 5 and 6 share.
-static bool pattern_core_valid(const pattern_v5_t *p, bool allow_kit) {
-    if (p->length < 1 || p->length > STEPS_PER_PATTERN ||
-        p->swing > 99 || p->name[8] != '\0') return false;
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        const track_config_t *tc = &p->tracks[track];
+static bool pattern_core_valid(const step_t steps[][STEPS_PER_PATTERN], const track_config_t *tracks,
+                               const uint8_t *lengths, uint8_t count, uint8_t length,
+                               uint8_t swing, const char name[9], bool allow_kit) {
+    if (!length || length > STEPS_PER_PATTERN || swing > 99 || name[8]) return false;
+    for (uint8_t track = 0; track < count; track++) {
+        const track_config_t *tc = &tracks[track];
         uint8_t mute;
         memcpy(&mute, &tc->muted, sizeof(mute));
         bool type_ok = tc->type == TRACK_TYPE_SYNTH || tc->type == TRACK_TYPE_DRUM ||
-                       (allow_kit && tc->type == TRACK_TYPE_KIT);
-        if (mute > 1 || p->track_length[track] > STEPS_PER_PATTERN || !type_ok ||
+                       (allow_kit && track < KIT_TRACK_SLOTS && tc->type == TRACK_TYPE_KIT);
+        if (mute > 1 || lengths[track] > STEPS_PER_PATTERN || !type_ok ||
             tc->midi_channel > 15 || tc->drum_note > 127 ||
             tc->output_mode < OUTPUT_MIDI_ONLY || tc->output_mode > OUTPUT_BOTH ||
             tc->cv_channel >= NUM_CV_CHANNELS ||
             tc->gate_length_pct < 10 || tc->gate_length_pct > 100) return false;
         for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
-            const step_t *s = &p->steps[track][step];
+            const step_t *s = &steps[track][step];
             if (s->note > 127 || s->velocity > 127 || (s->flags & 0xF0u)) return false;
         }
     }
@@ -188,30 +180,58 @@ static bool payload_valid(const pattern_t *patterns, const song_t *song,
     if (!song_valid(song)) return false;
     for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
         const pattern_t *p = &patterns[pattern];
-        // pattern_t starts with a pattern_v5_t, field for field.
-        if (!pattern_core_valid((const pattern_v5_t *)p, true)) return false;
-        for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        if (!pattern_core_valid(p->steps, p->tracks, p->track_length, NUM_TRACKS,
+                                p->length, p->swing, p->name, true)) return false;
+        for (uint8_t track = 0; track < KIT_TRACK_SLOTS; track++) {
             for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
                 uint32_t word = p->kit_steps[track][step];
                 if ((word >> 24) != 0 || (word & 3u) > 1u) return false;
             }
         }
     }
-    if (__builtin_popcount(kit_track_mask(patterns, MAX_PATTERNS)) > MAX_KIT_TRACKS) return false;
+    if (__builtin_popcountll(kit_track_mask(patterns, MAX_PATTERNS)) > MAX_KIT_TRACKS) return false;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         if (!kit_config_valid(&kits[track])) return false;
     }
     return true;
 }
 
-static bool payload_valid_v5(const uint8_t *base) {
-    if (!song_valid((const song_t *)(base + V5_SONG_OFFSET))) return false;
-    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
-        pattern_v5_t record;
-        memcpy(&record, base + PAT_OFFSET + pattern * sizeof(pattern_v5_t), sizeof(record));
-        if (!pattern_core_valid(&record, false)) return false;
+static bool old_image_valid(const uint8_t *base) {
+    const store_header_t *h = (const store_header_t *)base;
+    if (h->magic != MAGIC || (h->version != 4 && h->version != 5 && h->version != 6)) return false;
+    const bool kit = h->version == 6;
+    const old_song_t *song = (const old_song_t *)(base + (kit ? V6_SONG_OFFSET : V5_SONG_OFFSET));
+    if (song->length > MAX_SONG_ENTRIES || song->name[8] ||
+        (song->end_mode != SONG_END_LOOP && song->end_mode != SONG_END_STOP)) return false;
+    for (unsigned i = 0; i < song->length; i++)
+        for (unsigned t = 0; t < OLD_TRACKS; t++)
+            if (song->entries[i].pattern_index[t] >= MAX_PATTERNS) return false;
+    uint8_t kits = 0;
+    const size_t stride = kit ? sizeof(pattern_v6_t) : sizeof(pattern_v5_t);
+    for (unsigned i = 0; i < MAX_PATTERNS; i++) {
+        pattern_v5_t p; // v5 stride is odd with the RP2040 ABI
+        const uint8_t *record = base + PAT_OFFSET + stride * i;
+        memcpy(&p, record, sizeof(p));
+        if (!pattern_core_valid(p.steps, p.tracks, p.track_length, OLD_TRACKS,
+                                p.length, p.swing, p.name, kit)) return false;
+        if (kit) {
+            const pattern_v6_t *v6 = (const pattern_v6_t *)record;
+            for (unsigned t = 0; t < OLD_TRACKS; t++) {
+                if (p.tracks[t].type == TRACK_TYPE_KIT) kits |= 1u << t;
+                for (unsigned j = 0; j < STEPS_PER_PATTERN; j++) {
+                    uint32_t word = v6->kit_steps[t][j];
+                    if (word >> 24 || (word & 3u) > 1u) return false;
+                }
+            }
+        }
     }
-    return true;
+    if (!kit) return h->version == 4 || h->checksum == payload_checksum_v5(base + PAT_OFFSET, song);
+    const kit_config_t *settings = (const kit_config_t *)(base + V6_KIT_OFFSET);
+    if (__builtin_popcount(kits) > MAX_KIT_TRACKS) return false;
+    for (unsigned t = 0; t < OLD_TRACKS; t++) if (!kit_config_valid(&settings[t])) return false;
+    uint32_t crc = crc32_update(UINT32_MAX, base + PAT_OFFSET, V6_PAT_BYTES);
+    crc = crc32_update(crc, song, sizeof(*song));
+    return h->checksum == ~crc32_update(crc, settings, OLD_TRACKS * sizeof(*settings));
 }
 #endif
 
@@ -219,7 +239,7 @@ bool flash_storage_is_valid(void) {
 #ifndef MOCK_HARDWARE
     const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
     const store_header_t *h = (const store_header_t *)base;
-    if (h->magic != MAGIC) return false;
+    if (h->magic != MAGIC) return old_image_valid((const uint8_t *)(XIP_BASE + OLD_STORE));
     if (h->version == VERSION) {
         const pattern_t *patterns = (const pattern_t *)(base + PAT_OFFSET);
         const song_t *song = (const song_t *)(base + SONG_OFFSET);
@@ -227,11 +247,7 @@ bool flash_storage_is_valid(void) {
         return payload_valid(patterns, song, kits) &&
                h->checksum == payload_checksum(patterns, song, kits);
     }
-    if (h->version != V5_VERSION && h->version != LEGACY_VERSION) return false;
-    if (!payload_valid_v5(base)) return false;
-    // Version 4 had the same payload as 5, without a checksum.
-    return h->version == LEGACY_VERSION ||
-           h->checksum == payload_checksum_v5(base + PAT_OFFSET, base + V5_SONG_OFFSET);
+    return false;
 #else
     return false;
 #endif
@@ -249,31 +265,9 @@ bool flash_storage_save(void) {
     hdr.magic   = MAGIC;
     hdr.version = (uint8_t)VERSION;
 
-    // Build padded pattern, song and kit buffers. Flash programming length
-    // must be page-aligned, so never read beyond the object being serialized.
-    memset(pattern_buf, 0xFF, sizeof(pattern_buf));
-
-    static uint8_t song_buf[SONG_SIZE];
-    memset(song_buf, 0xFF, sizeof(song_buf));
-
-    static uint8_t kit_buf[KIT_SIZE];
-    memset(kit_buf, 0xFF, sizeof(kit_buf));
-
-    // seq_lock() keeps Core 0's interrupts off, the UART TX interrupt with them:
-    // send what is still queued (the Stop and its releases) first, then copy one
-    // location per lock section. Stopped, nothing else writes this data meanwhile.
-    midi_wait_output_idle();
-    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
-        uint32_t lock_state = seq_lock();
-        memcpy(pattern_buf + pattern * sizeof(pattern_t), &g_seq.patterns[pattern],
-               sizeof(pattern_t));
-        seq_unlock(lock_state);
-    }
-    uint32_t lock_state = seq_lock();
-    memcpy(song_buf, &g_seq.song, SONG_BYTES);
-    memcpy(kit_buf, g_seq.kit_config, KIT_BYTES);
-    seq_unlock(lock_state);
-    hdr.checksum = payload_checksum(pattern_buf, song_buf, kit_buf);
+    // Core 0 owns edits and Save is synchronous. Stopped Core 1 never
+    // writes patterns, the song or kit settings.
+    hdr.checksum = payload_checksum(g_seq.patterns, &g_seq.song, g_seq.kit_config);
 
     // Pause Core 1 so it won't execute from flash during the write
     // Finish any Stop/Note Off bytes before UART interrupts are suspended.
@@ -286,14 +280,9 @@ bool flash_storage_save(void) {
 
     flash_range_erase(STORE_OFFSET, STORE_ERASE);
 
-    flash_range_program(STORE_OFFSET + PAT_OFFSET,
-                        pattern_buf, PAT_SIZE);
-
-    flash_range_program(STORE_OFFSET + SONG_OFFSET,
-                        song_buf, SONG_SIZE);
-
-    flash_range_program(STORE_OFFSET + KIT_OFFSET,
-                        kit_buf, KIT_SIZE);
+    program_payload(STORE_OFFSET + PAT_OFFSET, g_seq.patterns, PAT_BYTES);
+    program_payload(STORE_OFFSET + SONG_OFFSET, &g_seq.song, SONG_BYTES);
+    program_payload(STORE_OFFSET + KIT_OFFSET, g_seq.kit_config, KIT_BYTES);
 
     // Mark this save valid only after all payloads have been programmed.
     flash_range_program(STORE_OFFSET + HDR_OFFSET,
@@ -303,7 +292,7 @@ bool flash_storage_save(void) {
     multicore_lockout_end_blocking();
     // Whether or not the new save validates.
     resync_inputs();
-    return flash_storage_is_valid();
+    return ((const store_header_t *)(XIP_BASE + STORE_OFFSET))->magic == MAGIC && flash_storage_is_valid();
 #else
     return false;
 #endif
@@ -316,35 +305,46 @@ bool flash_storage_load(void) {
 
     const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
     const store_header_t *h = (const store_header_t *)base;
-    bool v6 = h->version == VERSION;
-    // As in the save: MIDI idle first, then one location per lock section.
+    bool current = h->magic == MAGIC;
+    const uint8_t *old = (const uint8_t *)(XIP_BASE + OLD_STORE);
+    bool v6 = !current && ((const store_header_t *)old)->version == 6;
     midi_wait_output_idle();
-    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
-        uint32_t lock_state = seq_lock();
-        if (v6) {
-            memcpy(&g_seq.patterns[pattern], base + PAT_OFFSET + pattern * sizeof(pattern_t),
-                   sizeof(pattern_t));
+    for (uint8_t i = 0; i < MAX_PATTERNS; i++) {
+        pattern_t *dst = &g_seq.patterns[i];
+        uint32_t lock = seq_lock();
+        if (current) {
+            memcpy(dst, base + PAT_OFFSET + i * sizeof(*dst), sizeof(*dst));
         } else {
-            // Legacy save: every record becomes the start of a zeroed pattern_t
-            // (no kit steps).
-            memset(&g_seq.patterns[pattern], 0, sizeof(pattern_t));
-            memcpy(&g_seq.patterns[pattern],
-                   base + PAT_OFFSET + pattern * sizeof(pattern_v5_t), sizeof(pattern_v5_t));
+            const uint8_t *src = old + PAT_OFFSET + i * (v6 ? sizeof(pattern_v6_t) : sizeof(pattern_v5_t));
+            pattern_v5_t p;
+            memcpy(&p, src, sizeof(p));
+            pattern_init(dst, i);
+            memcpy(dst->steps, p.steps, sizeof(p.steps));
+            memcpy(dst->tracks, p.tracks, sizeof(p.tracks));
+            memcpy(dst->track_length, p.track_length, sizeof(p.track_length));
+            memcpy(dst->name, p.name, sizeof(p.name));
+            dst->length = p.length;
+            dst->swing = p.swing;
+            if (v6) memcpy(dst->kit_steps, ((const pattern_v6_t *)src)->kit_steps, sizeof(dst->kit_steps));
         }
-        seq_unlock(lock_state);
+        seq_unlock(lock);
     }
-    uint32_t lock_state = seq_lock();
-    if (v6) {
-        memcpy(&g_seq.song, base + SONG_OFFSET, sizeof(g_seq.song));
-        memcpy(g_seq.kit_config, base + KIT_OFFSET, sizeof(g_seq.kit_config));
+    if (current) {
+        memcpy(&g_seq.song, base + SONG_OFFSET, SONG_BYTES);
+        memcpy(g_seq.kit_config, base + KIT_OFFSET, KIT_BYTES);
     } else {
-        // Legacy save: every track gets default kit settings.
-        memcpy(&g_seq.song, base + V5_SONG_OFFSET, sizeof(g_seq.song));
-        for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-            kit_config_defaults(&g_seq.kit_config[track]);
+        const old_song_t *song = (const old_song_t *)(old + (v6 ? V6_SONG_OFFSET : V5_SONG_OFFSET));
+        memset(&g_seq.song, 0, sizeof(g_seq.song));
+        g_seq.song.length = song->length;
+        g_seq.song.end_mode = song->end_mode;
+        memcpy(g_seq.song.name, song->name, sizeof(song->name));
+        for (unsigned i = 0; i < song->length; i++) {
+            memcpy(g_seq.song.entries[i].pattern_index, song->entries[i].pattern_index, OLD_TRACKS);
+            g_seq.song.entries[i].repeats = song->entries[i].repeats;
         }
+        for (unsigned t = 0; t < NUM_TRACKS; t++) kit_config_defaults(&g_seq.kit_config[t]);
+        if (v6) memcpy(g_seq.kit_config, old + V6_KIT_OFFSET, OLD_TRACKS * sizeof(kit_config_t));
     }
-    seq_unlock(lock_state);
     for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
         for (uint8_t track = 0; track < NUM_TRACKS; track++) {
             sequencer_refresh_track_playback(track, pattern);

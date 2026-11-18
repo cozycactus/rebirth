@@ -60,7 +60,8 @@ function fixture() {
   device.play(false, t + 80000);
   device.runUntil(t + 125000);
   const lit = device.leds();
-  assert.ok(lit[63 * 3 + 1] >= 24, 'an active track lights pad 64');
+  assert.ok(!lit.subarray(0, 64 * 3).some(Boolean), 'a linear MIDI stream contains no Session clips');
+  assert.ok(lit[73 * 3 + 1] >= 24, 'active track 2 lights the second MUTE key');
   assert.deepEqual([...lit.subarray(0, 3)], [0, 0, 0], 'metadata track has no pad light');
   device.runUntil(t + 1e6);
   const all = device.drain();
@@ -79,12 +80,18 @@ function fixture() {
   assert.equal(device.inspect().midiOverflow, 0);
   assert.equal(device.gates(), 0);
   const idle = device.leds();
-  assert.ok(idle[63 * 3 + 1] > 0 && idle[63 * 3 + 1] < 24, 'a loaded track stays visible after playback');
+  assert.ok(idle[73 * 3 + 1] > 0 && idle[73 * 3 + 1] < 24, 'loaded track remains visible on its MUTE key');
   assert.ok(device.openMidiSong(image));
   const restart = device.now();
   for (let edge = 0; edge < 28; edge++) device.encoderEdge(0, 1, restart + 1000 + edge * 3000);
+  // Touch a clip row and a SCENE after turning TRACK to the last page.
+  // The MUTE below the eighth column must still address track 64.
+  device.pad(7, 1, true, restart + 100000);
+  device.pad(7, 1, false, restart + 160000);
   device.play(true, restart + 120000);
   device.play(false, restart + 200000);
+  device.scene(2, true, restart + 200000);
+  device.scene(2, false, restart + 270000);
   device.mute(7, true, restart + 300000);
   device.mute(7, false, restart + 380000);
   device.runUntil(restart + 1e6);

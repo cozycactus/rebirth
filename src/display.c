@@ -6,9 +6,12 @@
 
 // ─── Track Names ───────────────────────────────────────────────
 
-static const char *track_names[NUM_TRACKS] = {
-    "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8",
-};
+// All callers render on Core 0 and use one track label per draw call.
+static const char *track_name(uint8_t track) {
+    static char label[5];
+    snprintf(label, sizeof(label), "T%u", (unsigned)track + 1u);
+    return label;
+}
 
 static void pattern_label(uint8_t pattern, char *buf, size_t len) {
     snprintf(buf, len, "%c%d",
@@ -235,6 +238,9 @@ void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mod
         snprintf(line, sizeof(line), "BANK %c  MIXED", 'A' + bank);
     }
     ssd1309_draw_string(0, 0, line, false);
+    unsigned first = (focus_track / PANEL_TRACKS) * PANEL_TRACKS + 1u;
+    snprintf(line, sizeof(line), "%u-%u", first, first + PANEL_TRACKS - 1u);
+    ssd1309_draw_string(13 * FONT_CHAR_W, 0, line, false);
     ssd1309_draw_string((FONT_COLS - 1) * FONT_CHAR_W, 0,
                         mode == PLAY_MODE_SONG ? "S" : "P", false);
 
@@ -243,10 +249,10 @@ void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mod
     bool kit = kit_lane && kit_strip;
     if (kit) {
         snprintf(line, sizeof(line), "%s  %s  %s  LEN %u",
-                 track_names[focus_track], label, kit_lane, (unsigned)focus_length);
+                 track_name(focus_track), label, kit_lane, (unsigned)focus_length);
     } else {
         snprintf(line, sizeof(line), "%s  %s  LEN %u",
-                 track_names[focus_track], label, (unsigned)focus_length);
+                 track_name(focus_track), label, (unsigned)focus_length);
     }
     ssd1309_draw_string(0, 14, line, false);
 
@@ -297,19 +303,19 @@ static void draw_transport_symbol(void) {
 
 // Mute line (y=44, the track underlined) and the track's queued location (y=56).
 static void draw_mutes_and_queue(uint8_t track) {
-    uint8_t mutes = seq_get_track_mutes();
+    uint8_t mutes = (uint8_t)(seq_get_track_mutes() >> (track / PANEL_TRACKS * PANEL_TRACKS));
     char mute_str[22];
     snprintf(mute_str, sizeof(mute_str), "M:");
-    for (int t = 0; t < NUM_TRACKS; t++) {
+    for (int t = 0; t < PANEL_TRACKS; t++) {
         char c = (mutes & (1 << t)) ? '_' : ('1' + t);
         mute_str[2 + t * 2] = c;
         mute_str[3 + t * 2] = ' ';
     }
-    mute_str[2 + NUM_TRACKS * 2] = '\0';
+    mute_str[2 + PANEL_TRACKS * 2] = '\0';
     ssd1309_draw_string(0, 44, mute_str, false);
 
     // Highlight current track in mute display
-    uint8_t mx = (2 + track * 2) * FONT_CHAR_W;
+    uint8_t mx = (2 + (track % PANEL_TRACKS) * 2) * FONT_CHAR_W;
     ssd1309_draw_hline(mx, mx + FONT_CHAR_W - 1, 52, true);
 
     // ── Pattern queue indicator ──
@@ -493,7 +499,7 @@ void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step, 
     pattern_label(g_seq.active_pattern[track], label, sizeof(label));
 
     char header[22];
-    snprintf(header, sizeof(header), "%-3s %-3s", label, track_names[track]);
+    snprintf(header, sizeof(header), "%-3s %-3s", label, track_name(track));
     ssd1309_draw_string(0, 0, header, false);
 
     // BPM is drawn separately (by display_draw_bpm or ui_render)
@@ -544,7 +550,7 @@ void display_draw_kit_lane_view(uint8_t track, uint8_t location, const char *lan
     char label[4];
     pattern_label(location, label, sizeof(label));
     char line[22];
-    snprintf(line, sizeof(line), "%-3s %-3s %s", label, track_names[track], lane ? lane : "");
+    snprintf(line, sizeof(line), "%-3s %-3s %s", label, track_name(track), lane ? lane : "");
     ssd1309_draw_string(0, 0, line, false);
     draw_transport_symbol();                // BPM is drawn by ui_render
 
@@ -569,7 +575,7 @@ void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step) {
     // Header
     char header[22];
     snprintf(header, sizeof(header), "EDIT %s Step %02d",
-             track_names[track], step + 1);
+             track_name(track), step + 1);
     ssd1309_draw_string(0, 0, header, false);
 
     // Note and velocity
@@ -629,7 +635,7 @@ void display_draw_kit_step_edit(uint8_t track, uint8_t step, uint32_t word, uint
     if (cursor_lane >= KIT_LANES) cursor_lane = KIT_LANE_AC;
 
     char line[22];
-    snprintf(line, sizeof(line), "KIT %s  STEP %02u", track_names[track], step + 1u);
+    snprintf(line, sizeof(line), "KIT %s  STEP %02u", track_name(track), step + 1u);
     ssd1309_draw_string(0, 0, line, false);
 
     for (uint8_t lane = 0; lane < KIT_LANES; lane++) {
@@ -682,12 +688,12 @@ void display_draw_pattern_select(uint8_t pattern,
 
     // Track mutes display
     char mute_line[24] = "Mutes: ";
-    for (int t = 0; t < NUM_TRACKS; t++) {
+    for (int t = 0; t < PANEL_TRACKS; t++) {
         char c = (mutes & (1 << t)) ? '_' : ('1' + t);
         mute_line[7 + t * 2] = c;
         mute_line[8 + t * 2] = ' ';
     }
-    mute_line[7 + NUM_TRACKS * 2] = '\0';
+    mute_line[7 + PANEL_TRACKS * 2] = '\0';
     ssd1309_draw_string(0, 44, mute_line, false);
 
     sequencer_jitter_stats_t jit;

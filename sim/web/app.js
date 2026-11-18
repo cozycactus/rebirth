@@ -90,20 +90,15 @@
       for (let track = 0; track < 8; track++) {
         const pad = box('pad', PAD_X(track), PAD_Y(row), 80, 80);
         (els.pad[track] = els.pad[track] || [])[row] = pad;
-        bindHold(pad, down => device.pad(track, row, down), false, () => {
-          const song = fullMidiSong();
-          if (!song) return false;
-          openMidiPart(song.tracks[row * 8 + track]);
-          return true;
-        });
-        pad.dataset.tip = 'Пэд: клип дорожки T' + (track + 1) + ' в ряду ' + (row + 1) + '.\n' +
+        bindHold(pad, down => device.pad(track, row, down));
+        pad.dataset.tip = 'Клип в столбце ' + (track + 1) + ', слот ' + (row + 1) + ' текущего банка.\n' +
           'На остановленном приборе клип выбирается сразу, во время игры встаёт в очередь до границы квантования (мигает). ' +
           'Ярко светится играющий клип, тускло — клип с шагами. Пустой пэд тоже запускается: дорожка замолкает.';
       }
       const scene = box('scene', 1040, PAD_Y(row) + 7, 65, 65);
       els.scene[row] = scene;
       bindHold(scene, down => device.scene(row, down));
-      scene.dataset.tip = 'SCENE ' + (row + 1) + ': запускает ряд ' + (row + 1) + ' на всех восьми дорожках сразу. ' +
+      scene.dataset.tip = 'SCENE ' + (row + 1) + ': запускает ряд ' + (row + 1) + ' на всех 64 дорожках сразу. ' +
         'Пока сцена ждёт в очереди, повторное нажатие отменяет все очереди.';
     }
     label('MUTE', 236, 1131);
@@ -111,7 +106,7 @@
       const key = box('mutekey', PAD_X(track), 1113, 80, 37);
       els.mute[track] = key;
       bindHold(key, down => device.mute(track, down));
-      key.dataset.tip = 'MUTE T' + (track + 1) + ': выключает и возвращает дорожку сразу, без ожидания границы такта. Светится, пока дорожка слышна.';
+      key.dataset.tip = 'MUTE · столбец ' + (track + 1) + ': выключает и возвращает дорожку сразу, без ожидания границы такта. Светится, пока дорожка слышна.';
     }
     for (let i = 0; i < 16; i++) {
       els.stepLed[i] = box('stepled', STEP_X(i) + 19, 1173, 14, 14);
@@ -129,7 +124,7 @@
   // What the controls do, as docs/manual-ru.md describes the firmware.
   const ENC_TIP = [
     'TRACK. Колесо мыши или стрелки по бокам — поворот, клик — нажатие, держать полсекунды — удержание.\n' +
-      'Session: поворот — дорожка или линия KIT; нажать — экран Pattern; удержать — следующий банк A-D.\n' +
+      'Session: поворот — дорожка T1–T64 или линия KIT; на панели видны восемь соседних дорожек; нажать — экран Pattern; удержать — следующий банк A-D.\n' +
       'Pattern, с удержанными шагами: поворот — нота; нажать — акцент; удержать — слайд.\n' +
       'Обе ручки вместе — Panic.',
     'VALUE. Колесо мыши или стрелки по бокам — поворот, клик — нажатие, держать полсекунды — удержание.\n' +
@@ -142,7 +137,7 @@
        'сброс счётчиков диагностики'][i - 8] || 'нет действия';
 
   // Press and hold with the pointer; Shift+click latches a control down.
-  function bindHold(el, set, latchable, handlePress) {
+  function bindHold(el, set, latchable) {
     const release = () => {
       if (!held.has(el)) return;
       held.delete(el);
@@ -152,7 +147,6 @@
     el.addEventListener('pointerdown', e => {
       if (e.button !== 0) return;
       e.preventDefault();
-      if (handlePress?.()) return;
       takeOver();
       if (el.classList.contains('latched')) { release(); return; }
       el.setPointerCapture(e.pointerId);
@@ -238,27 +232,10 @@
   let lastStepLeds = -1;
   function drawLights() {
     const leds = device.leds();
-    const song = fullMidiSong();
     for (let row = 0; row < 8; row++) {
       for (let track = 0; track < 8; track++) {
         const i = row * 8 + track;
-        const pad = els.pad[track][row];
-        const part = song?.tracks[i];
-        if (song) {
-          const hasMusic = !!part?.events.length;
-          const active = midiRun?.active[i] > 0;
-          const color = hasMusic ? (active ? [0, 32, 12] : [0, 12, 3]) : [0, 0, 0];
-          light(pad, ...color, 'var(--pad-off)', i);
-          const caption = hasMusic ? (i + 1) + ' · ' + part.name : '';
-          if (pad.title !== caption) {
-            pad.title = caption;
-            if (hasMusic) pad.dataset.midiTrack = String(i + 1);
-            else delete pad.dataset.midiTrack;
-          }
-        } else {
-          if (pad.title) { pad.title = ''; delete pad.dataset.midiTrack; }
-          light(pad, leds[i * 3], leds[i * 3 + 1], leds[i * 3 + 2], 'var(--pad-off)', i);
-        }
+        light(els.pad[track][row], leds[i * 3], leds[i * 3 + 1], leds[i * 3 + 2], 'var(--pad-off)', i);
       }
       const s = 64 + row;
       light(els.scene[row], leds[s * 3], leds[s * 3 + 1], leds[s * 3 + 2], 'var(--pad-off)', s);
@@ -267,8 +244,7 @@
       const m = 72 + track;
       light(els.mute[track], leds[m * 3], leds[m * 3 + 1], leds[m * 3 + 2], 'var(--pad-off)', m);
     }
-    if (midiRun?.player) light(els.play, 0, 32, 0, 'var(--key-off)', 80);
-    else light(els.play, leds[240], leds[241], leds[242], 'var(--key-off)', 80);
+    light(els.play, leds[240], leds[241], leds[242], 'var(--key-off)', 80);
     light(els.beat, leds[243], leds[244], leds[245], '#2a2a2c', 81);
     const mask = device.stepLeds();
     if (mask !== lastStepLeds) {

@@ -132,8 +132,10 @@ named for percussion use the drum models. Exact name matches use the
 corresponding TAL preset's SH-101 controls. The raw presets, automation, and
 MIDI files stay on the computer. A local checkout can preload a file list
 from `sim/web/local-songs/twisted/catalog.json`, in the ignored local library.
-Each populated source track lights a pad in the 8×8 grid. During a note the
-pad gets brighter. Click a synth part's pad to open its SH-101 controls.
+The physical panel displays firmware LEDs. Use the imported track list or mixer
+to open the SH-101 controls for a part. In Session, TRACK moves through T1–T64
+in eight-column pages. Each column holds the eight clips of the current bank.
+SCENE launches the chosen slot on all 64 tracks.
 FREQ, resonance and the other panel controls edit that part during playback.
 The part's gain can be adjusted independently of the mixer strip.
 Opening a synth from the mixer starts with all imported parts on that
@@ -155,9 +157,8 @@ Pico's BOOTSEL drive. Hold VALUE to enter SELECT PATTERN and press step 14
 to open MIDI SONG. PLAY starts and stops. TRACK changes the page of eight
 source tracks. Steps 1–8 mute, holding a step solos, and VALUE returns to
 SELECT PATTERN. The slot holds up to 1 MiB, 64 source tracks, and
-2,147,483,647 microseconds. The clip save area follows it in flash.
-The hardware pad grid shows all populated source tracks. A pad or SCENE
-selects its row for MUTE and SOLO.
+2,147,483,647 microseconds. The v7 clip save area precedes the MIDI slot. Eight-track v4–v6 saves remain at the end of flash.
+MUTE and SOLO address the tracks on the page selected with TRACK.
 
 The timed player preserves note and controller events at their original
 deadlines. The physical DIN output serializes simultaneous events at its

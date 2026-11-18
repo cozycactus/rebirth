@@ -20,12 +20,12 @@ void uart_putc_raw(void *uart, uint8_t c);
 // ─── UART output buffer ─────────────────────────────────────────
 // Buffer MIDI messages during step processing, flush all at once.
 
-#define MIDI_BUF_SIZE   160
+
 #define MIDI_TX_QUEUED_MAX (MIDI_TX_QUEUE_SIZE - 1u)   // bytes the TX queue can hold
 #define MIDI_RT_QUEUE_SIZE 4
 
-static uint8_t midi_buf[MIDI_BUF_SIZE];
-static uint8_t midi_buf_len = 0;
+static uint8_t midi_buf[MIDI_STEP_BUFFER_BYTES];
+static uint16_t midi_buf_len = 0;
 static volatile bool midi_overflow;
 
 #ifndef MOCK_HARDWARE
@@ -293,7 +293,7 @@ static void midi_send_realtime(uint8_t byte, bool cancel_clock) {
 // ─── Buffered output ────────────────────────────────────────────
 
 static void midi_buf_message(uint8_t status, uint8_t data1, uint8_t data2) {
-    if (midi_buf_len + 3u <= MIDI_BUF_SIZE) {
+    if (midi_buf_len + 3u <= MIDI_STEP_BUFFER_BYTES) {
         midi_buf[midi_buf_len++] = status;
         midi_buf[midi_buf_len++] = data1;
         midi_buf[midi_buf_len++] = data2;

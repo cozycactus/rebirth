@@ -762,9 +762,14 @@
   function configureCV(s) {
     let current = T.FX;
     for (const track of [T.FX, T.KICK, T.BASS, T.ACID1, T.LEAD, T.ARP]) {
+      if (current > track) {
+        s.tap(VALUE_SW, 80, 160);                         // selector
+        s.long(STEP(track + 1));                          // address the column directly
+        current = track;
+      }
       while (current !== track) {
         s.tap(TRACK_SW, 80, 160);
-        current = (current + 1) % TRACK_NAME.length;
+        current++;
       }
       const channel = CV_TRACKS.indexOf(track);
       const native = channel >= 0;

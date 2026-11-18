@@ -2678,7 +2678,7 @@ static void test_mixed_type_track_uses_cell_type(void) {
 
 static bool kit_steps_untouched(void) {
     for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
-        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        for (uint8_t t = 0; t < KIT_TRACK_SLOTS; t++) {
             for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
                 if (g_seq.patterns[p].kit_steps[t][s]) return false;
             }
@@ -2934,7 +2934,7 @@ static void test_track_config_third_kit_refused(void) {
     CHECK(seq_kit_tracks() == ((1u << 1) | (1u << 4)));
     // A kit track itself still cycles through KIT.
     ui.notify_msg[0] = '\0';
-    for (unsigned i = 0; i < 3; i++) press_encoder(0, BTN_PRESS);
+    for (unsigned i = 0; i < NUM_TRACKS - 5; i++) press_encoder(0, BTN_PRESS);
     CHECK(ui.config_track == 1);
     turn_value(1);
     CHECK(type_everywhere(1, TRACK_TYPE_SYNTH));

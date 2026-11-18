@@ -166,11 +166,11 @@ static void test_scene_rules(void) {
 }
 
 static void test_mute_rules(void) {
-    for (int focus = 0; focus < NUM_TRACKS; focus++) {
+    for (int focus = 0; focus < PANEL_TRACKS; focus++) {
         led_state_t s = base_state();
         s.focus_track = (uint8_t)focus;
         s.muted = 0x40;                                           // track 6 muted
-        for (int t = 0; t < NUM_TRACKS; t++) {
+        for (int t = 0; t < PANEL_TRACKS; t++) {
             rgb_t want;
             if (t == focus) want = (t == 6) ? white(LED_LEVEL_DIM) : scaled(HUE[t], LED_LEVEL_FULL);
             else            want = (t == 6) ? BLACK : scaled(HUE[t], LED_LEVEL_HALF);
@@ -239,23 +239,23 @@ static bool is_black(rgb_t c) { return same(c, BLACK); }
 
 // Pads of all eight tracks at one level: a stored clip (dim), the current clip
 // while stopped (half) or while playing (full).
-static void track_pads_at(int level_index, rgb_t out[NUM_TRACKS]) {
+static void track_pads_at(int level_index, rgb_t out[PANEL_TRACKS]) {
     led_state_t s = base_state();
-    for (int t = 0; t < NUM_TRACKS; t++) {
+    for (int t = 0; t < PANEL_TRACKS; t++) {
         set_clip(&s, t, 0);
         s.current[t] = level_index == 0 ? 1 : 0;
     }
     s.playing = level_index == 2;
-    for (int t = 0; t < NUM_TRACKS; t++) out[t] = light(&s, LED_PAD(t, 0));
+    for (int t = 0; t < PANEL_TRACKS; t++) out[t] = light(&s, LED_PAD(t, 0));
 }
 
 static void test_track_hues_stay_distinct_at_every_level(void) {
     for (int level = 0; level < 3; level++) {
-        rgb_t pads[NUM_TRACKS];
+        rgb_t pads[PANEL_TRACKS];
         track_pads_at(level, pads);
-        for (int a = 0; a < NUM_TRACKS; a++) {
+        for (int a = 0; a < PANEL_TRACKS; a++) {
             CHECK(!is_black(pads[a]));
-            for (int b = a + 1; b < NUM_TRACKS; b++) CHECK(!same(pads[a], pads[b]));
+            for (int b = a + 1; b < PANEL_TRACKS; b++) CHECK(!same(pads[a], pads[b]));
         }
     }
     // Dim track green (a stored clip of track 3) is not dim scene green (a row

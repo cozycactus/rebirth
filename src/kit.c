@@ -89,24 +89,24 @@ bool kit_cell_has_clip(const uint32_t steps[STEPS_PER_PATTERN], uint8_t length) 
 }
 
 bool kit_is_cell(const pattern_t *p, uint8_t track) {
-    return track < NUM_TRACKS && p->tracks[track].type == TRACK_TYPE_KIT;
+    return track < KIT_TRACK_SLOTS && p->tracks[track].type == TRACK_TYPE_KIT;
 }
 
-uint8_t kit_cell_mask(const pattern_t *patterns, const uint8_t location[NUM_TRACKS]) {
-    uint8_t mask = 0;
+track_mask_t kit_cell_mask(const pattern_t *patterns, const uint8_t location[NUM_TRACKS]) {
+    track_mask_t mask = 0;
     for (uint8_t t = 0; t < NUM_TRACKS; t++) {
         if (location[t] < MAX_PATTERNS && kit_is_cell(&patterns[location[t]], t)) {
-            mask |= (uint8_t)(1u << t);
+            mask |= TRACK_BIT(t);
         }
     }
     return mask;
 }
 
-uint8_t kit_track_mask(const pattern_t *patterns, uint8_t count) {
-    uint8_t mask = 0;
+track_mask_t kit_track_mask(const pattern_t *patterns, uint8_t count) {
+    track_mask_t mask = 0;
     for (uint8_t i = 0; i < count; i++) {
         for (uint8_t t = 0; t < NUM_TRACKS; t++) {
-            if (kit_is_cell(&patterns[i], t)) mask |= (uint8_t)(1u << t);
+            if (kit_is_cell(&patterns[i], t)) mask |= TRACK_BIT(t);
         }
     }
     return mask;
