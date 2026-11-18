@@ -81,6 +81,16 @@
     return Float64Array.from(out);
   })();
   const KNOB_R = KNOB_R_MM * UNITS_PER_MM, KNOB_TOP = TOP_MM.knob * UNITS_PER_MM;
+  // The boxes by cell of a CELL-unit grid over the panel square: a point is
+  // tested against the few boxes of its cell (the same tests as against all
+  // of them; the fitting asks this some hundred thousand times a second).
+  const CELL = 25, CELLS = Math.ceil(1400 / CELL);
+  const GRID = Array.from({ length: CELLS * CELLS }, () => []);
+  for (let i = 0; i < BOX.length; i += 5) {
+    const c0 = Math.max(0, Math.floor(BOX[i] / CELL)), c1 = Math.min(CELLS - 1, Math.floor(BOX[i + 2] / CELL));
+    const r0 = Math.max(0, Math.floor(BOX[i + 1] / CELL)), r1 = Math.min(CELLS - 1, Math.floor(BOX[i + 3] / CELL));
+    for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) GRID[r * CELLS + c].push(i);
+  }
 
   // Whether world point (x, y, z) is inside a control or below the plate. An
   // encoder knob is a cylinder 20 mm across, so a finger beside it is free.
@@ -92,7 +102,9 @@
       const du = u - KNOB_U[e], dv = v - KNOB_V;
       if (du * du + dv * dv <= KNOB_R * KNOB_R) return true;
     }
-    for (let i = 0; i < BOX.length; i += 5) {
+    const c = Math.floor(u / CELL), r = Math.floor(v / CELL);
+    if (c < 0 || c >= CELLS || r < 0 || r >= CELLS) return false;
+    for (const i of GRID[r * CELLS + c]) {
       if (u >= BOX[i] && u <= BOX[i + 2] && v >= BOX[i + 1] && v <= BOX[i + 3] && z <= BOX[i + 4]) return true;
     }
     return false;

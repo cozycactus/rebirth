@@ -146,6 +146,56 @@ section('geometry', () => {
   assert.strictEqual(PANEL.inside(988.5, -233.5, 4.9 * MM), true, 'inside PLAY');
   assert.strictEqual(PANEL.inside(100, -100, 1 * MM), false, 'off the controls');
   assert.strictEqual(PANEL.inside(100, -100, -0.1), true, 'below the plate');
+
+  // The panel as app.js's buildPanel() draws it: its PAD_X, PAD_Y, STEP_X,
+  // the knobs' centres and the box() of every pad, SCENE key, MUTE key,
+  // step key and PLAY, read from its source, are where HandPlan.PANEL puts
+  // them (a layout change there must not leave the hands off the controls).
+  const src = fs.readFileSync(path.join(web, 'app.js'), 'utf8');
+  const grab = (re, what) => {
+    const m = src.match(re);
+    assert.ok(m, 'app.js: no ' + what + ' (buildPanel() changed: update HandPlan.PANEL and this test)');
+    return m;
+  };
+  const fn = name => {
+    const m = grab(new RegExp('const ' + name + ' = (\\w+) => ([^;\\n]+);'), name);
+    return new Function(m[1], 'return ' + m[2] + ';');
+  };
+  const [padX, padY, stepX] = ['PAD_X', 'PAD_Y', 'STEP_X'].map(fn);
+  const nums = (re, what) => grab(re, what).slice(1).map(Number);
+  const [padW, padH] = nums(/box\('pad', PAD_X\(track\), PAD_Y\(row\), (\d+), (\d+)\)/, 'pad box');
+  const [sceneU, sceneDv, sceneW, sceneH] = nums(/box\('scene', (\d+), PAD_Y\(row\) \+ (\d+), (\d+), (\d+)\)/, 'scene box');
+  const [muteV, muteW, muteH] = nums(/box\('mutekey', PAD_X\(track\), (\d+), (\d+), (\d+)\)/, 'mute box');
+  const [stepV, stepW, stepH] = nums(/box\('stepkey', STEP_X\(i\), (\d+), (\d+), (\d+)\)/, 'step box');
+  const [playU, playV, playW, playH] = nums(/els\.play = box\('', (\d+), (\d+), (\d+), (\d+)\)/, 'PLAY box');
+  const knobU = nums(/\[\[(\d+), 'TRACK'\], \[(\d+), 'VALUE'\]\]/, 'knob centres');
+  const [knobDu, knobV, knobW, knobH] = nums(/box\('knob', cx - (\d+), (\d+), (\d+), (\d+)\)/, 'knob box');
+  // Each rectangle [u, v, w, h]: its centre is the control's, and it is the
+  // control's volume seen from above (just inside its edges inside, just
+  // outside them not, 0.5 mm up).
+  const drawn = [];
+  for (let t = 0; t < 8; t++) {
+    for (let r = 0; r < 8; r++) drawn.push([{ op: 'pad', track: t, row: r }, [padX(t), padY(r), padW, padH]]);
+    drawn.push([{ op: 'scene', row: t }, [sceneU, padY(t) + sceneDv, sceneW, sceneH]]);
+    drawn.push([{ op: 'mute', track: t }, [padX(t), muteV, muteW, muteH]]);
+  }
+  for (let i = 0; i < 16; i++) drawn.push([{ op: 'step', index: i }, [stepX(i), stepV, stepW, stepH]]);
+  drawn.push([{ op: 'play' }, [playU, playV, playW, playH]]);
+  for (const [a, [u, v, w, h]] of drawn) {
+    const c = PANEL.control(a), what = c.key + ' drawn at ' + [u, v, w, h];
+    assert.ok(Math.abs(c.u - (u + w / 2)) < 1e-9 && Math.abs(c.v - (v + h / 2)) < 1e-9, what + ': PANEL puts its centre at ' + c.u + ', ' + c.v);
+    const z = 0.5 * MM, e = 0.5;
+    for (const [pu, pv] of [[u + e, v + e], [u + w - e, v + h - e], [u + w / 2, v + h / 2]]) {
+      assert.strictEqual(PANEL.inside(pu, -pv, z), true, what + ': ' + pu + ', ' + pv + ' is not inside it');
+    }
+    for (const [pu, pv] of [[u - e, v + h / 2], [u + w + e, v + h / 2], [u + w / 2, v - e], [u + w / 2, v + h + e]]) {
+      assert.strictEqual(PANEL.inside(pu, -pv, z), false, what + ': ' + pu + ', ' + pv + ' is inside a control');
+    }
+  }
+  knobU.forEach((cx, enc) => {
+    const c = PANEL.control({ op: 'encsw', enc });
+    assert.deepStrictEqual([c.u, c.v], [cx - knobDu + knobW / 2, knobV + knobH / 2], 'knob ' + enc + ': its drawn centre');
+  });
 });
 
 // ─── rig: build, pose and skin one hand ─────────────────────────

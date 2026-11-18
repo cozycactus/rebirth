@@ -8,20 +8,27 @@
 //      has a turn, pinched on its encoder;
 //   2. the hand rules: a hold and the touches (and runs) inside it on
 //      different hands; a clip copy one hand, index and thumb; a MUTE pair
-//      one hand iff at most two tracks apart;
+//      one hand iff at most two tracks apart; a group one hand, its fingers
+//      in order across the buttons from the hand's outer side;
 //   3. at the down, the middle and 1 000 before the up of every interval,
 //      its finger's contact point within 1.5 mm of the target; at the first,
 //      middle and last edge of every run, both pinch contacts within 2 mm
-//      of the knob's rim;
-//   4. at those moments nothing of either hand in a control, no vertex of
-//      either hand more than 0.5 mm under the plate, the driver's poses ok;
+//      of the knob's rim, and the grip turned with the knob (see twisted);
+//   4. at those moments nothing of either hand in a control (its clearance
+//      vertices and its whole mesh), no vertex of either hand more than
+//      0.5 mm under the plate, the driver's poses ok; and in the live set
+//      every 20 000 between them, nothing of either hand in a control (its
+//      clearance vertices) nor more than 0.5 mm under the plate;
 //   5. at those moments in the live set the palms apart and the left wrist
 //      left of the right one while neither hand is away; in the preparation
 //      crossings and palm overlaps are counted, not failed;
 //   6. peak speed (10 000 steps) under 4 m/s per hand in the live set, under
 //      8 m/s in the preparation.
 // (1) and (2) run on every show; (3)-(6) on song 0 and song 1 + formIndex in
-// every arrangement and score (32 shows), or on every show with HANDS_FULL=1.
+// every arrangement and score (32 shows), or on every show with HANDS_FULL=1;
+// the live set every 20 000 (in 4) on 4 of those, song 1 + formIndex in the
+// formIndex-th score (four songs, forms and scores; an eighth of the samples,
+// to keep the default run short), or on every show with HANDS_FULL=1.
 //   node sim/test/hands_check.js
 //   HANDS_FULL=1 node sim/test/hands_check.js
 'use strict';
@@ -43,6 +50,7 @@ const NEAR_TRACKS = 2;          // a MUTE pair this close is one hand
 const CONTACT_MM = 1.5, RIM_MM = 2, KNOB_R_MM = 10, GRIP_MM = 12, UNDER_MM = 0.5;
 const SPEED_STEP_US = 10000, LIVE_M_S = 4, PREP_M_S = 8;
 const SIDES = ['left', 'right'], FINGERS = ['thumb', 'index', 'middle', 'ring', 'pinky'];
+const OUTER = ['pinky', 'ring', 'middle', 'index'];   // a group's fingers from the hand's outer side in
 const mm = x => x.toFixed(2);
 
 const failures = [];
@@ -64,7 +72,7 @@ function table(actions) {
   for (const a of actions.slice().sort((x, y) => x.t - y.t)) {
     const c = PANEL.control(a);
     if (!c) continue;
-    if (a.op === 'edge') { edges[a.enc].push(a.t); continue; }
+    if (a.op === 'edge') { edges[a.enc].push([a.t, a.dir]); continue; }
     if (a.down) {
       if (open.has(c.key)) fail(a.t, c.key, '(1) down again while down');
       open.set(c.key, { key: c.key, control: c, op: a.op, track: a.track, row: a.row, tDown: a.t });
@@ -82,9 +90,10 @@ function table(actions) {
   const runs = [];
   edges.forEach((list, enc) => {
     let run = null;
-    for (const t of list) {
-      if (run && t - run.edges[run.edges.length - 1] < RUN_GAP_US) run.edges.push(t);
-      else runs.push(run = { enc, key: 'knob:' + enc, edges: [t] });
+    for (const [t, dir] of list) {
+      if (!run || t - run.edges[run.edges.length - 1] >= RUN_GAP_US) runs.push(run = { enc, key: 'knob:' + enc, edges: [], dirs: [] });
+      run.edges.push(t);
+      run.dirs.push(dir);
     }
   });
   runs.sort((x, y) => x.edges[0] - y.edges[0] || x.enc - y.enc);
@@ -236,6 +245,22 @@ function assigned(plan, tab) {
       fail(y.tDown, x.key + ' ' + y.key, '(2) a MUTE pair ' + p.apart + ' tracks apart on ' + (one ? 'one hand' : 'two hands'));
     }
   }
+  // A group: one hand, its fingers in order across the buttons from the
+  // hand's outer side (the left hand's little finger leftmost; mirrored for
+  // the right): little, ring, middle, index, any of them left out.
+  for (const g of tab.groups) {
+    const as = g.members.map(x => plan.assign['touch:' + x.id]), keys = g.members.map(x => x.key).join(' ');
+    if (as.some(a => !a) || new Set(as.map(a => a.hand)).size !== 1) {
+      fail(g.start, keys, '(2) a group not on one hand: ' + JSON.stringify(as));
+      continue;
+    }
+    const sign = as[0].hand === 'left' ? 1 : -1;
+    const order = g.members.map((x, i) => ({ u: x.control.u, rank: OUTER.indexOf(as[i].finger) })).sort((a, b) => sign * (a.u - b.u));
+    if (order.some((o, i) => o.rank < 0 || (i && o.rank <= order[i - 1].rank))) {
+      fail(g.start, keys, '(2) a group\'s fingers not in order from the ' + as[0].hand + ' hand\'s outer side: ' +
+        as.map(a => a.finger).join(' '));
+    }
+  }
 }
 
 // ─── (3)-(6): the driver's poses ─────────────────────────────────
@@ -251,7 +276,37 @@ const lowestMm = side => {
   return low / MM;
 };
 
-function posed(show, plan, tab, stats) {
+// (3) The grip turns with the knob: the line from the thumb's contact to
+// the index's, seen from above, at the run's first edge, then at its middle
+// and last edge turned (clockwise positive, as the knob turns up) at most
+// TWIST_DEG + 0.5° from there, never against the run's direction, and by at
+// least 0.5° in it unless the hand may have let go and come back to the
+// middle by then: an earlier pause of REGRIP_US or more (a regrip), or the
+// knob turned more than TWIST_DEG (the fingers slide on it).
+const TWIST_DEG = 20, REGRIP_US = 100000, EDGE_DEG = 15 / 4;
+function twisted(t, it, rig) {
+  const a = rig.contact('thumb', it.axis), b = rig.contact('index', it.axis), r = it.x;
+  const angle = Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
+  if (it.edge === 0) { r.grip0 = angle; return; }
+  const turned = ((r.grip0 - angle) % 360 + 540) % 360 - 180, net = Math.sign(r.dirs.reduce((s, d) => s + d, 0));
+  const knob = EDGE_DEG * r.dirs.slice(0, it.edge + 1).reduce((s, d) => s + d, 0), along = turned * net;
+  let regrip = false;
+  for (let j = 1; j <= it.edge; j++) if (r.edges[j] - r.edges[j - 1] >= REGRIP_US) regrip = true;
+  const at = ' at edge ' + it.edge + ' of ' + r.edges.length + ' (the knob ' + mm(knob) + '°)';
+  if (Math.abs(turned) > TWIST_DEG + 0.5) fail(t, r.key, '(3) the ' + it.side + ' grip turned ' + mm(turned) + '° from the first edge' + at);
+  else if (along < -0.5) fail(t, r.key, '(3) the ' + it.side + ' grip turned ' + mm(turned) + '° against the knob' + at);
+  else if (along < 0.5 && !regrip && Math.abs(knob) <= TWIST_DEG) {
+    fail(t, r.key, '(3) the ' + it.side + ' grip has not turned with the knob: ' + mm(turned) + '°' + at);
+  }
+}
+
+// (4) Between the moments, the live set every TRAVEL_US (with the peak
+// speed's poses, every other one): nothing of either hand in a control
+// (the clearance vertices; the touching fingertips exempt as above) nor
+// more than 0.5 mm under the plate (every vertex).
+const TRAVEL_US = 20000;
+
+function posed(show, plan, tab, stats, travelled) {
   const driver = new HandRig.Driver(rigs, plan);
   // The moments: each interval's down, middle and 1 000 before its up; each
   // run's first, middle and last edge.
@@ -271,7 +326,7 @@ function posed(show, plan, tab, stats) {
   for (const r of tab.runs) {
     if (!r.hand) continue;
     const c = PANEL.control({ op: 'encsw', enc: r.enc }), axis = { axis: new T.Vector3(c.u, -c.v, 0) };
-    for (const t of [r.edges[0], r.edges[r.edges.length >> 1], r.edges[r.edges.length - 1]]) add(t, { x: r, side: r.hand, axis, c });
+    for (const i of new Set([0, r.edges.length >> 1, r.edges.length - 1])) add(r.edges[i], { x: r, side: r.hand, axis, c, edge: i });
   }
   let crossings = 0, overlaps = 0;
   for (const t of [...moments.keys()].sort((a, b) => a - b)) {
@@ -286,6 +341,7 @@ function posed(show, plan, tab, stats) {
           const p = rig.contact(f, it.axis), d = Math.hypot(Math.hypot(p.x - it.c.u, p.y + it.c.v) / MM - KNOB_R_MM, p.z / MM - GRIP_MM);
           if (d > RIM_MM) fail(t, it.x.key, '(3) the ' + it.side + ' ' + f + ' is off the rim', d);
         }
+        twisted(t, it, rig);
       }
     }
     for (const side of SIDES) {
@@ -309,10 +365,29 @@ function posed(show, plan, tab, stats) {
       crossings += crossed;
     }
   }
-  // (6) Peak speeds, the preparation from 0, the live set to its end.
+  // (6) Peak speeds, the preparation from 0, the live set to its end (as
+  // HandRig.peakSpeed measures them), with (4) between the moments there.
   const last = Math.max(show.end, ...SIDES.map(s => plan.hands[s][plan.hands[s].length - 1].t));
   const prep = HandRig.peakSpeed(driver, 0, show.prepEnd, SPEED_STEP_US);
-  const live = HandRig.peakSpeed(driver, show.prepEnd, last, SPEED_STEP_US);
+  const live = { left: 0, right: 0 }, prev = {};
+  let travel = 0;
+  for (let t = show.prepEnd, k = 0; t <= last; t += SPEED_STEP_US, k++) {
+    const res = driver.pose(t);
+    for (const side of SIDES) {
+      const w = wrist(side);
+      if (prev[side]) live[side] = Math.max(live[side], w.distanceTo(prev[side]) / MM / 1000 / (SPEED_STEP_US / 1e6));
+      prev[side] = w;
+    }
+    if (!travelled || k % (TRAVEL_US / SPEED_STEP_US)) continue;
+    travel++;
+    for (const side of SIDES) {
+      const left = rigs[side].violations(res[side].touching);
+      if (left.length) fail(t, side, '(4) between the moments the ' + side + ' hand is in a control (vertex ' + left[0].vertex + ')', left[0].mm);
+      const low = lowestMm(side);
+      if (low < -UNDER_MM) fail(t, side, '(4) between the moments the ' + side + ' hand is under the plate', -low);
+    }
+  }
+  stats.travel += travel;
   for (const side of SIDES) {
     const peaks = ' hand peaks at ';
     if (prep[side] >= PREP_M_S) fail(show.prepEnd, side, '(6) the ' + side + peaks + mm(prep[side]) + ' m/s in the preparation');
@@ -332,7 +407,7 @@ function posed(show, plan, tab, stats) {
 const started = Date.now();
 console.log('mode: ' + (FULL ? 'full (HANDS_FULL=1): every show posed' :
   'sample: song 0 and song 1 + formIndex posed in every arrangement and score (HANDS_FULL=1 for all)'));
-const stats = { shows: 0, posed: 0, moments: 0, crossings: 0, overlaps: 0, live: 0, prep: 0 };
+const stats = { shows: 0, posed: 0, moments: 0, travel: 0, crossings: 0, overlaps: 0, live: 0, prep: 0 };
 const sums = { intervals: 0, runs: 0, copies: 0, groups: 0, nearPairs: 0, farPairs: 0, holds: 0, inner: 0, innerRuns: 0,
   nested: 0, farInHold: 0, secondCopy: 0, bigGroup: 0 };
 Artist.SONGS.forEach((song, si) => {
@@ -355,7 +430,8 @@ Artist.SONGS.forEach((song, si) => {
       for (const k of ['nested', 'farInHold', 'secondCopy', 'bigGroup']) sums[k] += tab[k];
       let line = song.id + ' ' + form.id + ' ' + score + ': ' + tab.intervals.length + ' touches, ' + tab.runs.length + ' turns';
       if (FULL || si === 0 || si === 1 + fi) {
-        line += ', posed: ' + posed(show, plan, tab, stats);
+        const travelled = FULL || (si === 1 + fi && SCORES[fi][0] === score);
+        line += ', posed' + (travelled ? ' and travelled' : '') + ': ' + posed(show, plan, tab, stats, travelled);
         stats.posed++;
       }
       stats.shows++;
@@ -368,7 +444,7 @@ console.log('table: ' + sums.intervals + ' intervals, ' + sums.runs + ' runs, ' 
   sums.nearPairs + ' one-hand and ' + sums.farPairs + ' two-hand MUTE pairs, ' + sums.holds + ' holds with ' + sums.inner +
   ' touches and ' + sums.innerRuns + ' runs inside; ' + sums.nested + ' holds inside holds, ' + sums.farInHold +
   ' far MUTE pairs inside holds, ' + sums.secondCopy + ' second copies, ' + sums.bigGroup + ' groups over four');
-console.log('posed: ' + stats.moments + ' moments in ' + stats.posed + ' shows; preparation: ' + stats.crossings + ' crossings, ' +
+console.log('posed: ' + stats.moments + ' moments and ' + stats.travel + ' samples of the live set in ' + stats.posed + ' shows; preparation: ' + stats.crossings + ' crossings, ' +
   stats.overlaps + ' palm overlaps; peak ' + mm(stats.live) + ' m/s live, ' + mm(stats.prep) + ' m/s in the preparation');
 if (failures.length) {
   for (const f of failures.slice(0, 5)) {

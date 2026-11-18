@@ -973,10 +973,14 @@
       verts.forEach((v, k) => {
         const x = p[3 * k], y = p[3 * k + 1], z = p[3 * k + 2];
         if ((above && z < 0) || !PANEL.inside(x, y, z)) return;
-        const d = depth(x, y, z);
-        if (touch && z >= 0 && d.mm <= 1) {
-          for (const f in touch.targets) if (TIP_SET[f].has(v) && inOwnTarget(touch, f, x, y, z)) return;
+        // Exempt: a touching fingertip's vertex in its own target with a way
+        // out within 1 mm (up, the cheap one first, else any).
+        if (touch && z >= 0) {
+          for (const f in touch.targets) {
+            if (TIP_SET[f].has(v) && inOwnTarget(touch, f, x, y, z) && (escape(x, y, z, 0, 0, 1, 1) <= 1 || depth(x, y, z).mm <= 1)) return;
+          }
         }
+        const d = depth(x, y, z);
         out.push({ vertex: v, mm: d.mm, upMm: d.upMm });
       });
       return out.sort((a, b) => b.mm - a.mm);
