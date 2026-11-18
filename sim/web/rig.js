@@ -941,7 +941,8 @@
       let gateCount = 0;
       for (const track of song.tracks) {
         if (!track.notes || track.drum || track.role === 'gate') continue;
-        const settings = { role: track.role, patch: { ...track.patch?.settings, ...track.controls }, poly: track.poly };
+        const settings = { role: track.role, track: track.track,
+          patch: { ...track.patch?.settings, ...track.controls }, poly: track.poly };
         track.levelDb ??= midiPartTrim(track, settings);
         let node, send;
         if (worklet) {

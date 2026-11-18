@@ -136,6 +136,8 @@ Each populated source track lights a pad in the 8×8 grid. During a note the
 pad gets brighter. Click a synth part's pad to open its SH-101 controls.
 FREQ, resonance and the other panel controls edit that part during playback.
 The part's gain can be adjusted independently of the mixer strip.
+Opening a synth from the mixer starts with all imported parts on that
+strip selected. The panel indicates when its selection has sounding notes.
 
 **MIDI Song · выходы ReBirth** runs the firmware player in the simulator.
 The routing table offers MIDI channel remapping and four direct CV/Gate

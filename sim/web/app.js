@@ -405,10 +405,12 @@
   }
   const userSet = (id, value) => { delete anims[id]; rig.setParam(id, value); };
   function setVoiceControl(role, name, value) {
-    const part = sh101Panels[role]?.part;
-    if (!part) { userSet(role + '.' + name, value); return; }
-    (part.controls ||= {})[name] = value;
-    midiRun?.player?.control(part.track, name, value);
+    const parts = sh101Panels[role]?.targets ?? [];
+    if (!parts.length) { userSet(role + '.' + name, value); return; }
+    for (const part of parts) {
+      (part.controls ||= {})[name] = value;
+      midiRun?.player?.control(part.track, name, value);
+    }
   }
 
   // A knob drawn as the x0xb0x VCF Bench page draws its knobs: ticks, a gold
@@ -612,7 +614,10 @@
         : 'Вспыхивает, когда прибор шлёт ноту этому инструменту.' + (strip.name.startsWith('ACID') ? ' Это модель x0xb0x (схема TB-303) из x0xb0x VCF Bench.' : '');
       if (synthPanel) {
         lamp.dataset.tip = 'Открыть панель SH-101 канала ' + strip.name + '. ' + lamp.dataset.tip;
-        lamp.addEventListener('click', () => { synthPanel.open = true; });
+        lamp.addEventListener('click', () => {
+          if (fullMidiSong()) sh101Panels[strip.id]?.choosePart(-2);
+          synthPanel.open = true;
+        });
       }
       if (!p) { fader.disabled = true; return; }
       // Sends to the Effects board, then pan, as on a console.
@@ -935,8 +940,10 @@
     const inputBadge = details.querySelector('summary .sub');
     const partPicker = document.createElement('label');
     const partSelect = document.createElement('select');
+    const partActivity = document.createElement('span');
+    partActivity.className = 'sub';
     partPicker.hidden = true;
-    partPicker.append('MIDI-партия ', partSelect);
+    partPicker.append('MIDI-партия ', partSelect, partActivity);
     details.querySelector('.sh101-transport').appendChild(partPicker);
     const trackLevel = document.createElement('label');
     const gain = document.createElement('input'), levelReadout = document.createElement('span');
@@ -948,31 +955,41 @@
     trackLevel.hidden = true;
     trackLevel.append('Уровень партии ', gain, levelReadout);
     details.querySelector('.sh101-transport').appendChild(trackLevel);
-    let parts = [], selectedPart = null;
+    let parts = [], selectedPart = null, groupSelected = false;
+    const targets = () => groupSelected ? parts : selectedPart ? [selectedPart] : [];
+    function showPartActivity() {
+      if (partPicker.hidden || !details.open) return;
+      const active = targets().filter(part => midiRun?.active?.[part.track]).length;
+      const text = !targets().length ? '' : active ? ' · звучит ' + active : ' · ждёт ноты';
+      if (partActivity.textContent !== text) partActivity.textContent = text;
+    }
     function showPartLevel() {
       if (!selectedPart) return;
       gain.value = selectedPart.levelDb ?? 0;
       levelReadout.textContent = ' ' + gain.value + ' дБ';
     }
     function choosePart(track) {
+      groupSelected = track === -2 && !!parts.length;
       selectedPart = parts.find(part => part.track === track) ?? null;
-      partSelect.value = selectedPart ? String(selectedPart.track) : '-1';
+      partSelect.value = groupSelected ? '-2' : selectedPart ? String(selectedPart.track) : '-1';
       trackLevel.hidden = !selectedPart;
-      const patch = selectedPart && { ...window.SH101.defaults(role), ...selectedPart.patch?.settings, ...selectedPart.controls };
+      const representative = selectedPart ?? (groupSelected ? parts.find(p => midiRun?.active?.[p.track]) ?? parts[0] : null);
+      const patch = representative && { ...window.SH101.defaults(role), ...representative.patch?.settings, ...representative.controls };
       for (const def of window.SH101.controls) {
         const id = role + '.' + def.id;
         if (sliders[id]) sliders[id].value = patch?.[def.id] ?? rig.getParam(id);
       }
       showPartLevel();
+      showPartActivity();
       syncControls();
     }
     function showParts(next) {
       if (next.length === parts.length && next.every((part, i) => part === parts[i])) { showPartLevel(); return; }
       parts = next;
       partPicker.hidden = !parts.length;
-      partSelect.replaceChildren(new Option('Панель · MIDI/ROM', '-1'));
+      partSelect.replaceChildren(new Option('Весь канал ' + role.toUpperCase(), '-2'), new Option('Панель · MIDI/ROM', '-1'));
       for (const part of parts) partSelect.add(new Option((part.track + 1) + ' · ' + part.name, part.track));
-      choosePart(parts[0]?.track);
+      choosePart(-2);
     }
     partSelect.addEventListener('change', () => choosePart(Number(partSelect.value)));
     gain.addEventListener('input', () => {
@@ -1115,7 +1132,7 @@
       input.disabled = !available;
       romOption.disabled = !board;
       input.value = voice.input;
-      inputBadge.textContent = selectedPart?.name ?? input.selectedOptions[0].textContent;
+      inputBadge.textContent = groupSelected ? 'Все MIDI-партии' : selectedPart?.name ?? input.selectedOptions[0].textContent;
       power.setAttribute('aria-pressed', String(powered));
       power.textContent = powered ? 'ON' : 'OFF';
       for (const el of inputs) {
@@ -1124,15 +1141,15 @@
       }
       pulse.disabled = !powered || !available || !board?.external;
       bender.disabled = lfoMod.disabled = !powered || !available;
-      audition.hidden = !!selectedPart || voice.input !== 'midi';
+      audition.hidden = groupSelected || !!selectedPart || voice.input !== 'midi';
       readout.hidden = !useROM;
       audition.disabled = !powered || !available;
-      if (fx) $('sh101-fx-sequencer').hidden = !!selectedPart || voice.input !== 'midi';
+      if (fx) $('sh101-fx-sequencer').hidden = groupSelected || !!selectedPart || voice.input !== 'midi';
     }
 
     function selectInput(value) {
       wantedInput = value;
-      if (value === 'rom' && selectedPart) choosePart(-1);
+      if (value === 'rom' && targets().length) choosePart(-1);
       if (!available || (value === 'rom' && !board) || voice.input === value) return;
       if (fx) rig.fx.kill(ctx.currentTime);
       if (value !== 'rom') releaseAll();
@@ -1214,8 +1231,8 @@
     };
     voice.ready.then(ready, () => ready('none'));
     return {
-      selectInput, update, showParts, choosePart,
-      get input() { return wantedInput; }, get part() { return selectedPart; },
+      selectInput, update, showParts, choosePart, showPartActivity,
+      get input() { return wantedInput; }, get targets() { return targets(); },
       attach(next) {
         board = next;
         player = new api.Player(board, voice.send);
@@ -1724,6 +1741,9 @@
     $('d-gates').textContent = [0, 1, 2, 3].map(i => (gates >> i) & 1 ? '█' : '·').join(' ');
     $('d-cv').textContent = CV_ROLES.map((_, i) => device.dacVolts(device.dac(i)).toFixed(2)).join(' ');
     $('midi').textContent = midiLines.join('\n');
+    if (fullMidiSong()) {
+      for (const panel of Object.values(sh101Panels)) panel.showPartActivity();
+    }
     if (info.fatal) $('phase').textContent = 'Ошибка симулятора: ' + info.fatal;
     else if (phase === 'midi-loading') $('phase').textContent = 'Подготовка MIDI-дорожек…';
     else if (midiRun) {
