@@ -292,6 +292,10 @@ function posed(show, plan, tab, stats) {
       if (!res[side].ok) fail(t, key, '(4) the driver says the ' + side + ' pose is not ok');
       const left = rigs[side].violations(res[side].touching);
       if (left.length) fail(t, key, '(4) the ' + side + ' hand is in a control (' + left.length + ' vertices)', left[0].mm);
+      // Every vertex of the mesh too, not only the clearance vertices (a
+      // touching fingertip may still sink 1 mm into its own control).
+      const all = rigs[side].violations(res[side].touching, { mesh: true });
+      if (all.length) fail(t, key, '(4) the ' + side + ' hand\'s mesh is in a control (vertex ' + all[0].vertex + ', ' + all.length + ' vertices)', all[0].mm);
       const low = lowestMm(side);
       if (low < -UNDER_MM) fail(t, key, '(4) the ' + side + ' hand is under the plate', -low);
     }

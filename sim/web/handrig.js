@@ -233,11 +233,28 @@
       return best;
     };
 
+    // The vertices of each finger's last two segments: at least half their
+    // weight on its distal or tip bone. A contact point is one of them
+    // (contact() below), and all of them are clearance vertices.
+    const TIP_VERTS = {}, TIP_SET = {};
+    for (const f of FINGERS) {
+      const jt = jointOf[tipOf(f)], jd = jointOf[bone(f, CHAIN[f].length - 1)], list = [];
+      for (let v = 0; v < n; v++) {
+        let w = 0;
+        for (let k = 0; k < 4; k++) if (SI[4 * v + k] === jt || SI[4 * v + k] === jd) w += SW[4 * v + k];
+        if (w >= 0.5) list.push(v);
+      }
+      TIP_VERTS[f] = list;
+      TIP_SET[f] = new Set(list);
+    }
+
     // The clearance vertices: per joint the nearest palmar and the nearest
     // dorsal vertex (a curled finger reaches down with the back of its
     // joints; Palm is a helper point outside the skin, not a joint), a 5 × 4
     // grid over the palm from the metacarpals' bases toward the knuckles, the
-    // five pads, and each last segment's underside (below).
+    // five pads, each last segment's underside (below), and every vertex of
+    // the last two segments (a fingertip's side or a thumb's joint can reach
+    // into a key the underside misses).
     const clearance = new Set();
     const add = v => { if (v >= 0) clearance.add(v); };
     for (const name in byName) {
@@ -277,6 +294,7 @@
         add(best);
       }
     }
+    for (const f of FINGERS) for (const v of TIP_VERTS[f]) add(v);
     const CLEARANCE = Array.from(clearance);
 
     // The clearance vertices by what moves them: a finger's when at least
@@ -533,19 +551,7 @@
     }
 
     // ── Contact: where a fingertip touches ──
-    // The vertices of a finger's last two segments: at least half their
-    // weight on its distal or tip bone.
-    const TIP_VERTS = {}, TIP_SET = {};
-    for (const f of FINGERS) {
-      const jt = jointOf[tipOf(f)], jd = jointOf[bone(f, CHAIN[f].length - 1)], list = [];
-      for (let v = 0; v < n; v++) {
-        let w = 0;
-        for (let k = 0; k < 4; k++) if (SI[4 * v + k] === jt || SI[4 * v + k] === jd) w += SW[4 * v + k];
-        if (w >= 0.5) list.push(v);
-      }
-      TIP_VERTS[f] = list;
-      TIP_SET[f] = new Set(list);
-    }
+    // On the vertices of a finger's last two segments (TIP_VERTS above).
     const ALL_TIPS = [].concat(...FINGERS.map(f => TIP_VERTS[f])), tipsAt = new Float64Array(3 * ALL_TIPS.length);
     const DOWN = Object.freeze({ x: 0, y: 0, z: -1 });
     // The deepest vertex of finger f's last two segments along the contact
@@ -955,15 +961,18 @@
       return true;
     }
 
-    // The clearance vertices inside a control or below the plate, deepest
-    // first. A vertex of a touching finger's last two segments (`touch`, as
-    // touchingOf gives them) may sink up to 1 mm into its own target (a
-    // fingertip pressed into silicone); nothing is exempt below the plate.
-    function violationsUp(touch) {
-      const p = skinInto(CLEARANCE, new Float64Array(3 * CLEARANCE.length)), out = [];
-      CLEARANCE.forEach((v, k) => {
+    // The clearance vertices (or `verts`) inside a control or below the
+    // plate (with `above`, those below it left out), deepest first. A vertex
+    // of a touching finger's last two segments (`touch`, as touchingOf gives
+    // them) may sink up to 1 mm into its own target (a fingertip pressed
+    // into silicone); nothing is exempt below the plate.
+    const EVERY = Array.from({ length: n }, (_, v) => v);
+    function violationsUp(touch, verts, above) {
+      verts = verts || CLEARANCE;
+      const p = skinInto(verts, new Float64Array(3 * verts.length)), out = [];
+      verts.forEach((v, k) => {
         const x = p[3 * k], y = p[3 * k + 1], z = p[3 * k + 2];
-        if (!PANEL.inside(x, y, z)) return;
+        if ((above && z < 0) || !PANEL.inside(x, y, z)) return;
         const d = depth(x, y, z);
         if (touch && z >= 0 && d.mm <= 1) {
           for (const f in touch.targets) if (TIP_SET[f].has(v) && inOwnTarget(touch, f, x, y, z)) return;
@@ -972,8 +981,11 @@
       });
       return out.sort((a, b) => b.mm - a.mm);
     }
-    // violations(touching): touching as touchingOf takes it.
-    const violations = touching => violationsUp(touchingOf(touching)).map(({ vertex, mm }) => ({ vertex, mm }));
+    // violations(touching, opts): touching as touchingOf takes it; with
+    // opts.mesh every vertex of the mesh at or above the plate (below it a
+    // bound of its own applies), else the clearance vertices.
+    const violations = (touching, opts) => violationsUp(touchingOf(touching), opts && opts.mesh ? EVERY : null, !!(opts && opts.mesh))
+      .map(({ vertex, mm }) => ({ vertex, mm }));
 
     // Curls free finger f toward the fist (the thumb toward lift) just
     // enough, found by bisection, that each of its clearance vertices is

@@ -199,9 +199,31 @@ section('rig', () => {
 
     const { CLEARANCE, PALM } = rig;
     const n = HAND_MODEL[side].mesh.count;
-    // About 60 over the palm, knuckles and pads, plus three under each
-    // fingertip's last segment (Task 3).
-    assert.ok(CLEARANCE.length >= 40 && CLEARANCE.length <= 90, side + ': CLEARANCE has ' + CLEARANCE.length);
+    // Every vertex of each finger's last two segments (at least half its
+    // weight on the distal or tip bone: where a contact point is picked);
+    // besides them about 60 over the palm, knuckles and pads.
+    const boneName = f => (f === 'pinky' ? 'Little' : f[0].toUpperCase() + f.slice(1));
+    const tipsOf = f => {
+      const model = HAND_MODEL[side], SI = decode(model.mesh.skinIndex, Uint16Array), SW = decode(model.mesh.skinWeight, Float32Array);
+      const want = new Set([boneName(f) + '_Distal', boneName(f) + '_Tip'].map(b => b + (side === 'right' ? '_R' : '_L')));
+      const out = [];
+      for (let v = 0; v < n; v++) {
+        let w = 0;
+        for (let k = 0; k < 4; k++) if (want.has(model.bones[model.joints[SI[4 * v + k]]].name)) w += SW[4 * v + k];
+        if (w >= 0.5) out.push(v);
+      }
+      return out;
+    };
+    const tips = new Set();
+    for (const f of FINGERS) {
+      const list = tipsOf(f);
+      assert.ok(list.length > 100, side + ': the ' + f + '\'s last two segments have ' + list.length + ' vertices');
+      for (const v of list) tips.add(v);
+      assert.ok(list.every(v => rig.FINGER_CLEARANCE[f].includes(v)), side + ': the ' + f + '\'s fingertip is in its clearance group');
+    }
+    const others = CLEARANCE.filter(v => !tips.has(v)).length;
+    assert.ok(others >= 40 && others <= 90, side + ': CLEARANCE has ' + others + ' vertices besides the fingertips');
+    assert.strictEqual(CLEARANCE.length, others + tips.size, side + ': CLEARANCE holds every fingertip vertex');
     assert.strictEqual(new Set(CLEARANCE).size, CLEARANCE.length, side + ': CLEARANCE vertices differ');
     assert.ok(CLEARANCE.every(v => Number.isInteger(v) && v >= 0 && v < n), side + ': CLEARANCE indices');
     assert.ok(PALM.length >= 20 && PALM.length < CLEARANCE.length && PALM.every(v => CLEARANCE.includes(v)),
@@ -1233,6 +1255,25 @@ section('drive', () => {
     burst(list, 0, 1, 2000000, 3);
     everywhere('steps 1 2, then TRACK', sorted(list));
     everywhere('holdEdit', holdEdit([0, 1, 2], 126000).list);
+  }
+
+  // A free fingertip's side in an unpressed key: in song 0 (classic, base)
+  // 222 093 529 into the show the left index presses pad (2, 2) and its
+  // thumb's last segment hung 3.4 mm into pad (4, 6) (vertex 1004), which
+  // no clearance vertex covered. Every vertex of the last two segments is
+  // a clearance vertex now: the free thumb curls out, and nothing of either
+  // mesh is in a control.
+  {
+    const show = Artist.buildShow(undefined, { song: 0, form: 'classic' });
+    const driver = new HandRig.Driver(rigs, HandPlan.build(show.actions)), res = driver.pose(222093529);
+    assert.ok(!res.left.away && fingersOf(res.left.touching) === 'index', 'song 0 at 222 093 529: ' + fmt(res.left));
+    for (const side of ['left', 'right']) {
+      const left = rigs[side].violations(res[side].touching, { mesh: true });
+      assert.deepStrictEqual(left, [], 'song 0 at 222 093 529: the ' + side + ' mesh is in a control: ' + fmt(left.slice(0, 3)));
+    }
+    const p = rigs.left.skinned([1004]);
+    assert.ok(!PANEL.inside(p[0], p[1], p[2]), 'song 0 at 222 093 529: the left thumb\'s vertex 1004 is in a control: ' + fmt(p));
+    assert.strictEqual(driver.failures, 0, 'song 0 at 222 093 529: failures');
   }
 
   // The away hand is out of the other hand's way: the right hand on MUTE 0
