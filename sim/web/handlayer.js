@@ -206,12 +206,17 @@
         r.toneMapping = 0;              // none: the skin keeps its texture's colour
 
         const scene = new T.Scene();
-        const pmrem = new T.PMREMGenerator(r);
-        const room = new T.RoomEnvironment();
-        scene.environment = pmrem.fromScene(room, 0.04).texture;
+        // The dim room the skin reflects, rendered into a texture (again
+        // after a lost context: a rendered texture does not come back).
+        const environment = () => {
+          const pmrem = new T.PMREMGenerator(r), room = new T.RoomEnvironment();
+          if (scene.environment) scene.environment.dispose();
+          scene.environment = pmrem.fromScene(room, 0.04).texture;
+          pmrem.dispose();
+          if (room.dispose) room.dispose();
+        };
+        environment();
         scene.environmentIntensity = 0.35;
-        pmrem.dispose();
-        if (room.dispose) room.dispose();
 
         // The eye is in front of the panel and high above it, looking straight
         // down; the image plane stays parallel to the panel (a shifted lens),
@@ -458,10 +463,12 @@
         if (root.ResizeObserver) new ResizeObserver(() => layer.resize()).observe(container);
         // A lost context (the GPU reset, too many contexts) draws nothing
         // until the browser restores it; three.js rebuilds its own state
-        // then, and the next frame draws everything again.
+        // then and uploads the textures again, the room's reflection is
+        // rendered anew, and the next frame draws everything again.
         canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); lost = true; });
         canvas.addEventListener('webglcontextrestored', () => {
           lost = false;
+          environment();
           dirty = true; lastT = NaN;
           layer.resize();
         });

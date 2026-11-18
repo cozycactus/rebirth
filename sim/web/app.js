@@ -18,10 +18,12 @@
   let generation = 0;             // the show's number: startShow, endShow and reboot each begin a new one
   let lastTickWall = 0;           // wall() at the last tick
   // The hands (handlayer.js): the layer once loaded; whether the last
-  // frame showed them (then the artist's touches get no ring); a generation
-  // whose plan failed (the ring for the rest of that show); a generation
-  // that has logged a pose off its targets.
-  let handLayer = null, handsOn = false, handsFailed = -1, handsWarned = -1;
+  // frame showed them (then the artist's touches get no ring); whether a
+  // touch since then was ringed by another state than that (the next frame
+  // marks every held control again); a generation whose plan failed (the
+  // ring for the rest of that show); a generation that has logged a pose
+  // off its targets.
+  let handLayer = null, handsOn = false, touchesStale = false, handsFailed = -1, handsWarned = -1;
   const artistHeld = new Set();   // the controls the artist holds down now, as io.touch set them
   const knobAngle = [0, 0];
   const anims = {};               // rig knob moves in progress, for the sliders
@@ -315,7 +317,9 @@
       const el = elementFor(a);
       if (!el) return;
       if (a.down) artistHeld.add(el); else artistHeld.delete(el);
-      el.classList.toggle('finger', a.down && !handsShown());    // with the hands, a finger is drawn instead
+      const ring = !handsShown();     // with the hands, a finger is drawn instead
+      if (ring === handsOn) touchesStale = true;
+      el.classList.toggle('finger', a.down && ring);
       el.classList.toggle('down', a.down);
     },
     rig(id, value, ramp) { moveKnob(id, value, ramp, device.now()); },
@@ -990,8 +994,9 @@
     requestAnimationFrame(frame);
     handsPart(() => {
       const shown = handsShown();
-      if (shown === handsOn) return;
+      if (shown === handsOn && !touchesStale) return;
       handsOn = shown;
+      touchesStale = false;
       redoTouches();
       if (handLayer) handLayer.setVisible(shown);
     });
