@@ -98,14 +98,12 @@
       k('drums.level', 'Kit level', 'Drums', 0.85), k('kick.level', 'Kick level', 'Drums', 0.9),
       k('fx.level', 'Level', 'FX', 0.6), k('fx.riserBars', 'Riser length', 'FX', 8, 1, 16, 'bars'));
     if (SH101) {
-      for (const role of ['bass', 'lead', 'arp', 'rom']) {
+      for (const role of ['bass', 'lead', 'arp', 'fx']) {
         const patch = SH101.defaults(role);
         for (const def of SH101.controls) {
-          if (def.romOnly && role !== 'rom') continue;
           out.push(k(role + '.' + def.id, def.label, role.toUpperCase(), patch[def.id], 0, SH101.max(def)));
         }
       }
-      out.push(k('fx.diodes', 'D30/D31', 'FX', 0, 0, 1));
     }
     // The mixer strips' pan (0.5 is the centre) and their sends to the
     // shared delay and reverb, set where the mix had them fixed before. The
@@ -504,19 +502,21 @@
       this.rig = rig;
       this.role = role;
       this.effectBus = effectBus;
+      this.powered = true;
+      this.useROM = false;
       this.ready = SH101 ? this.start() : Promise.resolve('none');
     }
 
     async start() {
       const rig = this.rig, ctx = rig.ctx, role = this.role;
-      const effects = role === 'fx', rom = role === 'rom';
-      const parameters = effects ? ['diodes'] : SH101.controls.filter(def => rom || !def.romOnly).map(def => def.id);
+      const effects = role === 'fx';
+      const parameters = SH101.controls.map(({ id }) => id);
       let node, send, mode;
       try {
         if (await rig.sh101Module) {
           node = new AudioWorkletNode(ctx, 'rebirth-sh101', {
             numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
-            processorOptions: { effects, rom },
+            processorOptions: { role },
           });
           for (const id of parameters) rig.bind(role + '.' + id, node.parameters.get(id), (value) => value);
           send = (event) => node.port.postMessage(event);
@@ -526,7 +526,7 @@
         node = null;  // Loaded from disk, or this browser cannot run the processor.
       }
       if (!node && ctx.createScriptProcessor) {
-        const voice = new SH101.Voice(ctx.sampleRate, effects, rom), settings = SH101.defaults(role);
+        const voice = new SH101.Voice(ctx.sampleRate, effects), settings = SH101.defaults(role);
         node = ctx.createScriptProcessor(1024, 0, 1);
         node.onaudioprocess = (event) => {
           const output = event.outputBuffer.getChannelData(0);
@@ -542,17 +542,26 @@
       }
       if (!node) return 'none';
       if (effects) chain(node, rig.gain(3.3), this.effectBus);
-      else if (rom) rig.strip(node, { k: 4.5 });
       else rig.strip(node, { id: role, level: role + '.level', k: SH101_STRIP_GAIN[role], panned: role !== 'bass' });
       this.node = node;
       this.send = send;
       return mode;
     }
 
-    on(note, _velocity, t) { this.send?.({ type: 'note', note, down: true, t }); }
-    off(note, t) { this.send?.({ type: 'note', note, down: false, t }); }
-    bend(value, t) { this.send?.({ type: 'bend', value, t }); }
-    kill(t) { this.send?.({ type: 'kill', t }); }
+    get external() { return this.powered && !this.useROM; }
+    setInput(useROM) {
+      if (this.useROM === useROM) return;
+      this.useROM = useROM;
+      this.send?.({ type: 'source', rom: useROM, t: this.rig.ctx.currentTime });
+    }
+    setPower(powered) {
+      this.powered = powered;
+      this.send?.({ type: 'kill', t: this.rig.ctx.currentTime });
+    }
+    on(note, _velocity, t) { if (this.external) this.send?.({ type: 'note', note, down: true, t }); }
+    off(note, t) { if (this.external) this.send?.({ type: 'note', note, down: false, t }); }
+    bend(value, t) { if (this.external) this.send?.({ type: 'bend', value, t }); }
+    kill(t) { if (this.external) this.send?.({ type: 'kill', t }); }
   }
 
   function makePad(rig) {
@@ -767,6 +776,7 @@
       this.useSH101 = enabled;
     }
     on(note, vel, t) {
+      if (!this.sh101.external) return;
       if (this.useSH101) {
         const rise = vel >= 120;
         this.sh101.send({ type: 'sweep', rise, duration: rise ? this.riserDuration(t) : 0.75, t });
@@ -883,6 +893,7 @@
         : Promise.resolve(false);
       this.sh101 = Object.fromEntries(['bass', 'lead', 'arp'].map(role => [role, new SH101Voice(this, role)]));
       this.fx = new Fx(this);
+      this.sh101.fx = this.fx.sh101;
       this.inst = [
         new Drums(this), this.sh101.bass,
         new AcidVoice(this, 'acid1', 'saw'), new AcidVoice(this, 'acid2', 'square'),
@@ -890,11 +901,6 @@
       ];
       // Resolves once the 303s can sound; until then their notes are dropped.
       this.ready = this.startAcids([this.inst[2], this.inst[3]]);
-    }
-
-    createSH101ROMVoice() {
-      this.romVoice ??= new SH101Voice(this, 'rom');
-      return this.romVoice;
     }
 
     startAcids(acids) {

@@ -23,11 +23,17 @@
 
   class Board {
     static async load(createCore, image) {
+      const [board] = await Board.loadAll(createCore, image, 1);
+      return board;
+    }
+
+    static async loadAll(createCore, image, count) {
       if (image.byteLength !== 2048) throw new Error('ROM должен занимать 2048 байт.');
-      const digest = await crypto.subtle.digest('SHA-256', image);
+      const bytes = new Uint8Array(image).slice();
+      const digest = await crypto.subtle.digest('SHA-256', bytes);
       const hash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
       if (hash !== ROM_SHA256) throw new Error('Этот файл не совпадает с ROM Roland 80C49-6-7301.');
-      return new Board(await createCore(), new Uint8Array(image));
+      return Promise.all(Array.from({ length: count }, async () => new Board(await createCore(), bytes)));
     }
 
     constructor(core, bytes) {
@@ -86,7 +92,7 @@
 
       let last = board.state & SOUND_BITS;
       if (running) {
-        if (rebase) this.send({ type: 'kill', t: now });
+        if (rebase) this.send({ type: 'source', rom: true, t: now });
         if (rebase || this.rate !== board.rate) {
           this.send({ type: 'romClock', hz: board.rate, phase: board.phase, t: time });
           this.rate = board.rate;

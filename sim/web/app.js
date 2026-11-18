@@ -550,7 +550,11 @@
       const p = rig && rig.params.find(x => x.id === strip.level), master = i === STRIPS.length - 1;
       const el = document.createElement('div');
       el.className = 'strip' + (master ? ' master' : '');
-      el.innerHTML = `<span class="lamp">${strip.name}</span><div class="mknobs"></div><div class="well"><input class="fader" type="range" aria-label="${strip.name}">` +
+      const synthPanel = window.SH101 && p && $('sh101-' + strip.id + '-panel');
+      const lampMarkup = synthPanel
+        ? `<a class="lamp" href="#${synthPanel.id}" aria-label="${strip.name} · SH-101">${strip.name}</a>`
+        : `<span class="lamp">${strip.name}</span>`;
+      el.innerHTML = lampMarkup + `<div class="mknobs"></div><div class="well"><input class="fader" type="range" aria-label="${strip.name}">` +
         (master ? '<div class="vu"><i></i></div>' : '') + `</div><span class="val"></span>` +
         (master ? '' : `<button type="button" aria-pressed="false" aria-label="Mute ${strip.name}">M</button>`);
       box.appendChild(el);
@@ -558,6 +562,10 @@
       if (!master) lamp.dataset.i = i;
       lamp.dataset.tip = master ? 'Общий выход всех синтезаторов.'
         : 'Вспыхивает, когда прибор шлёт ноту этому инструменту.' + (strip.name.startsWith('ACID') ? ' Это модель x0xb0x (схема TB-303) из x0xb0x VCF Bench.' : '');
+      if (synthPanel) {
+        lamp.dataset.tip = 'Открыть панель SH-101 канала ' + strip.name + '. ' + lamp.dataset.tip;
+        lamp.addEventListener('click', () => { synthPanel.open = true; });
+      }
       if (!p) { fader.disabled = true; return; }
       // Sends to the Effects board, then pan, as on a console.
       const knobs = el.querySelector('.mknobs');
@@ -612,107 +620,140 @@
     });
   }
 
-  function buildSH101Fields(role, fields, sections = {}) {
-    for (const [group, entries] of window.SH101.groups) {
-      const visible = entries.filter(def => role === 'rom' || !def.romOnly);
-      if (!visible.length) continue;
-      const fieldset = document.createElement('fieldset');
-      const legend = document.createElement('legend');
-      legend.textContent = group;
-      fieldset.appendChild(legend);
-      for (const def of visible) {
-        const id = role + '.' + def.id;
-        const label = document.createElement('label');
-        label.textContent = def.label;
-        if (def.tip) label.dataset.tip = def.tip;
-        const input = document.createElement(def.options ? 'select' : 'input');
-        input.id = 'sh101-' + role + '-' + def.id;
-        if (def.options) def.options.forEach((name, index) => input.add(new Option(name, index)));
-        else {
-          input.type = 'range';
-          input.min = 0;
-          input.max = 1;
-          input.step = 0.005;
-        }
-        input.value = rig.getParam(id);
+  function buildSH101Fields(role, voiceControls, performance, accessories, clock) {
+    const makeControl = (def) => {
+      const id = role + '.' + def.id;
+      const label = document.createElement('label');
+      const title = document.createElement('span');
+      title.textContent = def.face || def.label;
+      label.appendChild(title);
+      label.dataset.tip = def.tip || def.label;
+      const input = document.createElement(def.options ? 'select' : 'input');
+      input.id = 'sh101-' + role + '-' + def.id;
+      input.setAttribute('aria-label', def.label);
+      if (def.options) def.options.forEach((name, index) => input.add(new Option(name, index)));
+      else {
+        input.type = 'range';
+        input.min = 0;
+        input.max = 1;
+        input.step = 0.005;
+      }
+      input.value = rig.getParam(id);
+      if (def.id === 'diodes') {
+        label.appendChild(input);
+        accessories.prepend(label);
         input.addEventListener('input', () => userSet(id, +input.value));
         sliders[id] = input;
-        label.appendChild(input);
-        fieldset.appendChild(label);
+        return null;
       }
-      const section = sections[group];
-      if (section) fieldset.appendChild(section.controls);
-      (section?.parent || fields).appendChild(fieldset);
+      const actuator = document.createElement('span');
+      const setting = document.createElement('span');
+      const max = window.SH101.max(def);
+      actuator.className = 'sh101-actuator';
+      setting.className = 'sh101-setting';
+      setting.setAttribute('aria-hidden', 'true');
+      label.className = 'sh101-control ' + (def.dial ? 'sh101-dial' : def.options ? 'sh101-switch' : 'sh101-fader');
+      actuator.appendChild(input);
+      if (def.dial || def.options) actuator.appendChild(document.createElement('i'));
+      label.append(actuator, setting);
+      const reflect = () => {
+        const value = +input.value;
+        if (def.dial) actuator.style.setProperty('--angle', (value / max * 270 - 135) + 'deg');
+        if (def.options) {
+          actuator.style.setProperty('--travel', value / max);
+          setting.textContent = (def.marks || def.options)[value];
+        }
+      };
+      reflect();
+      input.addEventListener('input', () => { reflect(); userSet(id, +input.value); });
+      sliders[id] = { get value() { return input.value; }, set value(value) { input.value = value; reflect(); } };
+      return label;
+    };
+    for (const [group, entries] of window.SH101.groups) {
+      const bank = document.createElement('section');
+      const heading = document.createElement('h4');
+      const controls = document.createElement('div');
+      bank.className = 'sh101-bank';
+      controls.className = 'sh101-bank-controls';
+      heading.textContent = group === 'TUNE' ? '' : group;
+      if (group === 'TUNE') heading.setAttribute('aria-hidden', 'true');
+      for (const def of entries) {
+        const label = makeControl(def);
+        if (label) controls.appendChild(label);
+      }
+      bank.append(heading, controls);
+      if (group === 'MODULATOR') bank.appendChild(clock);
+      if (group === 'CONTROLLERS' || group === 'BENDER') performance.insertBefore(bank, performance.lastElementChild);
+      else voiceControls.appendChild(bank);
     }
+  }
+
+  function bindSH101Audition(role, play) {
+    const audition = $('sh101-' + role + '-audition'), status = $('sh101-' + role + '-status');
+    const strip = STRIPS.findIndex(s => s.id === role);
+    audition.addEventListener('click', async () => {
+      try {
+        await startAudio();
+        if (ctx.state === 'running') {
+          play(ctx.currentTime + 0.01);
+          lampHot[strip] = performance.now() + 100;
+          status.textContent = '';
+          return;
+        }
+      } catch { /* Surface a rejected audio resume in the same status. */ }
+      status.textContent = 'Браузер не запустил звук.';
+    });
+    return audition;
   }
 
   function buildSH101() {
-    const panel = $('sh101'), track = $('sh101-track'), audition = $('sh101-audition');
-    const status = $('sh101-status'), fxMode = $('show-fx');
-    if (!window.SH101) { fxMode.value = 'original'; return; }
-    const patches = {
-      bass: { note: 36, name: 'C2', fields: $('sh101-bass') },
-      lead: { note: 60, name: 'C4', fields: $('sh101-lead') },
-      arp: { note: 72, name: 'C5', fields: $('sh101-arp') },
+    if (!window.SH101) return;
+    const panels = Object.fromEntries(Object.entries(rig.sh101)
+      .map(([role, voice]) => [role, buildSH101Panel(role, voice)]));
+    $('sh101').hidden = false;
+    const openArpeggio = () => {
+      $('sh101-arp-panel').open = true;
+      panels.arp.selectInput(true);
     };
-    const update = () => {
-      const role = track.value;
-      for (const [id, patch] of Object.entries(patches)) patch.fields.hidden = id !== role;
-      audition.textContent = 'Пробная нота ' + patches[role].name;
-      audition.disabled = !rig.sh101[role].send;
-      status.textContent = patches[role].unavailable ? 'SH-101 недоступен в этом браузере.' : '';
-    };
-    for (const [role, patch] of Object.entries(patches)) {
-      buildSH101Fields(role, patch.fields);
-      const unavailable = () => { patch.unavailable = true; update(); };
-      rig.sh101[role].ready.then(mode => {
-        if (mode === 'none') unavailable();
-        else update();
-      }, unavailable);
-    }
-    track.addEventListener('change', update);
-    audition.addEventListener('click', async () => {
-      try {
-        const role = track.value, voice = rig.sh101[role];
-        await startAudio();
-        if (ctx.state !== 'running' || !voice.send) return;
-        voice.send({ type: 'audition', note: patches[role].note, t: ctx.currentTime + 0.01 });
-        lampHot[STRIPS.findIndex(s => s.id === role)] = performance.now() + 100;
-      } catch (error) {
-        status.textContent = 'Браузер не запустил звук.';
+    $('sh101-arp-link').addEventListener('click', openArpeggio);
+    const openLinkedPanel = () => {
+      // Keep links to the earlier arpeggio panel working.
+      if (location.hash === '#sh101-rom') openArpeggio();
+      const target = $(location.hash === '#sh101-rom' ? 'sh101-arp-panel' : location.hash.slice(1));
+      if (target?.matches('#sh101 > details')) {
+        target.open = true;
+        target.scrollIntoView();
       }
-    });
-    panel.hidden = false;
-    update();
-    const fxDiodes = $('show-fx-diodes');
-    const { options, tip } = window.SH101.controls.find(def => def.id === 'diodes');
-    options.forEach((name, index) => fxDiodes.add(new Option(name, index)));
-    fxDiodes.dataset.tip = tip;
-    fxDiodes.value = rig.getParam('fx.diodes');
-    fxDiodes.addEventListener('input', () => userSet('fx.diodes', +fxDiodes.value));
-    const updateFx = () => {
-      const enabled = fxMode.value === 'sh101' && !!rig.fx.sh101.send;
-      rig.fx.setSH101(enabled);
-      $('show-fx-diodes-label').hidden = fxDiodes.hidden = !enabled;
     };
-    fxMode.addEventListener('change', updateFx);
-    const fallback = () => { fxMode.value = 'original'; };
-    rig.fx.sh101.ready.then(mode => {
-      if (mode === 'none') fallback();
-      else { fxMode.disabled = false; updateFx(); }
-    }, fallback);
+    window.addEventListener('hashchange', openLinkedPanel);
+    openLinkedPanel();
+    loadSH101ROM(Object.values(panels));
   }
 
-  function buildSH101ROM() {
-    const api = window.SH101ROM, createCore = window.SH101Core;
-    if (!api || !createCore || !window.SH101) return;
-    const details = $('sh101-rom'), panel = $('rom-panel'), status = $('rom-status');
-    const file = $('rom-file'), fileLabel = $('rom-file-label');
-    const source = $('rom-clock-source'), pulse = $('rom-clock'), readout = $('rom-readout');
-    const power = $('rom-power'), rateLED = $('rom-lfo-led'), rateLabel = $('rom-lfo-hz');
-    const bender = $('rom-bender'), lfoMod = $('rom-bend-lfo');
+  function buildSH101Panel(role, voice) {
+    const api = window.SH101ROM, fx = role === 'fx';
+    const details = $('sh101-' + role + '-panel'), fields = $('sh101-' + role);
+    const status = $('sh101-' + role + '-status');
+    const fragment = $('sh101-rom-controls').content.cloneNode(true);
+    const control = name => details.querySelector(`[data-rom="${name}"]`);
+    details.querySelector('.sh101-transport').prepend(fragment.querySelector('[data-rom="input-label"]'));
+    fields.before(fragment.querySelector('[data-rom="accessories"]'), fragment.querySelector('[data-rom="arp-hint"]'));
+    fields.after(fragment.querySelector('[data-rom="hint"]'));
+    fields.appendChild(fragment);
+    const input = control('input');
+    const source = control('clock-source'), pulse = control('clock'), readout = control('readout');
+    const arpHint = control('arp-hint'), arpExt = control('arp-ext');
+    const power = control('power'), rateLED = control('lfo-led'), rateLabel = control('lfo-hz');
+    const bender = control('bender'), lfoMod = control('bend-lfo');
+    const fxMode = $('show-fx');
+    const note = { bass: 36, lead: 60, arp: 72, fx: 36 }[role];
+    const audition = bindSH101Audition(role, t => {
+      if (!voice.external) return;
+      if (fx) rig.fx.on(note, 100, t);
+      else voice.send({ type: 'audition', note, t });
+    });
     const leds = {}, releases = [];
-    let board, player, voice, powered = true;
+    let board, player, available = false, wantsROM = false;
     const button = (parent, label, cls = 'btn') => {
       const el = document.createElement('button');
       el.type = 'button';
@@ -722,12 +763,13 @@
       return el;
     };
     const resume = () => startAudio()?.catch(() => { status.textContent = 'Браузер не запустил звук.'; });
-    const bind = (el, change, latchable = false) => {
+    const bind = (el, change, latchable = false, keyboard = true) => {
       let pressedAt = 0, timer, latched = false, fromKeyboard = false;
       const set = (down) => { el.classList.toggle('rom-down', down); change(down); };
       const press = () => {
         clearTimeout(timer);
         pressedAt = performance.now();
+        if (keyboard && !voice.useROM) selectInput(true);
         set(true);
         resume();
       };
@@ -737,7 +779,11 @@
         // Even a quick tap must survive a complete keyboard scan.
         timer = setTimeout(() => set(false), Math.max(0, 24 - (performance.now() - pressedAt)));
       };
-      releases.push(() => { latched = false; release(); });
+      releases.push(() => {
+        latched = fromKeyboard = false;
+        clearTimeout(timer);
+        if (el.classList.contains('rom-down')) set(false);
+      });
       el.addEventListener('pointerdown', e => {
         if (e.button !== 0) return;
         if (latched) { latched = false; release(); return; }
@@ -766,11 +812,11 @@
       el.addEventListener('click', e => { if (e.detail === 0) { press(); release(); } });
     };
     const put = (word, mask, down) => down ? word | mask : word & ~mask;
-    const keys = $('rom-keys');
+    const keys = control('keys');
     for (const [parent, buttons] of [
-      [$('rom-sequencer'), { load: 'LOAD', play: 'PLAY' }],
-      [$('rom-arpeggio'), { down: 'DOWN', upDown: 'U&D', up: 'UP' }],
-      [$('rom-keyboard-functions'), { hold: 'HOLD', transpose: 'KEY TRANSPOSE' }],
+      [control('sequencer'), { load: 'LOAD', play: 'PLAY' }],
+      [control('arpeggio'), { down: 'DOWN', upDown: 'U&D', up: 'UP' }],
+      [control('keyboard-functions'), { hold: 'HOLD', transpose: 'KEY TRANSPOSE' }],
     ]) {
       for (const [id, label] of Object.entries(buttons)) {
         const el = leds[id] = button(parent, label);
@@ -778,7 +824,7 @@
         bind(el, down => { board.buttons = put(board.buttons, api.BUTTON[id], down); }, id === 'hold' || id === 'transpose');
       }
     }
-    const pedal = button($('rom-keyboard-functions'), 'Педаль HOLD');
+    const pedal = button(control('keyboard-functions'), 'Педаль HOLD');
     bind(pedal, down => { board.pedal = down; }, true);
     let white = 0;
     for (let i = 0; i < 32; i++) {
@@ -792,13 +838,13 @@
       bind(el, down => { board.keys = put(board.keys, 1 << i, down); }, true);
     }
     bind(pulse, down => { board.clockHigh = down; });
-    bind(lfoMod, down => { userSet('rom.bendLfoPressed', Number(down)); });
+    bind(lfoMod, down => { userSet(role + '.bendLfoPressed', Number(down)); }, false, false);
     const centerBender = () => {
       if (Number(bender.value) === 0.5) return;
       bender.value = 0.5;
-      userSet('rom.bender', 0.5);
+      userSet(role + '.bender', 0.5);
     };
-    bender.addEventListener('input', () => { resume(); userSet('rom.bender', +bender.value); });
+    bender.addEventListener('input', () => { resume(); userSet(role + '.bender', +bender.value); });
     bender.addEventListener('pointerdown', e => { if (e.button === 0) bender.setPointerCapture(e.pointerId); });
     for (const event of ['pointerup', 'pointercancel', 'lostpointercapture', 'blur']) {
       bender.addEventListener(event, centerBender);
@@ -806,35 +852,60 @@
     bender.addEventListener('keyup', centerBender);
     source.addEventListener('change', () => {
       board.external = source.value === 'external';
-      pulse.disabled = !powered || !board.external;
+      pulse.disabled = !voice.powered || !board.external;
+      arpExt.hidden = !board.external;
     });
     const releaseAll = () => {
-      if (!board) return;
       for (const release of releases) release();
       centerBender();
     };
     window.addEventListener('blur', releaseAll);
     details.addEventListener('toggle', () => { if (!details.open) releaseAll(); });
-    const performanceControls = $('rom-performance');
-    buildSH101Fields('rom', $('rom-fields'), {
-      MODULATOR: { parent: performanceControls, controls: $('rom-clock-controls') },
-      BENDER: { parent: performanceControls, controls: $('rom-bender-actions') },
-    });
+    buildSH101Fields(role, control('voice-controls'), control('performance-controls'),
+      control('accessories'), control('clock-indicator'));
+    rateLabel.htmlFor.value = 'sh101-' + role + '-lfoRate';
 
-    const inputs = [...Object.values(leds), ...keys.children, pedal, source, bender, lfoMod];
-    power.addEventListener('click', () => {
-      powered = !powered;
+    const inputs = [...Object.values(leds), ...keys.children, pedal, source];
+    function syncControls() {
+      const { powered, useROM } = voice;
+      input.disabled = !available || !board;
+      input.value = useROM ? 'rom' : 'midi';
       power.setAttribute('aria-pressed', String(powered));
       power.textContent = powered ? 'ON' : 'OFF';
-      for (const input of inputs) input.disabled = !powered;
-      pulse.disabled = !powered || !board.external;
-      if (powered) {
-        board.powerOn();
-        player = new api.Player(board, voice.send);
+      for (const el of inputs) el.disabled = !powered || !board || !available;
+      pulse.disabled = !powered || !available || !board?.external;
+      bender.disabled = lfoMod.disabled = !powered || !available;
+      audition.hidden = useROM;
+      readout.hidden = !useROM;
+      audition.disabled = !powered || (!available && !fx);
+      if (fx) $('sh101-fx-sequencer').hidden = useROM;
+    }
+
+    function selectInput(useROM) {
+      wantsROM = useROM;
+      if (!board || !available || voice.useROM === useROM) return;
+      if (fx) rig.fx.kill(ctx.currentTime);
+      if (!useROM) releaseAll();
+      voice.setInput(useROM);
+      player = new api.Player(board, voice.send);
+      syncControls();
+      update();
+    }
+    input.addEventListener('change', () => selectInput(input.value === 'rom'));
+
+    power.addEventListener('click', () => {
+      if (fx) rig.fx.kill(ctx.currentTime);
+      voice.setPower(!voice.powered);
+      syncControls();
+      if (voice.powered) {
+        if (board) {
+          board.powerOn();
+          player = new api.Player(board, voice.send);
+        }
         update();
       } else {
         releaseAll();
-        voice.kill(ctx.currentTime);
+        arpHint.hidden = true;
         for (const el of Object.values(leds)) el.setAttribute('aria-pressed', 'false');
         rateLED.dataset.on = 'false';
         readout.textContent = 'KCV — · RANGE — · Gate 0';
@@ -842,12 +913,16 @@
     });
 
     function update() {
-      if (!powered) return;
-      board.range = rig.getParam('rom.range');
-      board.octave = rig.getParam('rom.transpose');
-      board.trigger = rig.getParam('rom.trigger');
-      board.rate = window.SH101.lfoFrequency(rig.getParam('rom.lfoRate'));
-      const s = player.tick(performance.now() / 1000, ctx.state === 'running' ? ctx.currentTime : null);
+      if (!board || !voice.powered) return;
+      board.range = rig.getParam(role + '.range');
+      board.octave = rig.getParam(role + '.transpose');
+      board.trigger = rig.getParam(role + '.trigger');
+      board.rate = window.SH101.lfoFrequency(rig.getParam(role + '.lfoRate'));
+      const audible = voice.useROM && ctx.state === 'running';
+      const s = player.tick(performance.now() / 1000, audible ? ctx.currentTime : null);
+      if (!details.open) return;
+      const showArpHint = voice.useROM && (s.mode === 'up' || s.mode === 'down' || s.mode === 'upDown');
+      if (arpHint.hidden === showArpHint) arpHint.hidden = !showArpHint;
       const lfoOn = String(board.phase < 0.5);
       if (rateLED.dataset.on !== lfoOn) rateLED.dataset.on = lfoOn;
       const hz = board.rate.toFixed(1) + ' Гц';
@@ -860,21 +935,53 @@
       if (readout.textContent !== value) readout.textContent = value;
     }
 
+    if (fx) {
+      const riser = $('sh101-fx-riser-bars');
+      const id = 'fx.riserBars', duration = rig.params.find(p => p.id === id);
+      for (let bars = duration.min; bars <= duration.max; bars++) riser.add(new Option(bars, bars));
+      riser.value = duration.value;
+      riser.addEventListener('input', () => userSet(id, +riser.value));
+      sliders[id] = riser;
+      fxMode.addEventListener('change', () => { rig.fx.setSH101(fxMode.value === 'sh101'); syncControls(); });
+    }
+    const ready = mode => {
+      available = mode !== 'none';
+      if (fx) {
+        fxMode.disabled = !available;
+        if (!available) fxMode.value = 'original';
+        rig.fx.setSH101(available && fxMode.value === 'sh101');
+      } else if (!available) status.textContent = 'SH-101 недоступен в этом браузере.';
+      syncControls();
+      selectInput(wantsROM);
+    };
+    voice.ready.then(ready, () => ready('none'));
+    return {
+      selectInput, update,
+      attach(next) {
+        board = next;
+        player = new api.Player(board, voice.send);
+        syncControls();
+        selectInput(wantsROM);
+      },
+    };
+  }
+
+  function loadSH101ROM(panels) {
+    const api = window.SH101ROM, createCore = window.SH101Core, status = $('rom-status');
+    if (!api || !createCore) { status.textContent = 'Эмулятор ROM 80C49 недоступен.'; return; }
+    const file = $('rom-file'), fileLabel = $('rom-file-label');
+
     async function load(readImage) {
       if (file.disabled) return;
       file.disabled = true;
       status.textContent = 'Загружается ROM 80C49-6-7301…';
       try {
-        const next = await api.Board.load(createCore, await readImage());
-        voice = rig.createSH101ROMVoice();
-        if (await voice.ready === 'none') throw new Error('Звуковой движок SH-101 недоступен в этом браузере.');
-        board = next;
-        player = new api.Player(board, voice.send);
-        status.textContent = 'Оригинальный ROM 80C49-6-7301 загружен';
+        const image = await readImage();
+        const boards = await api.Board.loadAll(createCore, image, panels.length);
+        panels.forEach((panel, i) => panel.attach(boards[i]));
+        status.textContent = 'ROM 80C49-6-7301 загружен во все четыре SH-101';
         fileLabel.hidden = file.hidden = true;
-        panel.hidden = false;
-        update();
-        setInterval(update, 10);
+        setInterval(() => { for (const panel of panels) panel.update(); }, 10);
       } catch (error) {
         status.textContent = error.message;
         fileLabel.hidden = file.hidden = false;
@@ -884,13 +991,9 @@
     }
 
     file.addEventListener('change', () => { if (file.files.length) load(() => file.files[0].arrayBuffer()); });
-    details.hidden = false;
-    $('sh101-arp-link').addEventListener('click', () => { details.open = true; });
-    window.addEventListener('hashchange', () => { if (location.hash === '#' + details.id) details.open = true; });
     const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
     const local = loopback && new URLSearchParams(location.search).get('sh101') === 'local';
-    if (local || location.hash === '#' + details.id) details.open = true;
-    // Use the upstream dump at a fixed revision. Board.load checks its SHA-256.
+    // Use the upstream dump at a fixed revision. The emulator checks its SHA-256.
     const romURL = local ? './sh101.rom'
       : 'https://raw.githubusercontent.com/joebritt/SH101_Disassembled/708cde01906312de7801204989628aa4610a4e45/80C49_SH101.bin';
     load(async () => {
@@ -912,14 +1015,12 @@
     buildMixer();
     if (!rig) {
       $('synth-status').textContent = 'Синтезаторы не загрузились.';
-      $('show-fx').value = 'original';
       return;
     }
     buildEffects();
     buildAcid('acid1', 2, 'ACID 1', 4);
     buildAcid('acid2', 3, 'ACID 2', 5);
     buildSH101();
-    buildSH101ROM();
   }
   function startAudio() {
     return ctx?.resume();

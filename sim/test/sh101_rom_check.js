@@ -182,12 +182,38 @@ async function testROM(image) {
   assert.ok(Math.abs(crossings / 0.3 - 440) < 4, 'A3 with 4′ produces A4');
 }
 
+async function testIndependentBoards(image) {
+  const boards = await Board.loadAll(createCore, image, 4);
+  assert.equal(new Set(boards.map(board => board.core.HEAPU8.buffer)).size, 4, 'each ROM runs in its own WebAssembly memory');
+  const units = boards.map(board => bench(board));
+  const notes = [53, 57, 60, 65];
+  units.forEach((unit, i) => {
+    unit.tap('load'); unit.notes(notes[i]); unit.notes(); unit.tap('load');
+  });
+  for (const unit of units) unit.tap('play');
+  units.forEach((unit, i) => {
+    assert.equal(unit.state().gate, false);
+    unit.pulse();
+    assert.equal(unit.state().pitch, notes[i] - 36);
+    assert.equal(unit.state().gate, true);
+  });
+  const [bass, lead, arp, fx] = units;
+  const snapshot = [bass, lead, fx].map(unit => [unit.board.cycles, unit.state()]);
+  arp.board.powerOn(); arp.advance();
+  assert.equal(arp.state().mode, null);
+  assert.deepEqual([bass, lead, fx].map(unit => [unit.board.cycles, unit.state()]), snapshot);
+  arp.tap('play'); arp.pulse();
+  assert.equal(arp.state().pitch, notes[2] - 36, 'the ARP sequence survives its own POWER cycle');
+}
+
 async function main() {
   await testBus();
   const fixture = process.env.SH101_ROM || path.join(__dirname, '../web/sh101.rom');
   if (process.env.SH101_ROM || fs.existsSync(fixture)) {
-    await testROM(fs.readFileSync(fixture));
-    console.log('SH-101 ROM: bus/DAC, 32 keys, priority, transpose, ARP/HOLD, SEQ/LEGATO/REST, POWER, clocks and gated audio OK');
+    const image = fs.readFileSync(fixture);
+    await testROM(image);
+    await testIndependentBoards(image);
+    console.log('SH-101 ROM: bus/DAC, 32 keys, ARP/HOLD, SEQ/LEGATO/REST, POWER, gated audio and four independent boards OK');
   } else {
     console.log('SH-101 ROM: bus/DAC OK; original ROM scenarios require SH101_ROM=/path/to/sh101.rom');
   }

@@ -102,7 +102,7 @@ for (const sampleRate of [44100, 48000, 96000]) {
 }
 
 for (const rise of [false, true]) {
-  const fx = new Voice(fs, true), lead = new Voice(fs), p = defaults();
+  const fx = new Voice(fs, true), lead = new Voice(fs), p = defaults('fx');
   const head = new Float32Array(fs / 4), tail = new Float32Array(3 * fs / 4);
   fx.enqueue({ type: 'sweep', t: 0, duration: 0.8, rise });
   lead.enqueue({ type: 'note', note: 69, down: true, t: 0 });
@@ -115,8 +115,34 @@ for (const rise of [false, true]) {
   assert.equal(fx.effectPitch > headPitch, rise, 'pitch CV sweeps in the correct direction');
   assert.equal(fx.effectCutoff > headCutoff, rise, 'the VCF follows the sweep');
   assert.ok(tail.subarray(0.6 * fs).every(y => y === 0), 'one-shot gate ends on time');
-  lead.render(tail, 0, p);
+  lead.render(tail, 0, defaults('lead'));
   assert.equal(lead.note, 69, 'the lead and effect have independent gates');
   assert.ok(rms(tail) > 0.005, 'the lead keeps sounding through the sweep');
+}
+{
+  const clean = new Voice(fs, true), silent = new Voice(fs, true), p = defaults('fx');
+  const withSources = new Float32Array(fs / 4), withoutSources = new Float32Array(fs / 4);
+  const sweep = { type: 'sweep', t: 0, duration: 0.75, rise: false };
+  clean.enqueue(sweep);
+  silent.enqueue(sweep);
+  clean.render(withSources, 0, p);
+  silent.render(withoutSources, 0, { ...p, saw: 0, pulse: 0, sub: 0, noise: 0 });
+  assert.ok(rms(withSources) > 1e-4, 'FX has its own audible source mixer');
+  assert.ok(rms(withoutSources) < 1e-8, 'turning down the FX source mixer leaves only the numerical noise floor');
+}
+{
+  const voice = new Voice(fs, true), patch = defaults('fx'), out = new Float32Array(fs / 8);
+  voice.enqueue({ type: 'sweep', t: 0.1, duration: 1, rise: true });
+  voice.enqueue({ type: 'source', rom: true, t: 0 });
+  voice.enqueue({ type: 'kill', t: 0 });
+  voice.enqueue({ type: 'romClock', hz: 1, phase: 0, t: 0 });
+  voice.enqueue({ type: 'rom', pitch: 33, range: 24, gate: true, random: 0, t: 0 });
+  voice.render(out, 0, patch);
+  assert.equal(voice.rom, true, 'a player resync leaves the source selection intact');
+  assert.equal(voice.effect, null, 'the source switch cancels pending sweeps');
+  assert.ok(rms(out) > 1e-4, 'the FX voice also plays a ROM keyboard note');
+  voice.enqueue({ type: 'source', rom: false, t: 0.125 });
+  voice.render(out, 0.125, patch);
+  assert.ok(out.every(sample => sample === 0), 'returning to the external FX input closes the ROM gate');
 }
 console.log('SH-101: four-pole response, diode selection, bounded resonance, divider pitch, bender, note priority, panic and FX sweeps OK');

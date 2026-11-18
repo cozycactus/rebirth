@@ -124,16 +124,30 @@ The pad synth has no strip.
 
 ## SH-101
 
-The BASS (MIDI channel 3), LEAD (channel 6) and ARP (channel 7) strips each
-have an independent SH-101 voice. The **Голос** selector switches the
-editable patch. **Пробная нота** enables audio and plays C2 for BASS, C4 for
-LEAD or C5 for ARP. The score's old cutoff ranges in Hz are mapped onto the
-BASS and LEAD FREQ sliders. Each instrument has its own fader, pan, mute and sends.
+BASS (MIDI channel 3), LEAD (channel 6), ARP (channel 7) and FX (channel 8)
+each have an independent SH-101 voice, patch and 80C49 board. Select a strip
+name in the mixer to open its panel. Several panels can stay open. Each
+strip has its own fader, pan, mute and sends. The score's cutoff ranges in Hz
+are mapped onto the BASS and LEAD FREQ sliders.
 
-The default **Звук FX → SH-101** puts an independent voice on the FX strip (MIDI channel 8).
-A plain trigger sweeps pitch and cutoff down. An accent runs a noise and VCO
-riser for the number of bars set by the score, using MIDI Clock. The FX strip
-can also use the **ReBirth FX** patch.
+The **Вход** switch selects the source of pitch and Gate for that voice.
+**MIDI → CV/GATE** preserves playback of the ReBirth set and accepts the
+full MIDI note range. **Клавиатура · ROM** connects the panel's
+keyboard, arpeggiator and sequencer to the same voice and mixer strip.
+Playing the virtual keys or pressing ROM buttons selects the internal input.
+On the original instrument, external CV/GATE plugs disconnect the internal
+CV and Gate. [Roland SH-101 Owner's Manual, p. 37](https://cdn.roland.com/assets/media/pdf/SH-101_OM.pdf)
+
+The panels follow the hardware layout with vertical synth faders, rotary
+TUNE, WAVE and RANGE controls, the switch row above the 32 keys and BENDER
+at the left. D30/D31 and the virtual CV/GATE and EXT CLK connections sit
+above each panel. [Photo of the original panel](https://commons.wikimedia.org/wiki/File:SH-101.jpg)
+
+A plain FX trigger sweeps pitch and cutoff down. An accent runs a noise and
+VCO riser for the number of bars shown on the FX panel, using MIDI Clock.
+The FX panel has its own source mixer, PWM, resonance, diode selector and
+volume. In the external input mode, it also lets you choose **ReBirth FX**
+and audition either sound.
 
 The voice in `sim/web/sh101.js` uses the CEM3340 saw and PWM pulse, the
 4013's three sub modes and a noise source. The C59 ADSR uses exponential
@@ -144,8 +158,8 @@ directly. BASS starts with static PWM and a stronger sub; LEAD starts with
 LFO PWM. ARP starts with a short-decay pulse and saw patch. The voices use
 A440 to match the rig.
 
-- **D30/D31** selects the diode pair per voice. The MIDI voices and FX start
-  with Roland's 1S2473. The ROM panel starts with Rev-A's 1N4148. The 1N4148
+- **D30/D31** selects the diode pair per voice. All four start with Roland's
+  1S2473 and can be switched to Rev-A's 1N4148. The 1N4148
   fit uses the 25 °C curve from 10 µA to 1 mA.
   [Vishay 1N4148, Fig. 2](https://www.vishay.com/docs/81857/1n4148.pdf)
 - Roland's circuit drawing gives the mixer resistors, four 240 pF IR3109
@@ -173,20 +187,22 @@ would require test signals and captures from a real SH-101.
 ### Original 80C49 ROM
 
 The page automatically fetches the 2048-byte 80C49-6-7301 image at startup,
-verifies its SHA-256 and runs it locally on the MCS-48 decoder from
-`cozycactus/sh101_midi` at 6 MHz. The controls are in **SH-101 · ROM 80C49**.
+verifies its SHA-256 and passes it to four separate WebAssembly instances
+of the MCS-48 decoder from `cozycactus/sh101_midi` at 6 MHz. Each board has
+its own CPU state, sequence RAM, clock and panel inputs.
 [Pinned ROM source](https://github.com/joebritt/SH101_Disassembled/blob/708cde01906312de7801204989628aa4610a4e45/80C49_SH101.bin)
 
 The 32-key matrix, panel buttons, HOLD pedal and LFO or manual EXT CLK feed
 the virtual U6. Its keyboard CV, oscillator RANGE, random DAC, Gate, portamento and
 clock-reset outputs drive the same SH-101 audio model. [MCS-48 decoder source](https://github.com/cozycactus/sh101_midi/blob/8142852/src/mcs48_core.h)
 
-Use **SH-101 · ARPEGGIO** to open the ROM panel. Select **DOWN**, **U&D** or
-**UP**, then Shift-click a chord. **LFO/CLK RATE** sets the speed and its LED
+Use **SH-101 · ARPEGGIO** to open the ARP channel and select its ROM input.
+Select **DOWN**, **U&D** or **UP**, then Shift-click a chord. With **HOLD** on,
+short taps also latch notes. **LFO/CLK RATE** sets the speed and its LED
 shows the internal clock. The spring-return **BENDER** has independent VCO
 and VCF sensitivities. Hold **LFO MOD** to send triangle modulation to both
 paths. The modulation amplitude is nominal. **POWER** restarts the ROM with
-the sequence RAM retained in the open page.
+that channel's sequence RAM retained in the open page.
 [Photo of the original panel](https://commons.wikimedia.org/wiki/File:SH-101.jpg)
 
 For a tied sequencer note, hold HOLD while entering the new note and
@@ -202,7 +218,7 @@ uses Q26/Q27 (2SC1815), C52 (10 µF), R129 (5.6 kΩ), R113 (15 kΩ), and
 the antiparallel 1N4148 pair. The DSP models Q26/Q27 by their nominal
 gain and follower behavior. [SH-101 schematic at tag Rev-A, 68f0691](https://github.com/cozycactus/sh-101/blob/Rev-A/sh-101.kicad_sch)
 
-If the download fails, the ROM panel offers a file picker. For local use,
+If the download fails, the SH-101 panels offer a shared file picker. For local use,
 `?sh101=local` on a loopback server loads `sh101.rom` beside `index.html`.
 To extract the file from a sibling `sh101_midi` checkout and exercise the
 original ROM regression:

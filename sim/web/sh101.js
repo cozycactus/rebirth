@@ -4,25 +4,30 @@
   'use strict';
 
   const groups = [
+    ['TUNE', [
+      { id: 'tune', label: 'Tune', value: 0.5, dial: true },
+    ]],
     ['MODULATOR', [
-      { id: 'lfoRate', label: 'LFO/CLK RATE', value: 0.47, tip: 'Скорость LFO, арпеджио и секвенсора от 0,1 до 30 Гц.' },
-      { id: 'lfoWave', label: 'WAVE FORM', value: 0, options: ['Triangle', 'Square', 'Random', 'Noise'],
+      { id: 'lfoRate', label: 'LFO/CLK RATE', face: 'RATE', value: 0.47,
+        tip: 'Скорость LFO от 0,1 до 30 Гц. На ROM-панели LFO также задаёт внутренний такт арпеджио и секвенсора.' },
+      { id: 'lfoWave', label: 'WAVE FORM', face: 'WAVE', dial: true, value: 0, options: ['Triangle', 'Square', 'Random', 'Noise'],
+        marks: ['TRI', 'SQR', 'RND', 'NOISE'],
         tip: 'Форма сигнала для VCO MOD и MOD VCF. PWM и рычаг BENDER используют треугольник.' },
     ]],
     ['VCO', [
-      { id: 'range', label: 'Диапазон', value: 1, options: ['16′', '8′', '4′', '2′'] },
-      { id: 'tune', label: 'Tune', value: 0.5 },
-      { id: 'vcoMod', label: 'VCO MOD', value: 0, tip: 'Глубина модуляции высоты тона выбранной формой LFO.' },
-      { id: 'pwmMode', label: 'Источник PWM', value: 2, options: ['ENV', 'MAN', 'LFO'],
-        tip: 'Ширину импульса задаёт огибающая, ползунок Pulse width или треугольник LFO.' },
-      { id: 'pwm', label: 'Pulse width', value: 0.38,
+      { id: 'vcoMod', label: 'VCO MOD', face: 'MOD', value: 0, tip: 'Глубина модуляции высоты тона выбранной формой LFO.' },
+      { id: 'range', label: 'Диапазон', face: 'RANGE', dial: true, value: 1, options: ['16′', '8′', '4′', '2′'] },
+      { id: 'pwm', label: 'Pulse width', face: 'P.W.', value: 0.38,
         tip: 'Ширина импульса в MAN и глубина её модуляции в ENV и LFO. Слышно при поднятом Pulse.' },
+      { id: 'pwmMode', label: 'Источник PWM', face: 'PWM', value: 2, options: ['ENV', 'MAN', 'LFO'],
+        tip: 'Ширину импульса задаёт огибающая, ползунок Pulse width или треугольник LFO.' },
     ]],
     ['SOURCE MIXER', [
       { id: 'pulse', label: 'Pulse', value: 0.32 },
       { id: 'saw', label: 'Saw', value: 0.9 },
       { id: 'sub', label: 'Sub', value: 0.2 },
-      { id: 'subMode', label: 'Форма Sub', value: 0, options: ['−1 октава, 50%', '−2 октавы, 50%', '−2 октавы, узкая'] },
+      { id: 'subMode', label: 'Форма Sub', face: 'MODE', value: 0, options: ['−1 октава, 50%', '−2 октава, 50%', '−2 октавы, узкая'],
+        marks: ['−1', '−2', '−2 ▏'] },
       { id: 'noise', label: 'Noise', value: 0 },
     ]],
     ['VCF · IR3109', [
@@ -30,37 +35,38 @@
       { id: 'resonance', label: 'RES', value: 0.25 },
       { id: 'diodes', label: 'D30/D31', value: 0, options: ['1S2473 · Roland', '1N4148 · Rev-A'],
         tip: 'Диоды в петле резонанса IR3109. Разница лучше слышна при высоком RES.' },
-      { id: 'envMod', label: 'ENV VCF', value: 0.32 },
-      { id: 'vcfMod', label: 'MOD VCF', value: 0, tip: 'Глубина модуляции частоты среза выбранной формой LFO.' },
+      { id: 'envMod', label: 'ENV VCF', face: 'ENV', value: 0.32 },
+      { id: 'vcfMod', label: 'MOD VCF', face: 'MOD', value: 0, tip: 'Глубина модуляции частоты среза выбранной формой LFO.' },
       { id: 'keyFollow', label: 'KYBD', value: 0.5 },
     ]],
     ['VCA', [
-      { id: 'vca', label: 'Режим VCA', value: 0, options: ['ENV', 'GATE'] },
+      { id: 'vca', label: 'Режим VCA', face: 'MODE', value: 0, options: ['ENV', 'GATE'] },
     ]],
     ['ENV', [
-      { id: 'trigger', label: 'Запуск огибающей', value: 0, options: ['GATE + TRIG', 'GATE', 'LFO'],
+      { id: 'trigger', label: 'Запуск огибающей', face: 'TRIG', value: 0, options: ['GATE + TRIG', 'GATE', 'LFO'],
+        marks: ['G+T', 'GATE', 'LFO'],
         tip: 'GATE + TRIG запускает атаку на каждой ноте. GATE сохраняет огибающую в легато. LFO повторяет её, пока клавиша нажата.' },
-      { id: 'attack', label: 'Attack', value: 0.1 },
-      { id: 'decay', label: 'Decay', value: 0.51 },
-      { id: 'sustain', label: 'Sustain', value: 0.65 },
-      { id: 'release', label: 'Release', value: 0.49 },
+      { id: 'attack', label: 'Attack', face: 'A', value: 0.1 },
+      { id: 'decay', label: 'Decay', face: 'D', value: 0.51 },
+      { id: 'sustain', label: 'Sustain', face: 'S', value: 0.65 },
+      { id: 'release', label: 'Release', face: 'R', value: 0.49 },
     ]],
     ['CONTROLLERS', [
-      { id: 'volume', label: 'VOLUME', value: 0.75 },
-      { id: 'portaMode', label: 'Режим портаменто', value: 1, options: ['OFF', 'AUTO', 'ON'] },
-      { id: 'portaTime', label: 'PORTAMENTO', value: 0.14 },
-      { id: 'transpose', label: 'TRANSPOSE', value: 1, options: ['L', 'M', 'H'] },
+      { id: 'volume', label: 'VOLUME', face: 'VOL', dial: true, value: 0.75 },
+      { id: 'portaTime', label: 'PORTAMENTO', face: 'PORTA', dial: true, value: 0.14 },
+      { id: 'portaMode', label: 'Режим портаменто', face: 'MODE', value: 1, options: ['OFF', 'AUTO', 'ON'] },
+      { id: 'transpose', label: 'TRANSPOSE', face: 'TRANS', value: 1, options: ['L', 'M', 'H'] },
     ]],
     ['BENDER', [
-      { id: 'bendVco', label: 'VCO BEND SENS', value: 1, romOnly: true, tip: 'Диапазон рычага по высоте до ±12 полутонов.' },
-      { id: 'bendVcf', label: 'VCF BEND SENS', value: 0, romOnly: true, tip: 'Глубина воздействия рычага на частоту среза фильтра.' },
-      { id: 'bendLfo', label: 'LFO MOD DEPTH', value: 0.25, romOnly: true, tip: 'Глубина модуляции VCO и VCF треугольником при удержании LFO MOD.' },
+      { id: 'bendVco', label: 'VCO BEND SENS', face: 'VCO', value: 1, tip: 'Диапазон рычага по высоте до ±12 полутонов.' },
+      { id: 'bendVcf', label: 'VCF BEND SENS', face: 'VCF', value: 0, tip: 'Глубина воздействия рычага на частоту среза фильтра.' },
+      { id: 'bendLfo', label: 'LFO MOD DEPTH', face: 'LFO', value: 0.25, tip: 'Глубина модуляции VCO и VCF треугольником при удержании LFO MOD.' },
     ]],
   ];
   const controls = [
     ...groups.flatMap(([, entries]) => entries),
-    { id: 'bender', label: 'BENDER', value: 0.5, romOnly: true },
-    { id: 'bendLfoPressed', label: 'LFO MOD', value: 0, romOnly: true },
+    { id: 'bender', label: 'BENDER', value: 0.5 },
+    { id: 'bendLfoPressed', label: 'LFO MOD', value: 0 },
   ];
   function defaults(role) {
     const p = Object.fromEntries(controls.map(({ id, value }) => [id, value]));
@@ -74,12 +80,14 @@
       resonance: 0.32, envMod: 0.4, keyFollow: 0.25, attack: 0, decay: 0.35,
       sustain: 0.13, release: 0.32, portaTime: 0.095,
     });
+    if (role === 'fx') Object.assign(p, {
+      saw: 0.62, pulse: 0.25, sub: 0, noise: 0.8, resonance: 0.63, vca: 1,
+      vcfMod: 0, vcoMod: 0, keyFollow: 0, envMod: 0,
+    });
     if (role === 'rom') p.diodes = 1;
     return p;
   }
   const max = (def) => def.options ? def.options.length - 1 : 1;
-  const FX_PATCH = { ...defaults(), saw: 0.62, pulse: 0.25, sub: 0, noise: 0.8,
-    resonance: 0.63, vca: 1, vcfMod: 0, vcoMod: 0, keyFollow: 0, envMod: 0 };
 
   const TAU = 2 * Math.PI;
   const MIN_CUTOFF = 10, MAX_CUTOFF = 20000;
@@ -244,7 +252,12 @@
 
     enqueue(event) {
       const q = this.queue;
-      if (event.type === 'kill') while (q.length && q[q.length - 1].t >= event.t) q.pop();
+      if (event.type === 'kill' || event.type === 'source') {
+        for (let i = q.length - 1; i >= 0 && q[i].t >= event.t; i--) {
+          // A clock resync can kill notes at the same time as an input change.
+          if (event.type === 'source' || q[i].type !== 'source') q.splice(i, 1);
+        }
+      }
       let i = q.length;
       while (i > 0 && q[i - 1].t > event.t) i--;
       q.splice(i, 0, event);
@@ -279,22 +292,25 @@
 
     event(e, t) {
       switch (e.type) {
-        case 'note': this.key(e.note, e.down); break;
-        case 'bend': this.bend = e.value; break;
+        case 'note': if (!this.rom) this.key(e.note, e.down); break;
+        case 'bend': if (!this.rom) this.bend = e.value; break;
         case 'audition':
+          if (this.rom) break;
           if (this.auditionEnd !== Infinity) this.key(this.auditionKey, false);
           this.auditionKey = 128 + e.note;
           this.key(this.auditionKey, true);
           this.auditionEnd = t + 0.65;
           break;
         case 'sweep':
-          if (this.effects) this.effect = { start: t, duration: e.duration, rise: e.rise };
+          if (this.effects && !this.rom) this.effect = { start: t, duration: e.duration, rise: e.rise };
           break;
         case 'romClock':
+          if (!this.rom) break;
           this.lfoPhase = e.phase;
           this.lfoStep = e.hz / this.rate;
           break;
         case 'rom': {
+          if (!this.rom) break;
           // TRIG GEN monitors the keyboard CV before portamento. Range
           // CV feeds the oscillator separately and has no trigger path.
           const note = e.pitch + 36;  // F3 is code 17 with TRANSPOSE at M.
@@ -308,6 +324,11 @@
           if (e.reset) this.lfoPhase = 0;
           break;
         }
+        case 'source':
+          this.rom = e.rom;
+          this.amp = 0;
+          // Switching the patched input also silences notes from that input.
+          // Falls through.
         case 'kill':
           this.keys.length = 0;
           this.auditionEnd = Infinity;
@@ -351,14 +372,12 @@
       this.envOctaves = p.envMod * ENV_PEAK * 150 / 100;
       this.vcfModOctaves = p.vcfMod * 2.5 * 150 / 100;
       this.vcoModOctaves = p.vcoMod * 2.5 * 100 / 4700;  // R89/R90
-      if (this.rom) {
-        const bendVolts = 2 * p.bender - 1;  // nominal ±1 V at full travel
-        this.panelPitchBend = bendVolts * p.bendVco;
-        this.panelFilterBend = bendVolts * p.bendVcf * 150 / 100;  // R193/R185
-        const lfoVolts = BENDER_LFO_PEAK * p.bendLfo * p.bendLfoPressed;
-        this.panelPitchLfo = lfoVolts * 100 / 150;   // Bender R3/R2
-        this.panelFilterLfo = lfoVolts * 150 / 220;  // R193/R184
-      }
+      const bendVolts = 2 * p.bender - 1;  // nominal ±1 V at full travel
+      this.panelPitchBend = bendVolts * p.bendVco;
+      this.panelFilterBend = bendVolts * p.bendVcf * 150 / 100;  // R193/R185
+      const lfoVolts = BENDER_LFO_PEAK * p.bendLfo * p.bendLfoPressed;
+      this.panelPitchLfo = lfoVolts * 100 / 150;   // Bender R3/R2
+      this.panelFilterLfo = lfoVolts * 150 / 220;  // R193/R184
       const saw = mixLeg(p.saw, 100, 470000), pulse = mixLeg(p.pulse, 68000, 680000);
       const sub = mixLeg(p.sub, 47000, 820000), noise = mixLeg(p.noise, 100, 150000);
       this.sawGain = saw.scale * 10;    // CEM3340 pin 8: 2/3 of +15 V
@@ -403,8 +422,8 @@
       if (this.lfoWave === 3) mod = this.noise;
       const keyboard = (this.cv - 69) / 12;
       const range = this.rom ? this.romRange : this.vcoOffset;
-      const pitchBend = this.rom ? this.panelPitchBend + this.panelPitchLfo * triangle : this.bend / 6;
-      const filterBend = this.rom ? this.panelFilterBend + this.panelFilterLfo * triangle : 0;
+      const pitchBend = this.panelPitchBend + this.panelPitchLfo * triangle + this.bend / 6;
+      const filterBend = this.panelFilterBend + this.panelFilterLfo * triangle;
       const freq = this.effect ? this.effectPitch
         : 440 * 2 ** (keyboard + range + this.tune + pitchBend + this.vcoModOctaves * mod);
       const advance = Math.min(0.24, freq / this.rate);
@@ -426,19 +445,18 @@
       // filter output at R130. BA662A sees the two 150k legs through C53/R139.
       const vca = filtered * (1 + p.resonance);
       this.vcaDC += this.vcaDCRate * (vca - this.vcaDC);
-      const gain = this.vcaMode === 0 ? this.env : +held;
+      const gain = this.vcaMode === 0 && !this.effect ? this.env : +held;
       this.amp += this.gateRate * (gain - this.amp);
       const vcaInput = (vca - this.vcaDC) / (2 * THERMAL_VOLTAGE * 152);
       return 0.8 * Math.tanh(vcaInput) * this.amp * p.volume;
     }
 
-    render(out, t0, settings) {
-      if (this.effects && !this.effect && !this.queue.length) {
+    render(out, t0, p) {
+      if (this.effects && !this.rom && !this.effect && !this.queue.length) {
         out.fill(0);
         return;
       }
-      const p = this.effects ? FX_PATCH : settings;
-      this.filter.setDiodes(Math.round(settings.diodes));
+      this.filter.setDiodes(Math.round(p.diodes));
       this.update(p);
       for (let i = 0; i < out.length; i++) {
         const t = t0 + i / this.fs;
@@ -448,7 +466,7 @@
           this.key(this.auditionKey, false);
         }
         let level = 1;
-        if (this.effects) {
+        if (this.effects && !this.rom) {
           const e = this.effect;
           const elapsed = e ? t - e.start : 0;
           if (!e || elapsed >= e.duration) {
@@ -479,13 +497,13 @@
       }
       constructor(options) {
         super();
-        this.voice = new Voice(sampleRate, options.processorOptions?.effects, options.processorOptions?.rom);
-        this.settings = defaults();
+        const role = options.processorOptions?.role;
+        this.voice = new Voice(sampleRate, role === 'fx');
+        this.settings = defaults(role);
         this.port.onmessage = ({ data }) => this.voice.enqueue(data);
       }
       process(_inputs, outputs, parameters) {
-        if (this.voice.effects) this.settings.diodes = parameters.diodes[0];
-        else for (const { id } of controls) this.settings[id] = parameters[id][0];
+        for (const { id } of controls) this.settings[id] = parameters[id][0];
         this.voice.render(outputs[0][0], currentTime, this.settings);
         return true;
       }

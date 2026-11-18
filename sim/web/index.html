@@ -99,6 +99,9 @@
     border-radius: 8px; background: #191b22; min-width: 0; }
   .strip.master { background: #20232c; }
   .strip .lamp { padding: 2px 4px; font-size: 10px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .strip a.lamp { text-decoration: none; }
+  .strip a.lamp:not(.on) { color: var(--text); border-color: #535868; }
+  .strip a.lamp:hover, .strip a.lamp:focus-visible { border-color: var(--rig); }
   .strip .well { display: flex; gap: 3px; align-items: stretch; height: 96px; }
   .strip input.fader { writing-mode: vertical-lr; direction: rtl; width: 20px; height: 96px; margin: 0; accent-color: var(--rig); }
   .strip .vu { width: 5px; border-radius: 3px; background: #2a2d37; position: relative; overflow: hidden; }
@@ -121,47 +124,126 @@
   .strip.muted .mknob { opacity: .5; }
 
   .sh101 { background: #191b22; border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 12px 0; }
-  .sh101 h3 { color: var(--text); font-size: 15px; margin: 0 0 8px; }
+  #sh101 { margin-bottom: 12px; }
+  #sh101 h3 { color: var(--dim); font-size: 12px; margin: 0 0 6px; }
+  #sh101 .sh101 { margin: 0 0 6px; }
+  #sh101 summary .sub { margin-left: 6px; font-weight: 400; }
+  .sh101 summary { cursor: pointer; font-size: 15px; font-weight: 700; }
+  .sh101 { scroll-margin-top: 12px; }
+  .sh101 .row { margin-top: 8px; }
+  .sh101 .row[hidden] { display: none; }
   .sh101 .row label { color: var(--dim); font-size: 12px; }
-  .sh101-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
-    align-items: start; gap: 8px; margin-top: 10px; }
-  .sh101-fields[hidden] { display: none; }
-  .sh101-fields fieldset { min-width: 0; display: grid; gap: 6px; border: 1px solid var(--line);
-    border-radius: 6px; margin: 0; padding: 5px 8px 8px; }
-  .sh101-fields legend { color: var(--rig); font-size: 12px; padding: 0 4px; }
-  .sh101-fields label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(80px, 1.35fr);
-    align-items: center; gap: 5px; color: var(--dim); font-size: 12px; }
-  .sh101-fields input { width: 100%; min-width: 0; margin: 0; accent-color: var(--rig); }
-  .sh101-fields select { min-width: 0; }
-  .rom summary { cursor: pointer; font-size: 15px; font-weight: 700; }
-  .rom { scroll-margin-top: 12px; }
-  .rom .row { margin-top: 8px; }
-  .rom .btn { touch-action: none; user-select: none; }
-  .rom .btn.rom-down { border-color: var(--rig); }
-  .rom .btn[aria-pressed="true"] { color: #15181c; background: var(--accent); }
-  .rom-functions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-  .rom-functions fieldset { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px;
-    border: 1px solid var(--line); border-radius: 7px; margin: 0; padding: 5px 8px 8px; }
-  .rom-functions legend { color: var(--dim); padding: 0 4px; font-size: 11px; font-weight: 650; }
-  #rom-arpeggio { border-color: #73563d; }
-  #rom-arpeggio legend { color: var(--rig); }
-  .rom .rom-functions button { font-size: 11px; padding: 6px 8px; }
-  .rom-led { flex: 0 0 8px; width: 8px; height: 8px; border-radius: 50%; background: #553632; }
-  .rom-led[data-on="true"] { background: #ff9673; box-shadow: 0 0 6px #ff967370; }
-  .rom-control-row { display: flex; align-items: center; gap: 5px 8px; flex-wrap: wrap; }
-  .rom-control-row output { color: var(--dim); font-size: 12px; font-variant-numeric: tabular-nums; }
-  .sh101-fields .rom-control-row label { display: block; }
-  #rom-bender-actions input { flex: 1 1 75px; width: auto; touch-action: none; }
+  .sh101 .sh101-transport { gap: 6px 10px; }
+  .sh101-transport label, .sh101-accessories label { display: inline-flex; align-items: center; gap: 5px; }
+  .sh101-scroller { overflow-x: auto; margin-top: 10px; border-radius: 7px; }
+  .sh101-face {
+    --metal: #6a6a62; --ink: #f8f6ed; --engrave: #3e3f39; --mark: #ffc57c;
+    min-width: 565px; color: var(--ink); background: var(--metal);
+    border: 4px solid #42433d; border-top-color: #83847a; border-radius: 7px;
+    box-shadow: inset 0 0 0 1px #929389; font: 600 10px/1.15 "B612", system-ui, sans-serif;
+    user-select: none;
+  }
+  .sh101-banks { display: grid; grid-template-columns: .94fr 2.35fr 4fr 5fr 5fr 1.05fr 5fr; }
+  .sh101-bank { min-width: 0; margin: 0; border-right: 1px solid var(--engrave);
+    box-shadow: inset -1px 0 #7e7f76; }
+  .sh101-bank:last-child { border-right: 0; box-shadow: none; }
+  .sh101-bank h4 { min-height: 22px; margin: 0; padding: 6px 0; text-align: center; color: var(--ink);
+    background: #575950; box-shadow: inset 0 -1px var(--engrave); font-size: 8px;
+    letter-spacing: .035em; white-space: nowrap; }
+  .sh101-bank-controls { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr);
+    align-items: start; padding: 6px 1px 4px; }
+  .sh101-control { display: grid; justify-items: center; grid-template-rows: 13px 74px 12px;
+    align-items: center; font-size: 8px; min-width: 0; text-transform: uppercase; white-space: nowrap; }
+  .sh101-control > span:first-child { letter-spacing: -.02em; }
+  .sh101-setting { color: #f8e3c1; font: 8px/1 "B612 Mono", monospace; }
+  .sh101-actuator { display: grid; place-items: center; position: relative; }
+  .sh101-fader .sh101-actuator, .sh101-switch .sh101-actuator { width: 100%; height: 74px; }
+  .sh101-fader .sh101-actuator::before { content: ""; position: absolute; inset: 7px max(2px, calc(50% - 10px));
+    background: repeating-linear-gradient(0deg, #d0d0bf 0 1px, transparent 1px 7px);
+    opacity: .68; pointer-events: none; }
+  .sh101-fader .sh101-actuator::after, .sh101-switch .sh101-actuator::before {
+    content: ""; position: absolute; inset: 5px calc(50% - 2px); background: #242621;
+    box-shadow: 1px 0 #a8a89c; border-radius: 2px; pointer-events: none; }
+  .sh101-fader input { appearance: none; writing-mode: vertical-lr; direction: rtl; position: relative;
+    z-index: 1; height: 74px; width: 18px; min-width: 0; margin: 0; background: transparent; cursor: ns-resize; }
+  .sh101-fader input::-webkit-slider-runnable-track { background: transparent; }
+  .sh101-fader input::-webkit-slider-thumb { -webkit-appearance: none; width: 15px; height: 14px;
+    border: 1px solid #23241f; border-radius: 2px; background: linear-gradient(#373a33 45%, var(--mark) 45% 56%, #252621 56%);
+    box-shadow: 0 2px 2px #27282089; }
+  .sh101-fader input::-moz-range-thumb { width: 15px; height: 13px; border: 1px solid #23241f; border-radius: 2px;
+    background: linear-gradient(#373a33 45%, var(--mark) 45% 56%, #252621 56%); box-shadow: 0 2px 2px #27282089; }
+  .sh101-dial .sh101-actuator { width: min(95%, 34px); aspect-ratio: 1; border-radius: 50%; }
+  .sh101-dial .sh101-actuator i { position: absolute; inset: 0; border: 1px solid #171914;
+    border-radius: 50%; background: radial-gradient(circle at 37% 24%, #464942, #23251f 65%);
+    box-shadow: 0 2px 3px #272820b0, inset 0 0 0 2px #30332b;
+    transform: rotate(var(--angle, 0deg)); pointer-events: none; }
+  .sh101-dial .sh101-actuator i::after { content: ""; position: absolute; left: calc(50% - 1px);
+    top: 2px; width: 2px; height: 30%; border-radius: 2px; background: var(--mark); }
+  .sh101-dial :is(input, select), .sh101-switch select { position: absolute; z-index: 1; inset: 0;
+    width: 100%; height: 100%; min-width: 0; margin: 0; opacity: 0; cursor: pointer; }
+  .sh101-dial input { cursor: ew-resize; }
+  .sh101-switch .sh101-actuator { height: 50px; }
+  .sh101-switch .sh101-actuator i { position: absolute; top: calc(8px + var(--travel, 0) * 34px);
+    left: calc(50% - 5px); width: 10px; height: 12px; transform: translateY(-50%);
+    border: 1px solid #252621; border-radius: 2px; background: linear-gradient(#3b3d36 47%, #f1cc93 47% 61%, #252621 61%);
+    box-shadow: 0 1px 2px #272820a0; pointer-events: none; }
+  .sh101-actuator:focus-within { outline: 2px solid #ffe2ad; outline-offset: 1px; border-radius: 3px; }
+  .sh101-face-clock { display: flex; align-items: center; justify-content: center; gap: 4px;
+    padding: 0 0 4px; min-height: 15px; color: #f8e3c1; font-size: 8px; font-variant-numeric: tabular-nums; }
+  .rom-led { flex: 0 0 6px; width: 6px; height: 6px; border-radius: 2px; background: #52352e; }
+  .rom-led[data-on="true"] { background: #ff9673; box-shadow: 0 0 5px #ff9673b0; }
+  .rom-functions { display: flex; align-items: center; gap: 7px; padding: 5px 7px 8px;
+    border-block: 1px solid var(--engrave); background: #62645b; }
+  .rom-functions fieldset { min-width: 0; display: flex; gap: 4px; align-items: center;
+    border: 1px solid #a3a395; border-radius: 2px; margin: 0; padding: 8px 5px 4px; }
+  .rom-functions legend { color: #fff9e9; padding: 0 2px; font-size: 8px; letter-spacing: .025em; }
+  .rom-functions .rom-arpeggio { border-color: #e3b480; }
+  .rom-arpeggio legend { color: #ffe2bb; }
+  .sh101-face .btn { position: relative; border: 1px solid #37362e; border-radius: 2px;
+    padding: 4px 6px; background: linear-gradient(#f5efe0, #c5c0af); color: #232622;
+    box-shadow: 0 2px #373930; font: 700 8px/1.15 "B612", system-ui, sans-serif; text-transform: uppercase;
+    touch-action: none; user-select: none; white-space: nowrap; }
+  .sh101-face .btn:hover { background: #faf0d9; }
+  .sh101-face .btn.rom-down { transform: translateY(1px); box-shadow: 0 1px #373930; }
+  .rom-functions button[aria-pressed]::before { content: ""; position: absolute; top: -7px; left: calc(50% - 3px);
+    width: 6px; height: 3px; border-radius: 1px; background: #3f2b23; }
+  .rom-functions button[aria-pressed="true"]::before { background: #ff956a; box-shadow: 0 0 4px #ffc57d; }
+  .sh101-face [data-rom="power"] { color: #f5efde; background: linear-gradient(#393b33, #242722); }
+  .sh101-type { margin-left: auto; align-self: center; color: #f7f3e8;
+    text-shadow: 0 1px #414138; font: 700 clamp(21px, 2.1vw, 34px)/1 "B612 Mono", monospace;
+    letter-spacing: -.09em; padding-right: 5px; white-space: nowrap; }
+  .sh101-performance { display: grid; grid-template-columns: minmax(112px, 1.2fr) 4.85fr;
+    gap: 5px; align-items: stretch; padding: 3px 5px 5px; background: #46483f; }
+  .sh101-left { background: var(--metal); border-radius: 3px; padding-bottom: 3px; }
+  .sh101-left .sh101-bank { border-right: 0; box-shadow: none; }
+  .sh101-left .sh101-bank h4 { min-height: 0; padding: 3px 0; }
+  .sh101-left .sh101-control { grid-template-rows: 10px 32px 9px; font-size: 7px; }
+  .sh101-left .sh101-bank-controls { padding-top: 4px; padding-bottom: 0; }
+  .sh101-left .sh101-dial .sh101-actuator { width: min(86%, 24px); }
+  .sh101-left .sh101-switch .sh101-actuator { height: 25px; }
+  .sh101-left .sh101-switch .sh101-actuator i { top: calc(7px + var(--travel, 0) * 11px); }
+  .sh101-left .sh101-fader .sh101-actuator, .sh101-left .sh101-fader input { height: 32px; }
+  .sh101-bender-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px 6px; padding: 0 4px; }
+  .sh101-bender-actions label { display: grid; place-items: center; order: 1; width: 100%; font-size: 8px; }
+  .sh101-bender-actions input { appearance: none; width: 75%; height: 13px; margin: 2px 0 1px; cursor: ew-resize;
+    background: linear-gradient(0deg, #505149, #252620); border-radius: 2px; touch-action: none; }
+  .sh101-bender-actions input::-webkit-slider-thumb { -webkit-appearance: none; width: 28px; height: 12px;
+    border-radius: 3px; border: 1px solid #1c1d18; background: linear-gradient(#3b3d35, #1d1f19); }
+  .sh101-bender-actions input::-moz-range-thumb { width: 28px; height: 11px; border-radius: 3px;
+    border: 1px solid #1c1d18; background: linear-gradient(#3b3d35, #1d1f19); }
   .rom-file { max-width: 100%; color: var(--dim); font-size: 12px; }
   .rom-readout { font: 11px ui-monospace, monospace; color: var(--info); }
-  .rom-key-scroll { overflow-x: auto; margin-top: 8px; padding: 2px; }
-  .rom-keys { display: flex; position: relative; min-width: 520px; height: 84px; isolation: isolate; }
+  .sh101 .arp-hint { margin: 6px 0 0; color: #efc490; }
+  .rom-keys { display: flex; position: relative; min-width: 0; min-height: 139px; isolation: isolate; }
   .rom-key { flex: 1; min-width: 0; display: flex; justify-content: center; align-items: flex-end;
-    padding: 0 0 5px; border: 1px solid #252833; border-radius: 0 0 4px 4px;
-    background: #e3e5eb; color: #252833; font-size: 10px; cursor: pointer; touch-action: none; user-select: none; }
-  .rom-key.accidental { position: absolute; z-index: 1; height: 63%; transform: translateX(-50%);
-    background: #21232b; color: #d3d6e0; border-color: #15161c; font-size: 9px; }
-  .rom-key.rom-down { background: var(--rig); color: #15181c; }
+    padding: 0 0 7px; border: 1px solid #35352f; border-radius: 0 0 4px 4px;
+    background: linear-gradient(#d8d6c9 0, #f5f2e7 21%, #fffdf6 94%, #d9d6c8 94%);
+    color: #393a32; font: 700 8px/1 "B612 Mono", monospace; cursor: pointer; touch-action: none; user-select: none; }
+  .rom-key.accidental { position: absolute; z-index: 1; height: 62%; transform: translateX(-50%);
+    background: linear-gradient(90deg, #22231d 8%, #3b3b33 19%, #252521 23% 78%, #171913 85%);
+    color: #ddd9ca; border-color: #161812; border-bottom: 5px solid #171812; font-size: 7px; }
+  .rom-key.rom-down { background: #e7a86d; color: #231d18; }
+  .rom-key:disabled { cursor: default; }
   .rom-key:focus-visible { outline: 2px solid var(--info); outline-offset: -2px; }
 
   /* ─── The two 303s, drawn as the x0xb0x VCF Bench page draws its one ───
@@ -240,7 +322,8 @@
       <div class="row" style="margin-top:10px">
         <a class="btn" id="manual" href="manual-ru.pdf" target="_blank" rel="noopener"
            data-tip="Руководство пользователя ReBirth (PDF, на русском): экраны, органы управления, MIDI и CV/Gate, сохранение. Откроется в новой вкладке.">📖 Руководство пользователя</a>
-        <a class="btn" id="sh101-arp-link" href="#sh101-rom">SH-101 · ARPEGGIO</a>
+        <a class="btn" id="sh101-arp-link" href="#sh101-arp-panel"
+          data-tip="Открыть ARP и переключить его на клавиатуру SH-101.">SH-101 · ARPEGGIO</a>
       </div>
       <div class="meters" style="margin-top:10px">
         <span>Время прибора <b id="m-time">0.0 с</b></span>
@@ -269,16 +352,6 @@
         <label for="show-form">Аранжировка:</label>
         <select id="show-form"
           data-tip="Как из клипов песни складывается сет. Клип на приборе не длиннее 16 шагов, поэтому форма строится сменой клипов, MUTE и сценами. У каждой песни есть своя аранжировка, но любую песню можно сыграть в любой."></select>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <label for="show-fx">Звук FX</label>
-        <select id="show-fx" disabled
-          data-tip="Обычная нота FX запускает нисходящий свип SH-101; акцент — райзер по темпу сета. Используется полоса FX.">
-          <option value="sh101" selected>SH-101</option>
-          <option value="original">ReBirth FX</option>
-        </select>
-        <label for="show-fx-diodes" id="show-fx-diodes-label" hidden>D30/D31 FX</label>
-        <select id="show-fx-diodes" hidden></select>
       </div>
       <div class="row" style="margin-top:8px">
         <label data-tip="С галочкой видно, как артист набирает клипы на остановленном приборе, в ускоренном времени. Без неё подготовка проходит мгновенно."><input type="checkbox" id="show-prep" checked> показать подготовку ускоренно</label>
@@ -326,57 +399,100 @@
         <span class="sub" id="synth-status" role="status"></span>
       </div>
       <div class="mixer" id="mixer"></div>
-      <div class="bench" id="effects"></div>
-      <div class="bench" id="acid1"></div>
-      <div class="bench" id="acid2"></div>
-      <section class="sh101" id="sh101" aria-labelledby="sh101-heading" hidden>
-        <h3 id="sh101-heading">SH-101</h3>
-        <div class="row">
-          <label for="sh101-track">Голос</label>
-          <select id="sh101-track"><option value="bass">BASS</option><option value="lead">LEAD</option><option value="arp">ARP</option></select>
-          <button type="button" class="btn" id="sh101-audition" disabled>Пробная нота C2</button>
-          <span class="sub" id="sh101-status" role="status"></span>
-        </div>
-        <div class="sh101-fields" id="sh101-bass"></div>
-        <div class="sh101-fields" id="sh101-lead" hidden></div>
-        <div class="sh101-fields" id="sh101-arp" hidden></div>
-      </section>
-      <details class="sh101 rom" id="sh101-rom" hidden>
-        <summary>SH-101 · ROM 80C49</summary>
-        <div class="row">
+      <section id="sh101" aria-labelledby="sh101-heading" hidden>
+        <h3 id="sh101-heading">Голоса SH-101</h3>
+        <div class="row" style="margin-bottom:8px">
           <label for="rom-file" id="rom-file-label" hidden>Загрузить ROM</label>
           <input type="file" class="rom-file" id="rom-file" accept=".bin,.rom,application/octet-stream" hidden>
           <span class="sub" id="rom-status" role="status"></span>
         </div>
-        <div id="rom-panel" hidden>
-          <div class="rom-functions" id="rom-buttons">
-            <fieldset><legend>POWER</legend><button class="btn" id="rom-power" type="button" aria-label="Питание SH-101" aria-pressed="true">ON</button></fieldset>
-            <fieldset id="rom-sequencer"><legend>SEQUENCER</legend></fieldset>
-            <fieldset id="rom-arpeggio"><legend>ARPEGGIO</legend></fieldset>
-            <fieldset id="rom-keyboard-functions"><legend>Клавиатура</legend></fieldset>
+        <details class="sh101" id="sh101-bass-panel">
+          <summary>BASS · SH-101 <span class="sub">MIDI 3</span></summary>
+          <div class="row sh101-transport">
+            <button type="button" class="btn" id="sh101-bass-audition" disabled>Пробная нота C2</button>
+            <span class="sub" id="sh101-bass-status" role="status"></span>
           </div>
-          <div class="hint">Для арпеджио нажми <b>DOWN</b>, <b>U&amp;D</b> или <b>UP</b> и удержи несколько нот через <kbd>Shift</kbd> + клик. Повторный клик отпускает ноту.</div>
-          <div class="sh101-fields" id="rom-performance"></div>
-          <div class="rom-key-scroll"><div class="rom-keys" id="rom-keys" role="group" aria-label="Клавиатура SH-101"></div></div>
-          <div class="row">
-            <span class="rom-readout" id="rom-readout"></span>
+          <div class="sh101-scroller" id="sh101-bass"></div>
+        </details>
+        <details class="sh101" id="sh101-lead-panel">
+          <summary>LEAD · SH-101 <span class="sub">MIDI 6</span></summary>
+          <div class="row sh101-transport">
+            <button type="button" class="btn" id="sh101-lead-audition" disabled>Пробная нота C4</button>
+            <span class="sub" id="sh101-lead-status" role="status"></span>
           </div>
-          <div class="hint">В режиме LOAD удержи HOLD для LEGATO или нажми KEY TRANSPOSE для REST. <kbd>Shift</kbd> + клик удерживает эти кнопки. Повторный LOAD завершает запись, PLAY запускает цикл.</div>
-          <div id="rom-clock-controls" class="rom-control-row">
-            <span id="rom-lfo-led" class="rom-led" aria-hidden="true"></span>
-            <output id="rom-lfo-hz" for="sh101-rom-lfoRate"></output>
-            <label class="rom-control-row" for="rom-clock-source">Источник</label>
-            <select id="rom-clock-source"><option value="lfo">LFO</option><option value="external">EXT CLK</option></select>
-            <button type="button" class="btn" id="rom-clock" disabled>Импульс EXT CLK</button>
+          <div class="sh101-scroller" id="sh101-lead"></div>
+        </details>
+        <details class="sh101" id="sh101-arp-panel">
+          <summary>ARP · SH-101 <span class="sub">MIDI 7</span></summary>
+          <div class="row sh101-transport">
+            <button type="button" class="btn" id="sh101-arp-audition" disabled>Пробная нота C5</button>
+            <span class="sub" id="sh101-arp-status" role="status"></span>
           </div>
-          <div id="rom-bender-actions" class="rom-control-row">
-            <label for="rom-bender">Рычаг</label>
-            <input type="range" id="rom-bender" min="0" max="1" step="0.005" value="0.5" data-tip="Отклони рычаг влево или вправо. При отпускании он возвращается в центр.">
-            <button type="button" class="btn" id="rom-bend-lfo" data-tip="Удерживай кнопку для модуляции VCO и VCF треугольником.">LFO MOD</button>
+          <div class="sh101-scroller" id="sh101-arp"></div>
+        </details>
+        <details class="sh101" id="sh101-fx-panel">
+          <summary>FX · SH-101 <span class="sub">MIDI 8</span></summary>
+          <div class="row sh101-transport">
+            <button type="button" class="btn" id="sh101-fx-audition" disabled>Пробный звук</button>
+            <span class="sub" id="sh101-fx-status" role="status"></span>
           </div>
-          <div class="sh101-fields" id="rom-fields"></div>
+          <div class="row" id="sh101-fx-sequencer">
+            <label for="show-fx">Движок FX</label>
+            <select id="show-fx" disabled
+              data-tip="Обычная нота FX запускает нисходящий свип, акцент — райзер по темпу сета.">
+              <option value="sh101" selected>SH-101</option>
+              <option value="original">ReBirth FX</option>
+            </select>
+            <label for="sh101-fx-riser-bars">Райзер, тактов</label>
+            <select id="sh101-fx-riser-bars"></select>
+          </div>
+          <div class="sh101-scroller" id="sh101-fx"></div>
+        </details>
+      </section>
+      <div class="bench" id="effects"></div>
+      <div class="bench" id="acid1"></div>
+      <div class="bench" id="acid2"></div>
+      <template id="sh101-rom-controls">
+        <label data-rom="input-label" data-tip="Клавиши и кнопки арпеджио подключают ROM этого канала. Для сета ReBirth выбери вход MIDI.">Вход
+          <select data-rom="input" disabled>
+            <option value="midi">MIDI → CV/GATE</option>
+            <option value="rom">Клавиатура · ROM</option>
+          </select>
+        </label>
+        <div class="row sh101-accessories" data-rom="accessories">
+          <label>Такт <select data-rom="clock-source" disabled><option value="lfo">LFO</option><option value="external">EXT CLK</option></select></label>
+          <button type="button" class="btn" data-rom="clock" disabled>Импульс EXT CLK</button>
+          <span class="rom-readout" data-rom="readout" hidden></span>
         </div>
-      </details>
+        <p class="hint arp-hint" data-rom="arp-hint" hidden>
+          Удержи клавиши до такта. <kbd>Shift</kbd> + клик фиксирует ноты. Для коротких кликов включи <b>HOLD</b>.
+          <span data-rom="arp-ext" hidden>В режиме EXT CLK нажми «Импульс EXT CLK».</span>
+        </p>
+        <div class="sh101-face" data-rom="keyboard-panel">
+          <div class="sh101-banks" data-rom="voice-controls"></div>
+          <div class="rom-functions">
+            <fieldset><legend>POWER</legend><button class="btn" data-rom="power" type="button" aria-label="Питание SH-101" aria-pressed="true">ON</button></fieldset>
+            <fieldset data-rom="sequencer"><legend>SEQUENCER</legend></fieldset>
+            <fieldset class="rom-arpeggio" data-rom="arpeggio"><legend>ARPEGGIO</legend></fieldset>
+            <fieldset data-rom="keyboard-functions"><legend>KEYBOARD</legend></fieldset>
+            <span class="sh101-type" aria-hidden="true">SH-101</span>
+          </div>
+          <div class="sh101-performance">
+            <div class="sh101-left" data-rom="performance-controls">
+              <div data-rom="bender-actions" class="sh101-bender-actions">
+                <label><input type="range" data-rom="bender" min="0" max="1" step="0.005" value="0.5" data-tip="Отклони рычаг. При отпускании он возвращается в центр.">BENDER</label>
+                <button type="button" class="btn" data-rom="bend-lfo" data-tip="Удерживай для модуляции VCO и VCF треугольником.">LFO MOD</button>
+              </div>
+            </div>
+            <div class="rom-keys" data-rom="keys" role="group" aria-label="Клавиатура SH-101"></div>
+          </div>
+          <div data-rom="clock-indicator" class="sh101-face-clock">
+            <span data-rom="lfo-led" class="rom-led" aria-hidden="true"></span>
+            <output data-rom="lfo-hz"></output>
+          </div>
+        </div>
+        <div class="hint" data-rom="hint">При записи LOAD кнопка HOLD добавляет LEGATO, KEY TRANSPOSE ставит REST.</div>
+      </template>
     </div>
 
     <div class="card">
