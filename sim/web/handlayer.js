@@ -5,10 +5,13 @@
 //
 // The look is the approved prototype's (docs/superpowers/plans/
 // 2026-11-17-sim-hands-prototype.js): the same camera, lights, skin shader and
-// forearm, now on the rig's skeleton. Nothing moves on its own: the caller
-// poses the hands (layer.left, layer.right; they start where HandRig.create
-// leaves them, visible at the origin) or hides them (rig.root.visible), and
-// calls render(); resize() draws again with the new size.
+// forearm, now on the rig's skeleton. The hands (layer.left, layer.right)
+// start hidden. The page gives the layer a show (setShow: the plan of
+// handplan.js and the driver of handrig.js) and calls frame(clock) at every
+// animation frame while the hands are shown: the layer poses them at the
+// draw time and draws only when a pose changed. drop() takes the hands out
+// of the frame. render() draws as things are; resize() draws again with the
+// new size. The layer lives as long as the page.
 //
 // World units are page units (HandPlan.PANEL): the panel square is 1400 units
 // = 300 mm, page point (u, v) is world (u, -v, 0), +z is up out of the plate.
@@ -17,17 +20,43 @@
   const SIDE = 1400;                    // the panel square, page units
   const NEAR = 200, FAR = 20000;
   const smooth = k => k < 0 ? 0 : k > 1 ? 1 : k * k * (3 - 2 * k);
+  // After drop(): the hands leave over this much wall time, rising this high
+  // in the first third of it (with clear(), nothing passes through a control).
+  const LEAVE_MS = 300, LEAVE_LIFT_MM = 25;
+  const minJerk = u => u * u * u * (10 + u * (6 * u - 15));
 
   // Dependencies, at call time: in the browser the page's globals, which
   // app.js loads before calling create().
   function deps() {
     if (typeof module !== 'undefined' && module.exports) {
       require('./three.js');
+      const HandPlan = require('./handplan.js');
       return { T: globalThis.THREE, MODEL: require('./handmodel.js'), HandRig: require('./handrig.js'),
-        PANEL: require('./handplan.js').PANEL };
+        HandPlan, PANEL: HandPlan.PANEL };
     }
-    return { T: root.THREE, MODEL: root.HAND_MODEL, HandRig: root.HandRig, PANEL: root.HandPlan.PANEL };
+    return { T: root.THREE, MODEL: root.HAND_MODEL, HandRig: root.HandRig, HandPlan: root.HandPlan,
+      PANEL: root.HandPlan.PANEL };
   }
+
+  // Pose a blended toward pose b by s (as getPose() gives them): the pivot
+  // by lerp, the rotation by slerp, the curls and spreads by lerp.
+  function blendPose(T, a, b, s) {
+    const curls = {}, spread = {};
+    for (const f in a.curls) {
+      curls[f] = a.curls[f].map((x, j) => x + (b.curls[f][j] - x) * s);
+      spread[f] = a.spread[f] + (b.spread[f] - a.spread[f]) * s;
+    }
+    return { pivot: new T.Vector3().lerpVectors(a.pivot, b.pivot, s),
+      quaternion: new T.Quaternion().slerpQuaternions(a.quaternion, b.quaternion, s), curls, spread };
+  }
+  // A pose as numbers, to tell whether a hand moved since the last drawing.
+  function poseNumbers(rig) {
+    if (!rig.root.visible) return [];
+    const p = rig.getPose(), out = [p.pivot.x, p.pivot.y, p.pivot.z, p.quaternion.x, p.quaternion.y, p.quaternion.z, p.quaternion.w];
+    for (const f in p.curls) out.push(...p.curls[f], p.spread[f]);
+    return out;
+  }
+  const sameNumbers = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 
   function image(src) {
     const img = new Image();
@@ -155,7 +184,8 @@
     opts = opts || {};
     let canvas = null, renderer = null;
     return Promise.resolve().then(() => {
-      const { T, MODEL, HandRig, PANEL } = deps();
+      const { T, MODEL, HandRig, HandPlan, PANEL } = deps();
+      const MM = PANEL.UNITS_PER_MM;
       const light = opts.quality === 'light';
       const maxRatio = light ? 1.5 : 2, shadowSize = light ? 1024 : 2048;
       const A = MODEL.textures;
@@ -237,10 +267,138 @@
         scene.add(dots);
 
         const render = () => r.render(scene, camera);
+        const dotsWanted = () => /hands-dots/.test((root.location && root.location.hash) || '');
+
+        // The show: its plan and driver (setShow), the generation the page
+        // gave it; the hands leaving after drop(); what was drawn last.
+        let plan = null, driver = null, generation = null, leave = null;
+        let away = null;                // each hand out of the frame: the pose of its plan's first keyframe
+        let shown = true, dirty = true, lastT = NaN, drawn = { left: [], right: [] };
+        let last = null;                // the last frame: { t, left, right } as driver.pose() gave them
+        const rigsOf = () => ({ left: layer.left, right: layer.right });
+        const hide = () => { layer.left.root.visible = layer.right.root.visible = false; };
+
+        // Where each hand goes when it leaves: the plan's first keyframe,
+        // which is always out of the frame (handplan.js timeline); the same
+        // pose for every plan, taken once.
+        function awayPoses(d) {
+          const res = d.pose(-Infinity), out = {};
+          for (const side of ['left', 'right']) {
+            const rig = layer[side];
+            out[side] = rig.getPose();
+            if (!res[side].away) {
+              // Not out of the frame (never so): 400 mm toward the player.
+              out[side].pivot.y -= 400 * MM;
+              out[side].pivot.z += LEAVE_LIFT_MM * MM;
+            }
+          }
+          return out;
+        }
+        // The hands leaving at wall time nowMs: true while they still move.
+        function leaving(nowMs) {
+          const u = Math.min(1, (nowMs - leave.start) / LEAVE_MS), s = minJerk(u);
+          const up = LEAVE_LIFT_MM * MM * minJerk(Math.min(1, 3 * u));
+          for (const side of ['left', 'right']) {
+            const rig = layer[side], from = leave.from[side];
+            if (!from) continue;
+            const p = blendPose(T, from, away[side], s);
+            p.pivot.z += up;
+            rig.setPose(p);
+            rig.clear([], [], { free: true });
+          }
+          if (u < 1) return true;
+          hide();
+          leave = null;
+          return false;
+        }
+        // Debug dots at the contact points of the fingers on (or reaching
+        // or leaving) their controls, with hands-dots in the address.
+        function contactDots(res) {
+          const points = [];
+          for (const side of ['left', 'right']) {
+            if (!res[side] || res[side].away) continue;
+            for (const c of res[side].touching) points.push(layer[side].contact(c.finger, c.toward));
+          }
+          layer.debugDots(points);
+        }
+
         const layer = {
           canvas, scene, camera, renderer: r,
           left: hand('left'), right: hand('right'),
           render,
+          // The show the page runs, as the n-th show (generation): builds its
+          // plan and driver; the same generation again changes nothing. Ends
+          // a leave under way: the new plan's hands start out of the frame.
+          setShow(show, n) {
+            if (driver && n === generation) return;
+            plan = driver = null;
+            leave = null;
+            const p = HandPlan.build(show.actions), d = new HandRig.Driver(rigsOf(), p);
+            if (!away) away = awayPoses(d);
+            hide();
+            plan = p; driver = d; generation = n;
+            dirty = true; lastT = NaN;
+          },
+          // The show is over: the plan is dropped and the hands leave the
+          // frame over LEAVE_MS of wall time (at once while the canvas is
+          // hidden).
+          drop() {
+            if (!driver) return;
+            plan = driver = null;
+            dirty = true; lastT = NaN; last = null;
+            layer.debugDots([]);
+            const from = {};
+            for (const side of ['left', 'right']) from[side] = layer[side].root.visible ? layer[side].getPose() : null;
+            if (!shown || !away || (!from.left && !from.right)) { hide(); return; }
+            leave = { start: performance.now(), from };
+          },
+          // One animation frame, clock = { now, extrapolated, speed,
+          // windowUs } (device µs; speed, the device's speed against the
+          // wall clock): the hands at the driver's draw time, drawn only when
+          // a pose changed, a leave runs, or the layer was just shown.
+          frame(clock) {
+            if (leave) {
+              leaving(performance.now());
+              last = null;
+              render();
+              return;
+            }
+            const forced = dirty;
+            dirty = false;
+            if (!driver) {
+              if (forced) { hide(); layer.debugDots([]); render(); }
+              return;
+            }
+            const t = driver.drawTime(clock.now, clock.extrapolated);
+            if (t === lastT && !forced) return;
+            lastT = t;
+            const res = driver.pose(t, { windowUs: clock.windowUs || 0 });
+            layer.left.root.visible = !res.left.away;
+            layer.right.root.visible = !res.right.away;
+            last = { t, left: res.left, right: res.right };
+            const now = { left: poseNumbers(layer.left), right: poseNumbers(layer.right) };
+            if (!forced && sameNumbers(now.left, drawn.left) && sameNumbers(now.right, drawn.right)) return;
+            drawn = now;
+            if (dotsWanted()) contactDots(res);
+            else layer.debugDots([]);
+            render();
+          },
+          // The control keys (as handplan.js names them) the plan holds down
+          // at device time t: the touches with tDown ≤ t < tUp.
+          heldNow(t) {
+            const out = [];
+            if (!plan) return out;
+            for (const x of plan.touches) {
+              if (x.tDown > t) break;
+              if (t < x.tUp) out.push(x.key);
+            }
+            return out;
+          },
+          // For the page's checks: the last frame's draw time and hands, the
+          // driver, the show's generation.
+          get last() { return last; },
+          get driver() { return driver; },
+          get generation() { return generation; },
           // Follows the container: the canvas's size and pixel ratio, and the
           // frustum through the panel square; then draws.
           resize() {
@@ -254,12 +412,32 @@
             camera.projectionMatrixInverse.copy(camera.projectionMatrix).invert();
             render();
           },
-          setVisible(on) { canvas.style.display = on ? '' : 'none'; },
-          // Compiles the shaders and uploads the textures once, so that the
-          // first visible frame is not a long task.
+          setVisible(on) {
+            on = !!on;
+            if (on && !shown) dirty = true;
+            shown = on;
+            canvas.style.display = on ? '' : 'none';
+          },
+          // Compiles the shaders (the shadow pass's too) and uploads the
+          // textures once, so that the first visible frame is not a long
+          // task: both hands drawn once in the middle of the panel with the
+          // canvas hidden, then hidden again.
           warm() {
+            const display = canvas.style.display;
+            canvas.style.display = 'none';
+            const pose = { left: layer.left.getPose(), right: layer.right.getPose() };
+            const up = new T.Vector3(0, 1, 0);
+            layer.left.setPose({ pivot: new T.Vector3(SIDE * 0.35, -SIDE / 2, 60 * MM), dir: up });
+            layer.right.setPose({ pivot: new T.Vector3(SIDE * 0.65, -SIDE / 2, 60 * MM), dir: up });
+            const vis = [layer.left.root.visible, layer.right.root.visible];
+            layer.left.root.visible = layer.right.root.visible = true;
             r.compile(scene, camera);
             render();
+            layer.left.setPose(pose.left);
+            layer.right.setPose(pose.right);
+            [layer.left.root.visible, layer.right.root.visible] = vis;
+            render();
+            canvas.style.display = display;
           },
           // points: world points ({x, y, z}); shown only with hands-dots in
           // location.hash.
@@ -277,6 +455,7 @@
             });
           },
         };
+        hide();
         layer.resize();
         if (root.ResizeObserver) new ResizeObserver(() => layer.resize()).observe(container);
         return layer;
