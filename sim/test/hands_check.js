@@ -269,8 +269,10 @@ const everyVertex = {};
 for (const side of SIDES) everyVertex[side] = Array.from({ length: rigs[side].mesh.geometry.attributes.position.count }, (_, v) => v);
 const wrist = side => rigs[side].bone('Wrist').getWorldPosition(new T.Vector3());
 const palmBox = side => new T.Box3().setFromArray(rigs[side].skinned(rigs[side].PALM));
-const lowestMm = side => {
-  const p = rigs[side].skinned(everyVertex[side]);
+// The lowest vertex (mm above the plate) of a hand's whole mesh, skinned
+// now or as given.
+const lowestMm = (side, p) => {
+  p = p || rigs[side].skinned(everyVertex[side]);
   let low = Infinity;
   for (let k = 2; k < p.length; k += 3) low = Math.min(low, p[k]);
   return low / MM;
@@ -350,9 +352,9 @@ function posed(show, plan, tab, stats, travelled) {
       if (left.length) fail(t, key, '(4) the ' + side + ' hand is in a control (' + left.length + ' vertices)', left[0].mm);
       // Every vertex of the mesh too, not only the clearance vertices (a
       // touching fingertip may still sink 1 mm into its own control).
-      const all = rigs[side].violations(res[side].touching, { mesh: true });
+      const mesh = rigs[side].skinned(everyVertex[side]), all = rigs[side].violations(res[side].touching, { mesh: true, skinned: mesh });
       if (all.length) fail(t, key, '(4) the ' + side + ' hand\'s mesh is in a control (vertex ' + all[0].vertex + ', ' + all.length + ' vertices)', all[0].mm);
-      const low = lowestMm(side);
+      const low = lowestMm(side, mesh);
       if (low < -UNDER_MM) fail(t, key, '(4) the ' + side + ' hand is under the plate', -low);
     }
     const overlap = palmBox('left').intersectsBox(palmBox('right'));

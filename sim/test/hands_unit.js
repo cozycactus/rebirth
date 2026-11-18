@@ -1367,6 +1367,20 @@ section('drive', () => {
       const left = rigs[side].violations(res[side].touching, { mesh: true });
       assert.deepStrictEqual(left, [], 'song 0 at 222 093 529: the ' + side + ' mesh is in a control: ' + fmt(left.slice(0, 3)));
     }
+    // The mesh skinned by the caller gives the same answer; here, pressed
+    // 2 mm deeper (the index's own pad then holds it more than 1 mm deep).
+    const all = vertices.left, deeper = rigs.left.skinned(all);
+    for (let k = 2; k < deeper.length; k += 3) deeper[k] -= 2 * MM;
+    const p0 = rigs.left.getPose();
+    rigs.left.setPose(Object.assign({}, p0, { pivot: p0.pivot.clone().setZ(p0.pivot.z - 2 * MM) }));
+    const own = rigs.left.violations(res.left.touching, { mesh: true });
+    assert.ok(own.length > 0, 'pressed 2 mm deeper the left mesh is in a control');
+    rigs.left.setPose(p0);
+    const given = rigs.left.violations(res.left.touching, { mesh: true, skinned: deeper });
+    assert.ok(given.length === own.length && given.every((x, i) => x.vertex === own[i].vertex && Math.abs(x.mm - own[i].mm) < 0.01),
+      'violations({ mesh, skinned }) takes the positions given: ' + fmt([given.slice(0, 3), own.slice(0, 3)]));
+    assert.throws(() => rigs.left.violations(res.left.touching, { mesh: true, skinned: new Float32Array(3) }), /skinned/,
+      'violations: skinned of the wrong size');
     const p = rigs.left.skinned([1004]);
     assert.ok(!PANEL.inside(p[0], p[1], p[2]), 'song 0 at 222 093 529: the left thumb\'s vertex 1004 is in a control: ' + fmt(p));
     assert.strictEqual(driver.failures, 0, 'song 0 at 222 093 529: failures');

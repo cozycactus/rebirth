@@ -487,6 +487,38 @@
       return out;
     }
     const skinned = indices => skinInto(indices, new Float32Array(3 * indices.length));
+    // fn(v, k, x, y, z) for each vertex v = indices[k] whose skinned z is at
+    // most zMax (the others' x and y are not computed), as skinInto skins
+    // them, until fn returns true; then true.
+    function eachLow(indices, zMax, fn) {
+      group.updateMatrixWorld(true);
+      pre.multiplyMatrices(mesh.matrixWorld, mesh.bindMatrixInverse);
+      for (let j = 0; j < skin.length; j++) {
+        skin[j].multiplyMatrices(skeleton.bones[j].matrixWorld, skeleton.boneInverses[j])
+          .premultiply(pre).multiply(mesh.bindMatrix);
+      }
+      for (let k = 0; k < indices.length; k++) {
+        const v = indices[k], px = P[3 * v], py = P[3 * v + 1], pz = P[3 * v + 2];
+        let z = 0;
+        for (let i = 0; i < 4; i++) {
+          const w = SW[4 * v + i];
+          if (!w) continue;
+          const e = skin[SI[4 * v + i]].elements;
+          z += w * (e[2] * px + e[6] * py + e[10] * pz + e[14]);
+        }
+        if (z > zMax) continue;
+        let x = 0, y = 0;
+        for (let i = 0; i < 4; i++) {
+          const w = SW[4 * v + i];
+          if (!w) continue;
+          const e = skin[SI[4 * v + i]].elements;
+          x += w * (e[0] * px + e[4] * py + e[8] * pz + e[12]);
+          y += w * (e[1] * px + e[5] * py + e[9] * pz + e[13]);
+        }
+        if (fn(v, k, x, y, z)) return true;
+      }
+      return false;
+    }
     const one = new Float64Array(3);
     function pad(finger) {
       if (!(finger in padOf)) throw new Error('HandRig: no finger ' + finger);
@@ -967,11 +999,14 @@
     // them) may sink up to 1 mm into its own target (a fingertip pressed
     // into silicone); nothing is exempt below the plate.
     const EVERY = Array.from({ length: n }, (_, v) => v);
-    function violationsUp(touch, verts, above) {
+    // (Above the tallest control nothing is inside one: those vertices are
+    // passed over before their x and y are skinned; a hair above it still
+    // gets the exact test.)
+    const TALLEST = PANEL.control({ op: 'encsw', enc: 0 }).topMm * MM + 1e-6;
+    function violationsUp(touch, verts, above, at) {
       verts = verts || CLEARANCE;
-      const p = skinInto(verts, new Float64Array(3 * verts.length)), out = [];
-      verts.forEach((v, k) => {
-        const x = p[3 * k], y = p[3 * k + 1], z = p[3 * k + 2];
+      const out = [];
+      const test = (v, k, x, y, z) => {
         if ((above && z < 0) || !PANEL.inside(x, y, z)) return;
         // Exempt: a touching fingertip's vertex in its own target with a way
         // out within 1 mm (up, the cheap one first, else any).
@@ -982,26 +1017,29 @@
         }
         const d = depth(x, y, z);
         out.push({ vertex: v, mm: d.mm, upMm: d.upMm });
-      });
+      };
+      if (at) verts.forEach((v, k) => test(v, k, at[3 * k], at[3 * k + 1], at[3 * k + 2]));
+      else eachLow(verts, TALLEST, test);
       return out.sort((a, b) => b.mm - a.mm);
     }
     // violations(touching, opts): touching as touchingOf takes it; with
     // opts.mesh every vertex of the mesh at or above the plate (below it a
-    // bound of its own applies), else the clearance vertices.
-    const violations = (touching, opts) => violationsUp(touchingOf(touching), opts && opts.mesh ? EVERY : null, !!(opts && opts.mesh))
-      .map(({ vertex, mm }) => ({ vertex, mm }));
+    // bound of its own applies), else the clearance vertices; opts.skinned,
+    // with opts.mesh: every vertex's position in the current pose as
+    // skinned() gives it, not skinned again.
+    const violations = (touching, opts) => {
+      const mesh = !!(opts && opts.mesh);
+      if (mesh && opts.skinned && opts.skinned.length !== 3 * n) throw new Error('HandRig: violations: skinned holds ' + opts.skinned.length / 3 + ' vertices, not ' + n);
+      return violationsUp(touchingOf(touching), mesh ? EVERY : null, mesh, mesh && opts.skinned).map(({ vertex, mm }) => ({ vertex, mm }));
+    };
 
     // Curls free finger f toward the fist (the thumb toward lift) just
     // enough, found by bisection, that each of its clearance vertices is
     // CURL_MARGIN_MM above any control or the plate under it; all the way
     // when even that is not enough.
     function curlAway(f) {
-      const verts = FINGER_CLEARANCE[f], buf = new Float64Array(3 * verts.length), margin = CURL_MARGIN_MM * MM;
-      const hit = () => {
-        skinInto(verts, buf);
-        for (let k = 0; k < verts.length; k++) if (PANEL.inside(buf[3 * k], buf[3 * k + 1], buf[3 * k + 2] - margin)) return true;
-        return false;
-      };
+      const verts = FINGER_CLEARANCE[f], margin = CURL_MARGIN_MM * MM;
+      const hit = () => eachLow(verts, TALLEST + margin, (v, k, x, y, z) => PANEL.inside(x, y, z - margin));
       if (!hit()) return;
       const from = now.curls[f].slice(), to = f === 'thumb' ? POSES.lift.thumb : POSES.fist[f];
       const at = k => {
