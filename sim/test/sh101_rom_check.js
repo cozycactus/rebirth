@@ -7,7 +7,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const createCore = require('../web/sh101_cpu.js');
 const { Board, BUTTON, HZ, Player, decode } = require('../web/sh101_rom.js');
-const { Voice, defaults } = require('../web/sh101.js');
+const { Voice, defaults, cutoffPosition } = require('../web/sh101.js');
 
 const keys = (...notes) => notes.reduce((mask, note) => mask | (1 << (note - 53)), 0);
 
@@ -206,6 +206,25 @@ async function testIndependentBoards(image) {
   assert.equal(arp.state().pitch, notes[2] - 36, 'the ARP sequence survives its own POWER cycle');
 }
 
+function serviceFrequency(state, patch) {
+  assert.equal(state.gate, true);
+  const rate = 48000, samples = new Float32Array(3 * rate);
+  const voice = new Voice(rate, false, true);
+  voice.enqueue({ ...state, type: 'rom', t: 0 });
+  voice.render(samples, 0, patch);
+  let first, last, edges = 0;
+  for (let i = rate; i < samples.length; i++) {
+    if (samples[i - 1] < 0 && samples[i] >= 0) {
+      const crossing = i - samples[i] / (samples[i] - samples[i - 1]);
+      first ??= crossing;
+      last = crossing;
+      edges++;
+    }
+  }
+  assert.ok(edges > 1, 'the service tone is present');
+  return (edges - 1) * rate / (last - first);
+}
+
 async function testServiceMode(image) {
   const unit = bench(await Board.load(createCore, image));
   const outputs = () => {
@@ -226,9 +245,31 @@ async function testServiceMode(image) {
     unit.tap(button);
     assert.deepEqual(outputs(), values, 'service table: ' + button);
   }
+
+  // Roland Service Notes, printed p. 4, VCO TUNE / RANGE WIDTH and VCF WIDTH.
+  const oscillator = { ...defaults(), pitchReference: 1, saw: 0.8, pulse: 0, sub: 0, noise: 0,
+    resonance: 0, cutoff: 1, envMod: 0, keyFollow: 0, vca: 1, portaMode: 0 };
+  for (const button of ['upDown', 'up']) {
+    unit.tap(button);
+    const hz = serviceFrequency(unit.state(), oscillator);
+    assert.ok(Math.abs(hz - 442) < 0.1, 'centered TUNE at 442 Hz in service ' + button);
+  }
   unit.tap('hold');
   unit.notes(53);
   assert.deepEqual(outputs(), [17, 24, true], 'HOLD exits the service test');
+  const f3 = serviceFrequency(unit.state(), oscillator);
+  unit.notes(77);
+  const f5 = serviceFrequency(unit.state(), oscillator);
+  assert.ok(Math.abs(f5 / f3 - 4) < 0.003, 'VCO WIDTH tracks F3 to F5 over two octaves');
+
+  const filter = { ...oscillator, saw: 0, resonance: 1, keyFollow: 1, cutoff: cutoffPosition(1000) };
+  unit.notes(69);
+  assert.ok(Math.abs(serviceFrequency(unit.state(), filter) - 1000) < 2, 'VCF reference tone at A4');
+  unit.notes(65);
+  const lower = serviceFrequency(unit.state(), filter);
+  unit.notes(77);
+  const upper = serviceFrequency(unit.state(), filter);
+  assert.ok(Math.abs(upper / lower - 2) < 0.005, 'VCF WIDTH tracks F4 to F5 over one octave');
 }
 
 async function main() {
@@ -239,7 +280,7 @@ async function main() {
     await testROM(image);
     await testIndependentBoards(image);
     await testServiceMode(image);
-    console.log('SH-101 ROM: bus/DAC, 32 keys, ARP/HOLD, SEQ/LEGATO/REST, POWER, service CV/Gate table and four boards OK');
+    console.log('SH-101 ROM: bus/DAC, keys, ARP, SEQ, POWER, service CV/Gate, Roland VCO/VCF calibration and four boards OK');
   } else {
     console.log('SH-101 ROM: bus/DAC OK; original ROM scenarios require SH101_ROM=/path/to/sh101.rom');
   }

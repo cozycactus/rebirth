@@ -39,6 +39,28 @@ for (const hz of [100, 600, 1200, 2400, 4800]) {
   assert.ok(Math.abs(20 * Math.log10(rms(y) / expected)) < 0.35, 'four-pole response at ' + hz + ' Hz');
 }
 
+// Owner's Manual p. 27 shows a growing peak near FREQ and ringing on the
+// pulse edges. The drawings provide qualitative targets for these checks.
+for (const diodes of [0, 1]) {
+  const level = (freq, res) => rms(filterTail(1000, res, i => 0.002 * Math.sin(2 * Math.PI * freq * i / rate), diodes));
+  const [low, mid, high] = [0, 0.45, 0.75].map(res => level(1000, res));
+  assert.ok(low < mid && mid < high, 'RES increases gain at FREQ');
+  assert.ok(high > level(250, 0.75) && high > level(4000, 0.75), 'the resonant peak stays near FREQ');
+
+  const stepPeaks = res => {
+    const filter = new Filter(rate, diodes);
+    let last = 0, peaks = 0, rising = false;
+    for (let i = 0; i < rate * 0.006; i++) {
+      const sample = filter.step(0.01, 1000, res);
+      if (sample > last + 1e-8) rising = true;
+      if (rising && sample < last - 1e-8) { peaks++; rising = false; }
+      last = sample;
+    }
+    return peaks;
+  };
+  assert.ok(stepPeaks(0) === 0 && stepPeaks(0.75) >= 3, 'high RES rings on a pulse edge');
+}
+
 // Once excited, the closed loop sustains at the cutoff with RES at max.
 // The two diodes bound the signal without any hard output clip.
 for (const cutoff of [110, 440, 1760]) {
@@ -49,13 +71,15 @@ for (const cutoff of [110, 440, 1760]) {
   assert.ok(Math.abs(frequency(y, rate) - cutoff) <= 2, 'self-oscillation follows cutoff');
 }
 
-for (const [source, subMode, expected] of [['saw', 0, 440], ['sub', 0, 220], ['sub', 1, 110], ['sub', 2, 110]]) {
-  const v = new Voice(fs), samples = new Float32Array(fs);
-  const p = { ...defaults(), pulse: 0, saw: 0, sub: 0, [source]: 1, subMode, resonance: 0,
+for (const [source, subMode, expected, pitchReference = 0] of [
+  ['saw', 0, 440], ['saw', 0, 442, 1], ['sub', 0, 220], ['sub', 1, 110], ['sub', 2, 110],
+]) {
+  const v = new Voice(fs), samples = new Float32Array(2 * fs);
+  const p = { ...defaults(), pulse: 0, saw: 0, sub: 0, [source]: 1, subMode, pitchReference, resonance: 0,
     vca: 1, cutoff: 1, envMod: 0, keyFollow: 0 };
   v.enqueue({ type: 'note', note: 69, down: true, t: 0 });
   v.render(samples, 0, p);
-  assert.ok(Math.abs(frequency(samples.subarray(fs / 2), fs) - expected) <= 2, source + ' tracks the oscillator');
+  assert.ok(Math.abs(frequency(samples.subarray(fs), fs) - expected) <= 1, source + ' plays ' + expected + ' Hz');
 }
 
 {
@@ -145,4 +169,4 @@ for (const rise of [false, true]) {
   voice.render(out, 0.125, patch);
   assert.ok(out.every(sample => sample === 0), 'returning to the external FX input closes the ROM gate');
 }
-console.log('SH-101: four-pole response, diode selection, bounded resonance, divider pitch, bender, note priority, panic and FX sweeps OK');
+console.log('SH-101: filter, diode selection, resonance, 440/442 Hz reference, sub oscillator, bender, note priority, panic and FX sweeps OK');

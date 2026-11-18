@@ -640,7 +640,7 @@
         input.step = 0.005;
       }
       input.value = rig.getParam(id);
-      if (def.id === 'diodes') {
+      if (def.accessory) {
         label.appendChild(input);
         accessories.prepend(label);
         input.addEventListener('input', () => userSet(id, +input.value));

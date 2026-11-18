@@ -3,9 +3,14 @@
 (function (root) {
   'use strict';
 
+  const REBIRTH_A4 = 440;
+  const ROLAND_A4 = 442;  // Service Notes p. 4, VCO TUNE with the panel TUNE centered.
   const groups = [
     ['TUNE', [
       { id: 'tune', label: 'Tune', value: 0.5, dial: true },
+      { id: 'pitchReference', label: 'Строй A4', value: 0, accessory: true,
+        options: [REBIRTH_A4 + ' Гц · ReBirth', ROLAND_A4 + ' Гц · Roland'],
+        tip: 'Задаёт опорную частоту этого VCO. Для заводской проверки Roland выбери 442 Гц и поставь TUNE в центр.' },
     ]],
     ['MODULATOR', [
       { id: 'lfoRate', label: 'LFO/CLK RATE', face: 'RATE', value: 0.47,
@@ -33,7 +38,7 @@
     ['VCF · IR3109', [
       { id: 'cutoff', label: 'FREQ', value: 0.54 },
       { id: 'resonance', label: 'RES', value: 0.25 },
-      { id: 'diodes', label: 'D30/D31', value: 0, options: ['1S2473 · Roland', '1N4148 · Rev-A'],
+      { id: 'diodes', label: 'D30/D31', value: 0, accessory: true, options: ['1S2473 · Roland', '1N4148 · Rev-A'],
         tip: 'Диоды в петле резонанса IR3109. Разница лучше слышна при высоком RES.' },
       { id: 'envMod', label: 'ENV VCF', face: 'ENV', value: 0.32 },
       { id: 'vcfMod', label: 'MOD VCF', face: 'MOD', value: 0, tip: 'Глубина модуляции частоты среза выбранной формой LFO.' },
@@ -356,6 +361,7 @@
       if (!this.rom) this.lfoStep = lfoFrequency(p.lfoRate) / this.rate;
       this.lfoWave = Math.round(p.lfoWave);
       this.vcoOffset = Math.round(p.range) + Math.round(p.transpose) - 2;
+      this.a4 = p.pitchReference >= 0.5 ? ROLAND_A4 : REBIRTH_A4;
       this.tune = (p.tune - 0.5) / 12;
       this.pwmMode = Math.round(p.pwmMode);
       this.subDiv = Math.round(p.subMode) === 0 ? 2 : 4;
@@ -425,8 +431,8 @@
       const range = this.rom ? this.romRange : this.vcoOffset;
       const pitchBend = this.panelPitchBend + this.panelPitchLfo * triangle + this.bend / 6;
       const filterBend = this.panelFilterBend + this.panelFilterLfo * triangle;
-      const freq = this.effect ? this.effectPitch
-        : 440 * 2 ** (keyboard + range + this.tune + pitchBend + this.vcoModOctaves * mod);
+      const freq = this.effect ? this.effectPitch * (this.a4 / REBIRTH_A4)
+        : this.a4 * 2 ** (keyboard + range + this.tune + pitchBend + this.vcoModOctaves * mod);
       const advance = Math.min(0.24, freq / this.rate);
       const phase = wrap(this.phase);
       const saw = phase - 0.5 * blep(phase, advance);

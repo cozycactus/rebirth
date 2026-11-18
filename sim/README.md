@@ -155,8 +155,9 @@ charge and discharge. GATE+TRIG uses last-note priority, while GATE and
 LFO use low-note priority. AUTO portamento follows overlapping MIDI notes.
 VCO MOD and MOD VCF take the selected LFO waveform. PWM taps the triangle
 directly. BASS starts with static PWM and a stronger sub; LEAD starts with
-LFO PWM. ARP starts with a short-decay pulse and saw patch. The voices use
-A440 to match the rig.
+LFO PWM. ARP starts with a short-decay pulse and saw patch. The **Строй A4**
+selector sets each voice's VCO reference. It starts at 440 Hz to match the
+rig. Select **442 Гц · Roland** and center **TUNE** for the service test.
 
 - **D30/D31** selects the diode pair per voice. All four start with Roland's
   1S2473 and can be switched to Rev-A's 1N4148. The 1N4148
@@ -180,9 +181,11 @@ A440 to match the rig.
   · [Roland SH-101 Owner's Manual, pp. 25–31](https://cdn.roland.com/assets/media/pdf/SH-101_OM.pdf)
 
 `node sim/test/sh101_check.js` checks the four-pole response against the
-analytical curve, bounded self-oscillation, divider pitch, note priority,
-cancellation of queued MIDI and the two FX sweeps. Hardware calibration
-would require test signals and captures from a real SH-101.
+analytical curve, the increasing resonance peak and pulse-edge ringing in
+Roland's drawings, bounded self-oscillation, divider pitch, note priority,
+cancellation of queued MIDI and the two FX sweeps. Calibrating the RES
+slider taper and oscillation amplitude requires measurements from a real
+SH-101. [Roland SH-101 Owner's Manual, p. 27](https://cdn.roland.com/assets/media/pdf/SH-101_OM.pdf#page=27)
 
 ### Original 80C49 ROM
 
@@ -216,6 +219,11 @@ TRANSPOSE with Shift-click, then turn POWER on. Release the two buttons and
 select a test output using the function buttons. The displayed KCV, RANGE
 and Gate follow the service table. Press HOLD to exit.
 [Roland SH-101 Service Notes, printed p. 2](https://manuals.fdiskc.com/flat/Roland%20SH101%20Service%20Manual.pdf#page=4)
+
+With the 442 Hz reference, **U&D** checks VCO TUNE and **UP** uses the
+alternate RANGE CV to produce the same pitch. The original-ROM regression
+also verifies the F3–F5 VCO interval and the F4–F5 VCF tracking check, with
+the filter set to 1 kHz at A4. [Roland SH-101 Service Notes, printed p. 4](https://manuals.fdiskc.com/flat/Roland%20SH101%20Service%20Manual.pdf#page=6)
 
 The Rev-A netlist has active-low Gate through Q9, P24 wired to the Q7/Q6
 reset circuit and separate sample-and-hold outputs from U10. U14 has
