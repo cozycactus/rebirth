@@ -1092,7 +1092,11 @@
   // - between two keyframes the root and the curls blend with minimum-jerk
   //   easing: the rotation by slerp, the position by lerp of the pivot, or,
   //   while fingers stay in contact across the two keyframes, of the
-  //   contacts' centre (in the world and in the hand), so they stay put;
+  //   contacts' centre (in the world and in the hand), so they stay put; a
+  //   finger reaching a control's top ends the blend HOVER_MM above it and
+  //   one leaving starts there (the keyframe at the down or the up itself
+  //   takes the last HOVER_MM), so it is never on a control the device
+  //   does not see pressed;
   // - a finger in contact across the two keyframes is re-solved by the rig
   //   (refit) when its contact is more than 1 mm off: its angles from the
   //   blended root, at most 8 steps; failing that, the root too;
@@ -1141,6 +1145,14 @@
   // derived pose is left in a control, and the hand falls back to fits of
   // its own that swing it between presses.
   const LET_GO_DEG = 20;
+  // A finger reaching a control's top ends its eased move this high above
+  // it, and one leaving it starts there: the keyframe at the down (or the
+  // up) itself takes the last HOVER_MM, so before the device sees a press,
+  // and after it sees the release, the finger is never on the control
+  // (drawTime may stop a microsecond short of the down, and a tick can end
+  // anywhere before it). Its own angles re-solved, the root kept, to
+  // HOVER_TOL_MM.
+  const HOVER_MM = 0.3, HOVER_TOL_MM = 0.02, HOVER_ITERATIONS = 20, HOVER_ROUNDS = 4;
   const minJerk = u => u * u * u * (10 + u * (6 * u - 15));
   const NO_CONTACTS = Object.freeze([]);
 
@@ -1423,6 +1435,42 @@
       return { state: turned(e.state, c, deg, upMm), touching: e.touching.map(x => turnedContact(x, c, deg, upMm)) };
     }
     const grips = shape => shape.how === 'pinch' && !shape.liftMm;
+    // Keyframe entry e's finger c.finger lifted HOVER_MM straight up off its
+    // contact c (its angles re-solved from e's pose, the root kept), as
+    // {curls, spread} of that finger; cached on the entry.
+    function hovered(side, e, c) {
+      const memo = e.hover || (e.hover = {});
+      let h = memo[c.finger];
+      if (!h) {
+        const rig = rigs[side], z = c.target.z + HOVER_MM * MM;
+        rig.setPose(e.state);
+        // The contact is re-picked after each solve (lifted, another vertex
+        // of the fingertip may be the lowest): a few rounds.
+        for (let round = 0; round < HOVER_ROUNDS; round++) {
+          const p = rig.contact(c.finger, c.toward);
+          if (p.z >= z - HOVER_TOL_MM * MM) break;
+          rig.refit([{ finger: c.finger, target: new T.Vector3(p.x, p.y, z), toward: c.toward }],
+            { toleranceMm: HOVER_TOL_MM, iterations: HOVER_ITERATIONS });
+        }
+        const q = rig.getPose();
+        h = memo[c.finger] = { curls: q.curls[c.finger], spread: q.spread[c.finger] };
+      }
+      return h;
+    }
+    // A keyframe's state with the fingers of contacts `list` hovered.
+    function withHover(side, e, state, list) {
+      if (!list.length) return state;
+      const curls = Object.assign({}, state.curls), spread = Object.assign({}, state.spread);
+      for (const c of list) {
+        const h = hovered(side, e, c);
+        curls[c.finger] = h.curls;
+        spread[c.finger] = h.spread;
+      }
+      return { pivot: state.pivot, quaternion: state.quaternion, curls, spread };
+    }
+    // Of a keyframe's contacts, those not held across to the other
+    // keyframe (a finger reaching or leaving its control), on a top.
+    const notHeld = (list, held) => list.filter(c => !(c.toward && c.toward.axis) && !held.some(x => x.finger === c.finger));
     // The pose of a hand at t from its keyframes A and B around t, before
     // the rig re-solves or clears it: { state, held (the contacts held
     // across A and B, on their targets), touching (those and the fingers
@@ -1457,7 +1505,12 @@
       }
       const held = heldAcross(A, B, ea);
       if (ea === eb && sa.how !== 'pinch') {
-        return { state: ea.state, held, touching: ea.touching, aimed: ea.aimed, away, ok, clean: ea.clean, exact: true };
+        // The same pose at both ends: as it is, but a finger that lets go of
+        // its control at A and presses it again at B (another touch) hovers
+        // in between.
+        const lift = notHeld(ea.touching, held);
+        if (!lift.length) return { state: ea.state, held, touching: ea.touching, aimed: ea.aimed, away, ok, clean: ea.clean, exact: true };
+        return { state: withHover(side, ea, ea.state, lift), held, touching: ea.touching, aimed: ea.aimed, away, ok };
       }
       // Off or onto a knob's side, unless the plan lifts there: the grip
       // straight up or down GRIP_LIFT_MM over a fraction `lead` of the time
@@ -1477,8 +1530,12 @@
       if (!leaves) for (const c of ea.touching) if (!held.includes(c)) touching.push(c);
       if (!enters) for (const c of eb.touching) if (!touching.some(x => x.finger === c.finger)) touching.push(c);
       const aimed = eb.aimed.concat(touching.map(c => c.finger).filter(f => !eb.aimed.includes(f)));
-      const pa = leaves ? gripAt(sa, ea, twistAt(sa.turn, A.t).deg, upAt(u)).state : stateOf(sa, ea, A.t);
-      const pb = enters ? gripAt(sb, eb, twistAt(sb.turn, B.t).deg, upAt(1 - u)).state : stateOf(sb, eb, B.t);
+      // A finger leaving its control at A starts HOVER_MM above it, one
+      // reaching its control at B ends there.
+      const pa = leaves ? gripAt(sa, ea, twistAt(sa.turn, A.t).deg, upAt(u)).state
+        : withHover(side, ea, stateOf(sa, ea, A.t), notHeld(ea.touching, held));
+      const pb = enters ? gripAt(sb, eb, twistAt(sb.turn, B.t).deg, upAt(1 - u)).state
+        : withHover(side, eb, stateOf(sb, eb, B.t), notHeld(eb.touching, held));
       const s = minJerk((u - u0) / (u1 - u0));
       return { state: blend(pa, pb, s, held), held, touching, aimed, away, ok };
     }

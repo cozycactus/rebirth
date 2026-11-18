@@ -995,6 +995,28 @@ section('drive', () => {
       assert.deepStrictEqual(left, [], what + ': the ' + side + ' hand is in a control: ' + fmt(left.slice(0, 3)));
     }
   };
+  // Never on a control the device does not see pressed: 1 and 3 000 before
+  // every down, and 1 after every up, the assigned finger's contact point
+  // at least 0.2 mm above the control's top (the eased move ends 0.3 mm
+  // above it); at the down and the up on its target (within 1.5 mm).
+  const hovering = (what, plan, driver) => {
+    for (const x of plan.touches) {
+      const who = plan.assign['touch:' + x.id], c = x.control, p = PANEL.onPanel(c.u, c.v, c.topMm);
+      const target = new T.Vector3(p.x, p.y, p.z);
+      for (const t of [x.tDown - 1, x.tDown - 3000, x.tUp + 1]) {
+        driver.pose(t);
+        const above = rigs[who.hand].contact(who.finger).z / MM - c.topMm;
+        assert.ok(above >= 0.2, what + ': ' + x.key + ' at ' + t + ': the ' + who.hand + ' ' + who.finger + ' is ' + fmt(above) +
+          ' mm above the top');
+      }
+      for (const t of [x.tDown, x.tUp]) {
+        driver.pose(t);
+        const d = offMm(who.hand, who.finger, target);
+        assert.ok(d <= 1.5, what + ': ' + x.key + ' at ' + t + ': the ' + who.hand + ' ' + who.finger + ' is ' + fmt(d) + ' mm off');
+      }
+    }
+    assert.strictEqual(driver.failures, 0, what + ': failures');
+  };
 
   // The Task 5 tap on pad (6, 4), the right index: on its target at the
   // down, the middle and 1 000 before the up; at least 5 mm above it
@@ -1027,6 +1049,7 @@ section('drive', () => {
     const v = HandRig.peakSpeed(driver, 0, gone.t, 10000);
     assert.ok(v.right > 0.5 && v.left < 1e-9, 'tap: peak speeds ' + fmt(v) + ' m/s');
     assert.strictEqual(driver.failures, 0, 'tap: failures');
+    hovering('tap', plan, driver);
   }
 
   // drawTime never reaches an unprocessed event: no finger on a control
@@ -1153,6 +1176,7 @@ section('drive', () => {
       }
     }
     assert.strictEqual(driver.failures, 0, what + ': failures');
+    hovering(what, plan, driver);
   };
   // A group, a MUTE pair and a clip copy: the hand stays where the whole
   // gesture puts it while its fingers come and go (a lone index fitted
