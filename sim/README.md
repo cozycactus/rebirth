@@ -199,6 +199,12 @@ the plan into poses at the device's time; `handlayer.js` draws them in a
 WebGL2 canvas over the panel, only while a hand moves. `app.js` loads these
 scripts, with `three.js` and `handmodel.js`, one after another once the device
 is up, so the hands hold up neither the device nor the sound; from disk too.
+Building the hands from them (the canvas, the two rigs, shaders compiled and
+textures uploaded) is one task of 0.2–0.3 s, so it never runs while a live
+set plays: when the box is ticked during a set, or the scripts arrive after
+"Сыграть" with the preparation skipped, the ring stays until the set ends or
+is stopped, and the hands are there from the next show on. A preparation and
+an idle page do not sound, so the build may run there.
 
 The checkbox "показывать руки" in the artist's card shows and hides them,
 and the browser keeps the choice. Until it is first changed it is ticked,
@@ -207,16 +213,21 @@ the hands' heaviest frames delay them (see the frame cost below), and so the
 hands are off until the box is ticked; ticked, they are drawn lighter there
 (a 1024 px shadow map and a pixel ratio of at most 1.5, instead of 2048 and
 2). Without the hands a ring marks the control under the artist's finger, as
-before. The ring is also what shows when the browser has no WebGL2, when the
-hands' scripts fail to load, and in a preparation shown at x40. At x8 and x16
+before. The ring is also what shows when the browser has no WebGL2 or would
+draw it in software, when the hands' scripts fail to load, while the WebGL
+context is lost (the hands come back when the browser restores it), for the
+rest of a show whose hands failed, and in a preparation shown at x40. At x8 and x16
 the hands play the preparation approximately: the fingertips are exact at
 normal speed only.
 
 `node sim/test/hands_unit.js` checks the assets, the rig, the planner and
-the driver; `node sim/test/hands_check.js` plans every song in every
-arrangement in all four scores and poses 32 of those shows (every press on
-its control, the hand rules, nothing through a control or the plate, the
-hands' speed). `sim/check.sh` runs both.
+the driver, and that the panel `app.js` draws is the one the hands aim at;
+`node sim/test/hands_check.js` plans every song in every arrangement in all
+four scores and poses 32 of those shows (every press on its control, the
+hand rules and the order of a hand's fingers across held keys, the grip
+turning with the knob, nothing of the hand's mesh through a control or the
+plate, the hands' speed), 4 of them also every 20 ms of the live set;
+`HANDS_FULL=1` poses every show. `sim/check.sh` runs both.
 
 The frame cost was measured on an Apple M1 (headless Chrome 157, WebGL
 through ANGLE on Metal), the page at 1500 × 1000 and a pixel ratio of 2, the
@@ -230,13 +241,27 @@ hands, three to six runs each:
   that minute in any run, from disk either. The heaviest frames, 8–11 ms,
   are the first poses of a pinch or of held steps, when the fingers are
   fitted to them for the first time.
-- From disk the 303s' callbacks (every 21.3 ms) came at most 24–28 ms apart
-  without the hands and 30–33 ms with them, the late ones always at those
-  first poses; in two of six runs an interval passed 32 ms (1.5 buffers).
-  Hence the hands off by default there.
+- From disk the 303s' callbacks (every 21.3 ms) came at worst 24.4–28.4 ms
+  apart without the hands and 29.6–33.3 ms with them, the late ones always at
+  those first poses. Over six runs each, 3 intervals passed 32 ms (1.5
+  buffers; 32.4–33.3 ms) in 2 of the 6 runs with the hands (2 in one run, 1
+  in another), none in the runs without them. Hence the hands off by default
+  there.
+- On a busier machine (load average 7–14) a run from disk with the box
+  ticked had 14 intervals between callbacks over 32 ms, the worst 48 ms, at
+  the same first poses. Of three runs from disk without the hands then, two
+  had none and one had 5, all from one stall of the machine itself (the
+  worst 135 ms, with no hands loaded).
 - Once per page, building the hands after the device is up is one task of
-  0.2–0.3 s, its warm-up (shaders compiled, textures uploaded) included;
-  planning a show takes 13–16 ms at its start.
+  0.2–0.3 s, its warm-up (shaders compiled, textures uploaded) included, and
+  never inside a live set (see above); planning a show takes 13–16 ms at its
+  start.
+- These runs predate the clearance of every fingertip vertex (the fingertips'
+  sides kept out of the keys too). With it the driver alone (in Node, posing
+  the same stretch every 16.7 ms) takes 0.042 ms a pose once its keyframes
+  are fitted instead of 0.030 (p99 0.25 ms instead of 0.15), and the first
+  poses of a keyframe are as heavy as before (the same 11 over 4 ms, at most
+  11–12 ms).
 
 Where the hands come from:
 
