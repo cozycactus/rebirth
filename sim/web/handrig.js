@@ -1083,7 +1083,7 @@
     }
 
     setRoot(new T.Vector3(), new T.Quaternion());   // at the origin, in page units
-    return { side, root: group, mesh, bone: boneOf, setCurls, setRoot, getPose, setPose, pad, skinned, CLEARANCE, PALM,
+    return { side, scale, root: group, mesh, bone: boneOf, setCurls, setRoot, getPose, setPose, pad, skinned, CLEARANCE, PALM,
       FINGER_CLEARANCE, armDir, contact, place, fit, pinch, clear, refit, violations };
   }
 
@@ -1097,8 +1097,8 @@
   //   Then clear(), the aimed fingers held to their (raised) targets. A
   //   keyframe pressing some of the controls its neighbour presses takes
   //   that one's pose instead, its other fingers let go (derivedShapes).
-  //   Each is fitted on first use and cached by its geometry (side, how it
-  //   is fitted, the aims, freeYaw; a derived one by its fingers and its
+  //   Each is fitted on first use and cached by its geometry (side, the rig's scale, how
+  //   it is fitted, the aims, freeYaw; a derived one by its fingers and its
   //   root's key) in one LRU for every driver, so equal situations in later
   //   shows reuse it;
   // - between two keyframes the root and the curls blend with minimum-jerk
@@ -1184,15 +1184,17 @@
     get size() { return this.map.size; },
   };
 
-  // How keyframe k of a hand is fitted, and its cache key.
-  function shapeOf(plan, side, k) {
+  // How keyframe k of a hand is fitted, and its cache key: prefixed by
+  // `rig` (the side and the rig's scale, so that rigs of another scale
+  // never share a fit).
+  function shapeOf(plan, rig, k) {
     const list = Object.keys(k.fingers).sort();
-    if (!list.length) return { how: 'away', key: side + ' away' };
+    if (!list.length) return { how: 'away', key: rig + ' away' };
     const onTurn = list.find(f => k.fingers[f].ref && k.fingers[f].ref.type === 'turn');
     if (onTurn) {
       const x = k.fingers[onTurn], turn = plan.turns[x.ref.id];
       if (!turn || turn.id !== x.ref.id) throw new Error('HandRig.Driver: no turn ' + x.ref.id);
-      return { how: 'pinch', turn, enc: turn.enc, liftMm: x.liftMm, key: side + ' pinch ' + turn.enc + ' +' + x.liftMm };
+      return { how: 'pinch', turn, enc: turn.enc, liftMm: x.liftMm, key: rig + ' pinch ' + turn.enc + ' +' + x.liftMm };
     }
     const how = list.length === 1 && list[0] === 'index' ? 'place' : 'fit';
     const aims = list.map(f => {
@@ -1200,7 +1202,7 @@
       return f + '@' + x.aim.u + ',' + x.aim.v + ',' + (x.aim.topMm + x.liftMm);
     });
     return { how, fingers: list, liftMm: k.fingers[list[0]].liftMm,
-      key: side + ' ' + how + ' ' + aims.join(' ') + (how === 'fit' && k.freeYaw ? ' freeYaw' : '') };
+      key: rig + ' ' + how + ' ' + aims.join(' ') + (how === 'fit' && k.freeYaw ? ' freeYaw' : '') };
   }
 
   // The hand away: relaxed, pointing from its shoulder straight at the
@@ -1269,7 +1271,7 @@
   // a pair would put the root elsewhere (two MUTE keys a track apart turn
   // the pair's hand 30° from the index's alone), and the hand would swing
   // between presses milliseconds apart.
-  function derivedShapes(side, frames, shapes) {
+  function derivedShapes(rig, frames, shapes) {
     const sets = frames.map(pressingOf);
     const within = (i, j) => j >= 0 && j < frames.length && sets[i] && sets[j] && sets[j].length > sets[i].length &&
       sets[i].every(f => {
@@ -1284,7 +1286,7 @@
       if (from[i] < 0) return shape;
       let root = i;
       while (from[root] >= 0) root = from[root];
-      return { how: 'derive', root, fingers: sets[i], own: shape, key: side + ' ' + sets[i].join(',') + ' of ' + shapes[root].key };
+      return { how: 'derive', root, fingers: sets[i], own: shape, key: rig + ' ' + sets[i].join(',') + ' of ' + shapes[root].key };
     });
   }
   // A derived keyframe's pose: its root's, the fingers it does not press
@@ -1355,7 +1357,8 @@
     for (const side of SIDES) {
       const frames = plan.hands[side];
       if (!frames || !frames.length) throw new Error('HandRig.Driver: no keyframes for the ' + side + ' hand');
-      hands[side] = { frames, times: frames.map(k => k.t), shapes: derivedShapes(side, frames, frames.map(k => shapeOf(plan, side, k))),
+      const key = side + ' ×' + rigs[side].scale;
+      hands[side] = { frames, times: frames.map(k => k.t), shapes: derivedShapes(key, frames, frames.map(k => shapeOf(plan, key, k))),
         entries: [] };
     }
     const twists = new Map();
@@ -1483,6 +1486,11 @@
     // Of a keyframe's contacts, those not held across to the other
     // keyframe (a finger reaching or leaving its control), on a top.
     const notHeld = (list, held) => list.filter(c => !(c.toward && c.toward.axis) && !held.some(x => x.finger === c.finger));
+    // Of keyframe A's contacts (entry e), those on a top whose touch ends at t.
+    const releasedAt = (A, e, t) => e.touching.filter(c => {
+      const x = A.fingers[c.finger], touch = x && x.ref && x.ref.type === 'touch' ? plan.touches[x.ref.id] : null;
+      return touch && touch.id === x.ref.id && touch.tUp === t && !(c.toward && c.toward.axis);
+    });
     // The pose of a hand at t from its keyframes A and B around t, before
     // the rig re-solves or clears it: { state, held (the contacts held
     // across A and B, on their targets), touching (those and the fingers
@@ -1500,11 +1508,19 @@
       }
       const ia = Math.max(0, lo - 1), ib = Math.min(lo, n - 1);
       const A = h.frames[ia], B = h.frames[ib], sa = h.shapes[ia], sb = h.shapes[ib], ea = entry(side, ia);
-      // At a keyframe's time (or outside them all), the keyframe as it is.
+      // At a keyframe's time (or outside them all), the keyframe as it is;
+      // but at a touch's up the device has seen the release, so that
+      // finger already hovers HOVER_MM above its control (a contact holds
+      // from its down to just before its up).
       if (ia === ib || t <= A.t) {
         if (grips(sa)) {
           const g = gripAt(sa, ea, twistAt(sa.turn, A.t).deg, 0);
           return { state: g.state, held: g.touching, touching: g.touching, aimed: ea.aimed, away: false, ok: ea.ok, rigid: true };
+        }
+        const up = t === A.t ? releasedAt(A, ea, t) : NO_CONTACTS;
+        if (up.length) {
+          return { state: withHover(side, ea, stateOf(sa, ea, A.t), up), held: ea.touching.filter(c => !up.includes(c)),
+            touching: ea.touching, aimed: ea.aimed, away: false, ok: ea.ok };
         }
         return { state: stateOf(sa, ea, A.t), held: ea.touching, touching: ea.touching, aimed: ea.aimed, away: ea.how === 'away',
           ok: ea.ok, clean: ea.clean, exact: sa.how !== 'pinch', rigid: sa.how === 'pinch' };
@@ -1617,8 +1633,12 @@
       for (const side of SIDES) out[side] = windowUs > 0 ? poseWindow(side, t, windowUs) : poseAt(side, t);
       return out;
     }
-    // The time to draw at: never at or past the next down or up the device
-    // has not processed (the first of plan.events after now).
+    // The time to draw at: never at or past the next down, up or edge the
+    // device has not processed (the first of plan.events after now), and,
+    // while now does not go back, never before the last one (the
+    // extrapolation may fall back when the audio clock lags): that is held
+    // until now passes it.
+    let lastNow = -Infinity, lastDraw = -Infinity;
     function drawTime(now, extrapolated) {
       const ev = plan.events;
       let lo = 0, hi = ev.length;
@@ -1626,7 +1646,11 @@
         const m = (lo + hi) >> 1;
         if (ev[m] > now) hi = m; else lo = m + 1;
       }
-      return lo === ev.length ? extrapolated : Math.max(now, Math.min(extrapolated, ev[lo] - 1));
+      let t = lo === ev.length ? extrapolated : Math.max(now, Math.min(extrapolated, ev[lo] - 1));
+      if (now >= lastNow) t = Math.max(t, lastDraw);
+      lastNow = now;
+      lastDraw = t;
+      return t;
     }
     return self;
   }

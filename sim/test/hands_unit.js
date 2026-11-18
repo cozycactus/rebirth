@@ -731,7 +731,11 @@ section('plan', () => {
     for (const turn of plan.turns) {
       const who = plan.assign['turn:' + turn.id];
       assert.ok(who && plan.hands[who.hand], 'assign of turn ' + turn.id);
-      for (const t of [turn.tStart, turn.tEnd]) {
+      // The pinch lasts to the turn's end, or to just before the press that
+      // continues it when that comes first.
+      const push = turn.push === null ? null : plan.touches[turn.push];
+      const end = push && push.tDown <= turn.tEnd ? push.tDown - 1 : turn.tEnd;
+      for (const t of [turn.tStart, end]) {
         const k = at(plan.hands[who.hand], t);
         assert.ok(k && k.kind === 'pinch' && ['thumb', 'index'].every(f => k.fingers[f] && k.fingers[f].liftMm === 0 &&
           k.fingers[f].ref.type === 'turn' && k.fingers[f].ref.id === turn.id), 'turn ' + turn.id + ' pinched at ' + t + ': ' + show(k));
@@ -743,7 +747,10 @@ section('plan', () => {
       const key = PANEL.control(a).key;
       assert.ok(plan.touches.some(x => x.key === key && x.tDown === a.t), 'a touch for ' + key + ' down at ' + a.t);
     }
-    const times = [...new Set(plan.touches.flatMap(x => [x.tDown, x.tUp]))].sort((a, b) => a - b);
+    // The device's events the hands wait for: every down and up, and every
+    // encoder edge (the knob as app.js draws it turns at its edges).
+    const times = [...new Set(plan.touches.flatMap(x => [x.tDown, x.tUp])
+      .concat(actions.filter(a => a.op === 'edge').map(a => a.t)))].sort((a, b) => a - b);
     assert.deepStrictEqual(plan.events, times, 'events');
     return plan;
   };
@@ -799,6 +806,21 @@ section('plan', () => {
     const between = p.hands.right.filter(k => k.t > turn.tEnd && k.t < sw.tDown);
     assert.ok(between.every(k => k.kind === 'approach' && k.fingers.index && k.fingers.index.liftMm === 15),
       'holdEdit: from the pinch to the push the hand stays: ' + show(between));
+  }
+  // A press of the knob 10 000 after the turn's last edge, inside the turn's
+  // 20 000 tail: the pinch lets go just before it, and the index is on the
+  // knob's top from its down.
+  {
+    const list = [];
+    const last = burst(list, 0, 1, 1000000, 3);
+    press(list, 'encsw', { enc: 0 }, last + 10000, last + 100000);
+    const p = plan(sorted(list)), turn = p.turns[0], sw = touchOf(p, 'knob:0');
+    assert.strictEqual(turn.push, sw.id, 'push in the tail: the press continues the turn');
+    const frames = p.hands[p.assign['turn:' + turn.id].hand];
+    const k = at(frames, sw.tDown), before = at(frames, sw.tDown - 1);
+    assert.ok(k && k.kind === 'push' && k.fingers.index.ref.id === sw.id && !k.fingers.thumb, 'push in the tail: ' + show(k));
+    assert.ok(before && before.kind === 'pinch' && before.fingers.thumb && before.fingers.index.ref.type === 'turn',
+      'push in the tail: pinched until 1 before: ' + show(before));
   }
   {
     const p = plan(holdEdit([0, 1, 2], 160000).list);
@@ -1018,20 +1040,22 @@ section('drive', () => {
     }
   };
   // Never on a control the device does not see pressed: 1 and 3 000 before
-  // every down, and 1 after every up, the assigned finger's contact point
-  // at least 0.2 mm above the control's top (the eased move ends 0.3 mm
-  // above it); at the down and the up on its target (within 1.5 mm).
+  // every down, and at and 1 after every up (the device has processed the
+  // up by then), the assigned finger's contact point at least 0.2 mm above
+  // the control's top (the eased move ends 0.3 mm above it); at the down
+  // and 1 before the up on its target (within 1.5 mm): a contact holds
+  // from its down to just before its up.
   const hovering = (what, plan, driver) => {
     for (const x of plan.touches) {
       const who = plan.assign['touch:' + x.id], c = x.control, p = PANEL.onPanel(c.u, c.v, c.topMm);
       const target = new T.Vector3(p.x, p.y, p.z);
-      for (const t of [x.tDown - 1, x.tDown - 3000, x.tUp + 1]) {
+      for (const t of [x.tDown - 1, x.tDown - 3000, x.tUp, x.tUp + 1]) {
         driver.pose(t);
         const above = rigs[who.hand].contact(who.finger).z / MM - c.topMm;
         assert.ok(above >= 0.2, what + ': ' + x.key + ' at ' + t + ': the ' + who.hand + ' ' + who.finger + ' is ' + fmt(above) +
           ' mm above the top');
       }
-      for (const t of [x.tDown, x.tUp]) {
+      for (const t of [x.tDown, x.tUp - 1]) {
         driver.pose(t);
         const d = offMm(who.hand, who.finger, target);
         assert.ok(d <= 1.5, what + ': ' + x.key + ' at ' + t + ': the ' + who.hand + ' ' + who.finger + ' is ' + fmt(d) + ' mm off');
@@ -1083,6 +1107,28 @@ section('drive', () => {
     assert.strictEqual(driver.drawTime(1000000, 1100000), 1070000 - 1, 'drawTime: before the up');
     assert.strictEqual(driver.drawTime(1070000, 1090000), 1090000, 'drawTime: no later event');
     assert.strictEqual(driver.drawTime(1000000 - 5000, 1000000 - 9000), 1000000 - 5000, 'drawTime: never before now');
+  }
+  // Within a show the draw time never goes back, though the extrapolation
+  // may (the audio clock lagging): it is held until the device passes it.
+  {
+    const { driver } = drive(tapList);
+    assert.strictEqual(driver.drawTime(1010000, 1019000), 1019000, 'drawTime: extrapolated');
+    assert.strictEqual(driver.drawTime(1012000, 1015000), 1019000, 'drawTime: held while the extrapolation falls back');
+    assert.strictEqual(driver.drawTime(1016000, 1016000), 1019000, 'drawTime: held until now passes it');
+    assert.strictEqual(driver.drawTime(1020000, 1021000), 1021000, 'drawTime: on once now passed it');
+    assert.strictEqual(driver.drawTime(1060000, 1090000), 1069999, 'drawTime: the held time still stops before the up');
+    assert.strictEqual(driver.drawTime(1062000, 1062000), 1069999, 'drawTime: held there');
+  }
+  // The edges of an encoder are events too: the pinch never turns before
+  // the device has turned the knob (app.js draws the knob at each edge).
+  {
+    const list = [];
+    burst(list, 0, 1, 1000000, 2);
+    const { plan, driver } = drive(sorted(list)), edges = list.filter(a => a.op === 'edge').map(a => a.t);
+    for (let i = 1; i < edges.length; i++) {
+      assert.strictEqual(driver.drawTime(edges[i - 1], edges[i] + 20000), edges[i] - 1, 'drawTime: stops before the edge at ' + edges[i]);
+    }
+    assert.ok(edges.every(t => plan.events.includes(t)), 'drawTime: every edge is an event');
   }
 
   // holdEdit: the left hand holds steps 0 1 2 (pinky, ring, middle) while
@@ -1351,6 +1397,19 @@ section('drive', () => {
       'speed: the left hand holds, the right one plays both pads');
     const v = HandRig.peakSpeed(driver, 1100000, 1300000, 5000);
     assert.ok(v.right > 4, 'speed: peak ' + fmt(v) + ' m/s');
+  }
+
+  // The fits are cached by the rigs' scale too: rigs in the model's own
+  // units (unitScale) driving a show first leave the page-scale rigs' poses
+  // of that show as they are.
+  {
+    HandRig.Driver.cache.clear();
+    const unit = { left: HandRig.create('left', { unitScale: true }), right: HandRig.create('right', { unitScale: true }) };
+    assert.deepStrictEqual([unit.left.scale, rigs.right.scale], [1, 0.92 * 1000 * MM], 'the rigs\' scales');
+    const plan = HandPlan.build(tapList);
+    new HandRig.Driver(unit, plan).pose(1000000);
+    const res = new HandRig.Driver(rigs, plan).pose(1000000), d = offMm('right', 'index', top({ op: 'pad', track: 6, row: 4 }));
+    assert.ok(res.right.ok && d <= 1.5, 'after unit-scale rigs: the page-scale index is ' + fmt(d) + ' mm off');
   }
 
   // 1 000 poses over song 0 (fw2, pads), 50 000 apart: under 2 s from an

@@ -362,8 +362,11 @@
         return order.map((x, i) => touch(x, OUTER[i]));
       }
       case 'turn': {
+        // The pinch to the turn's end, or to just before the press that
+        // continues it when that comes in the turn's tail.
         const aim = aimOf(control({ op: 'encsw', enc: g.turn.enc })), ref = { type: 'turn', id: g.turn.id };
-        const out = ['thumb', 'index'].map(finger => ({ finger, aim, ref, tDown: g.turn.tStart, tUp: g.turn.tEnd, kind: 'pinch' }));
+        const push = g.touches[0], end = push && push.tDown <= g.turn.tEnd ? push.tDown - 1 : g.turn.tEnd;
+        const out = ['thumb', 'index'].map(finger => ({ finger, aim, ref, tDown: g.turn.tStart, tUp: end, kind: 'pinch' }));
         if (g.touches.length) out.push(Object.assign(touch(g.touches[0], 'index'), { kind: 'push' }));
         return out;
       }
@@ -587,7 +590,10 @@
       const list = byHand[hand].sort((x, y) => x.start - y.start || x.end - y.end);
       plan.hands[hand] = timeline(hand, list, stills[hand]);
     }
-    plan.events = [...new Set(touches.flatMap(x => [x.tDown, x.tUp]))].sort((a, b) => a - b);
+    // The device's events the hands must not run ahead of: every down and
+    // up, and every edge (app.js turns the drawn knob at each).
+    plan.events = [...new Set(touches.flatMap(x => [x.tDown, x.tUp]).concat(turns.flatMap(x => x.edges.map(e => e.t))))]
+      .sort((a, b) => a - b);
     return plan;
   }
 
