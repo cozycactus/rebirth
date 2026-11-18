@@ -107,6 +107,17 @@ typedef enum {
     OUTPUT_BOTH,
 } output_mode_t;
 
+// SYNTH uses the NOTE row's space for CV/Gate. DRUM keeps its NOTE row.
+typedef enum {
+    TRACK_PARAM_TYPE,
+    TRACK_PARAM_CHANNEL,
+    TRACK_PARAM_OUTPUT,
+    TRACK_PARAM_GATE,
+    TRACK_PARAM_NOTE,
+    TRACK_PARAM_DRUM_CV,
+    TRACK_PARAM_SYNTH_CV = TRACK_PARAM_NOTE,
+} track_param_t;
+
 typedef struct {
     track_type_t type;
     uint8_t      midi_channel;      // 0–15
@@ -155,6 +166,7 @@ typedef enum {
 typedef enum {
     PLAY_MODE_PATTERN,      // Loop single pattern
     PLAY_MODE_SONG,         // Play song chain
+    PLAY_MODE_MIDI_SONG,    // Play the timed event stream from flash
 } play_mode_t;
 
 typedef enum {

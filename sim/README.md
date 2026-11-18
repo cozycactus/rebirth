@@ -2,8 +2,8 @@
 
 The whole device in a browser page: the firmware from `src/` runs unmodified
 on a virtual board, the panel is drawn from what the firmware drives, and a
-set of software synths plays what leaves the MIDI wire. A scripted Goa trance
-artist can program the device from power-up and play one of eleven songs on it.
+set of software synths plays its MIDI and CV/Gate outputs. A scripted Goa trance
+artist can program the device from power-up and play one of fifteen songs on it.
 
 The public page, https://cozycactus.github.io/rebirth/, always runs `master`
 (see "The public page" below). To run it locally:
@@ -122,17 +122,57 @@ the delay and the reverb rings out. The sends and pans start where the mix
 had them fixed; the 909's reverb send reaches the snare, clap and crash only.
 The pad synth has no strip.
 
+## MIDI Song
+
+Open **Импорт MIDI и пресетов TAL** and select a folder with Standard MIDI
+Files and optional TAL-BassLine-101 `.bassline` presets. Each file appears in
+Songs with its original tempo. **Полная MIDI-аранжировка** plays separate
+source tracks and allocates multiple virtual SH-101 voices for chords. Tracks
+named for percussion use the drum models. Exact name matches use the
+corresponding TAL preset's SH-101 controls. The raw presets, automation, and
+MIDI files stay on the computer. A local checkout can preload a file list
+from `sim/web/local-songs/twisted/catalog.json`, in the ignored local library.
+Each populated source track lights a pad in the 8×8 grid. During a note the
+pad gets brighter. Click a synth part's pad to open its SH-101 controls.
+FREQ, resonance and the other panel controls edit that part during playback.
+The part's gain can be adjusted independently of the mixer strip.
+
+**MIDI Song · выходы ReBirth** runs the firmware player in the simulator.
+The routing table offers MIDI channel remapping and four direct CV/Gate
+pairs. Each pair takes one monophonic source track. The pitch offset puts
+the part inside notes 24–48 at the stock 1 V/oct and 2.048 V DAC setting.
+The original MIDI output channel is used for each track until remapped.
+Imported MIDI files can use the same channel on several tracks. DIN MIDI
+has 16 channels, so channel assignment determines which external instruments
+play those parts. Pitch bend and controllers remain in the MIDI stream.
+The CV/Gate route uses pitch and Gate.
+
+**Скачать MIDI Song UF2** writes a data-only RP2040 image for one song.
+Install firmware with MIDI Song support first. Copy the song UF2 to the
+Pico's BOOTSEL drive. Hold VALUE to enter SELECT PATTERN and press step 14
+to open MIDI SONG. PLAY starts and stops. TRACK changes the page of eight
+source tracks. Steps 1–8 mute, holding a step solos, and VALUE returns to
+SELECT PATTERN. The slot holds up to 1 MiB, 64 source tracks, and
+2,147,483,647 microseconds. The clip save area follows it in flash.
+The hardware pad grid shows all populated source tracks. A pad or SCENE
+selects its row for MUTE and SOLO.
+
+The timed player preserves note and controller events at their original
+deadlines. The physical DIN output serializes simultaneous events at its
+wire rate. Hardware synth patches are set on the instruments themselves.
+
 ## SH-101
 
-BASS (MIDI channel 3), LEAD (channel 6), ARP (channel 7) and FX (channel 8)
-each have an independent SH-101 voice, patch and 80C49 board. Select a strip
+BASS (MIDI channel 3), LEAD (channel 6), ARP (channel 7), FX (channel 8) and
+PAD (channel 9) each have an independent SH-101 voice, patch and 80C49 board. Select a strip
 name in the mixer to open its panel. Several panels can stay open. Each
 strip has its own fader, pan, mute and sends. The score's cutoff ranges in Hz
 are mapped onto the BASS and LEAD FREQ sliders.
 
 The **Вход** switch selects the source of pitch and Gate for that voice.
-**MIDI → CV/GATE** preserves playback of the ReBirth set and accepts the
-full MIDI note range. **Клавиатура · ROM** connects the panel's
+**MIDI** accepts the full MIDI note range. **CV/Gate 1–4** connect BASS,
+LEAD, ARP and FX respectively to the DAC and Gate pin events from the
+virtual ReBirth. **Клавиатура · ROM** connects the panel's
 keyboard, arpeggiator and sequencer to the same voice and mixer strip.
 Playing the virtual keys or pressing ROM buttons selects the internal input.
 On the original instrument, external CV/GATE plugs disconnect the internal
@@ -148,6 +188,13 @@ VCO riser for the number of bars shown on the FX panel, using MIDI Clock.
 The FX panel has its own source mixer, PWM, resonance, diode selector and
 volume. In the external input mode, it also lets you choose **ReBirth FX**
 and audition either sound.
+
+The four original songs Под током, После света, Сдвиг фазы and Ионный фронт
+program the CV/Gate assignments through TRACK CONFIG. BASS uses RANGE 16′.
+LEAD and ARP use 2′ with their clips pitched down to fit the DAC. FX uses
+RANGE 4′ and GATE with portamento. Its rise and fall are pitch contours
+with legato CV steps. PAD plays sustained MIDI channel 9 phrases from
+the browser score alongside the eight firmware tracks.
 
 The voice in `sim/web/sh101.js` uses the CEM3340 saw and PWM pulse, the
 4013's three sub modes and a noise source. The C59 ADSR uses exponential
@@ -261,14 +308,15 @@ program, plays the clips each section expects, and sends well-formed MIDI.
 Everything the artist does on the synths (filter sweeps, delay, reverb) is
 labelled as such on the page: the sequencer sends no CC.
 
-There are eleven songs (`Artist.SONGS`, `options.song`): the first set, and
-ten written for the page in the manner of Hallucinogen, Astral Projection,
-Total Eclipse and The Infinity Project (three, three, two and two). None
-copies a record. A song is a key, a tempo, the notes of its clips, three live
-edits and the synth settings. The ten new ones are written in scale degrees,
-one row of steps per clip; a song the set cannot play (an unknown key, a clip
-missing, a copy with other steps than its source, a live edit too far to turn
-between two beats) is refused when the file loads.
+The fifteen original songs (`Artist.SONGS`, `options.song`) include four
+written for the four SH-101 voices. «Под током» leads with octave bass,
+«После света» opens with LEAD, «Сдвиг фазы» layers a seven-step ARP over
+sixteen-step drums and «Ионный фронт» brings FX sweeps and a noise riser
+forward. All four use every mixer track. Each song defines the notes of
+its clips, three live edits and the synth settings. The scale-degree score
+is validated when the module loads.
+
+The web page accepts a song id in `?song=`, for example `?song=livewire`.
 
 Every song fills the same clip slots, so any song can be played in any of the
 four arrangements (`Artist.FORMS`, `options.form`; each song names the one it

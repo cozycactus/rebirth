@@ -15,6 +15,8 @@ void multicore_launch_core1(void (*entry)(void));
 #undef main
 
 #include "kit.h"
+#include "midi_song.h"
+#include "hardware/flash.h"
 #include "sim_internal.h"
 
 static uint64_t next_pass_us;
@@ -86,6 +88,10 @@ double sim_now(void) { return (double)sim_now_us; }
 #define SIM_FEATURES 0
 #endif
 int sim_features(void) { return SIM_FEATURES; }
+int sim_dac_full_scale_mv(void) { return CV_DAC_FULL_SCALE_MV; }
+uint8_t *sim_midi_song_slot(void) { return (uint8_t *)(XIP_BASE + MIDI_SONG_FLASH_OFFSET); }
+int sim_midi_song_capacity(void) { return MIDI_SONG_FLASH_BYTES; }
+int sim_midi_song_open(void) { return ui_open_midi_song(); }
 
 // ─── Inspection ─────────────────────────────────────────────────
 
@@ -107,7 +113,8 @@ int sim_dbg_track_length(int location, int track) {
 uint32_t sim_dbg_track_config(int track) {
     const track_config_t *c = &g_seq.patterns[0].tracks[track & 7];
     return (uint32_t)c->type | ((uint32_t)c->midi_channel << 8) |
-           ((uint32_t)c->gate_length_pct << 16) | ((uint32_t)c->output_mode << 24);
+           ((uint32_t)c->gate_length_pct << 16) | ((uint32_t)c->output_mode << 24) |
+           ((uint32_t)c->cv_channel << 26);
 }
 int sim_dbg_mutes(void) { return seq_get_track_mutes(); }
 uint32_t sim_dbg_overruns(void) {

@@ -5,6 +5,7 @@
 #include "hardware/irq.h"
 #include "sequencer.h"
 #include "kit.h"
+#include "midi_song.h"
 #include <string.h>
 #include <math.h>
 
@@ -577,6 +578,7 @@ static void clear_runtime_note_state(void) {
 }
 
 static void stop_playback_outputs(void) {
+    midi_song_end();
     kit_release_all();
     // All note-offs in one MIDI send: one short TX lock section, not one per track.
     midi_buf_clear();
@@ -690,7 +692,17 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
     hw_clear_bits(&timer_hw->intr, 1u << timer_alarm_num);
 
     transport_t *t = (transport_t *)&g_seq.transport;
+    uint32_t midi_deadline = 0;
+    bool has_midi_deadline = false;
     if (t->state != TRANSPORT_PLAYING) goto isr_done;
+    if (t->mode == PLAY_MODE_MIDI_SONG) {
+        has_midi_deadline = midi_song_dispatch(isr_start_us, &midi_deadline);
+        if (!has_midi_deadline) {
+            t->state = TRANSPORT_STOPPED;
+            stop_playback_outputs();
+        }
+        goto isr_done;
+    }
 
     if ((t->pulse_count % (PPQN / MIDI_PPQN)) == 0) midi_send_clock();
 
@@ -811,23 +823,28 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
     t->pulse_count++;
 
 isr_done:
-    if (midi_output_overflowed()) panic_playback();
+    if (midi_output_overflowed()) {
+        panic_playback();
+        has_midi_deadline = false;
+    }
 
     // Re-arm after processing. Writing an alarm in the past would stall for
     // the 32-bit timer wrap (about 72 minutes); recover without a clock burst.
-    uint32_t target = scheduled_us + pulse_interval_us;
+    uint32_t target = has_midi_deadline ? midi_deadline : scheduled_us + pulse_interval_us;
     uint32_t now_us = timer_hw->timerawl;
     if ((int32_t)(target - now_us) <= 0) {
-        if ((int32_t)(isr_start_us - scheduled_us) < (int32_t)jitter_expected_period_us) {
+        if (!has_midi_deadline && (int32_t)(isr_start_us - scheduled_us) < (int32_t)jitter_expected_period_us) {
             jitter_stats.overruns++;
         }
-        target = now_us + pulse_interval_us;
+        // Bound the work in one MIDI Song IRQ while retaining the song's
+        // absolute timeline when several events are already due.
+        target = now_us + (has_midi_deadline ? 10u : pulse_interval_us);
     }
     timer_hw->alarm[timer_alarm_num] = target;
     if ((int32_t)(target - timer_hw->timerawl) <= 0) {
         hw_clear_bits(&timer_hw->intr, 1u << timer_alarm_num);
         irq_clear(TIMER_IRQ_0);
-        timer_hw->alarm[timer_alarm_num] = timer_hw->timerawl + pulse_interval_us;
+        timer_hw->alarm[timer_alarm_num] = timer_hw->timerawl + (has_midi_deadline ? 10u : pulse_interval_us);
     }
     jitter_expected_period_us = pulse_interval_us;
     jitter_record_exit(isr_start_us);
@@ -838,6 +855,7 @@ isr_done:
 // ─── Core 1 Entry ───────────────────────────────────────────────
 
 void sequencer_init(void) {
+    midi_song_reset();
     static bool lock_ready;
     if (!lock_ready) {
         playback_spinlock_num = spin_lock_claim_unused(true);
@@ -891,6 +909,20 @@ void transport_start(void) {
     uint32_t lock_state = seq_lock();
     transport_t *t = (transport_t *)&g_seq.transport;
     t->state = TRANSPORT_STOPPED;
+
+    if (t->mode == PLAY_MODE_MIDI_SONG) {
+        if (midi_song_loaded()) {
+            const uint32_t start = timer_hw->timerawl + 1000u;
+            midi_song_begin(start);
+            t->pulse_count = 0;
+            t->state = TRANSPORT_PLAYING;
+            timer_hw->alarm[timer_alarm_num] = start;
+            midi_send_start();
+        }
+        seq_unlock(lock_state);
+        playback_unlock(playback_irq_state);
+        return;
+    }
 
     // Reset position
     t->pulse_count = 0;
@@ -951,7 +983,7 @@ void transport_stop(void) {
 
 void transport_continue(void) {
     uint32_t playback_irq_state = playback_lock();
-    if (g_seq.transport.state == TRANSPORT_PLAYING ||
+    if (g_seq.transport.state == TRANSPORT_PLAYING || g_seq.transport.mode == PLAY_MODE_MIDI_SONG ||
         (g_seq.transport.mode == PLAY_MODE_SONG &&
          g_seq.transport.song_position >= g_seq.song.length)) {
         playback_unlock(playback_irq_state);
@@ -980,7 +1012,8 @@ void transport_set_bpm(float bpm) {
 }
 
 void transport_set_mode(play_mode_t mode) {
-    if (mode != PLAY_MODE_PATTERN && mode != PLAY_MODE_SONG) return;
+    if (mode != PLAY_MODE_PATTERN && mode != PLAY_MODE_SONG &&
+        (mode != PLAY_MODE_MIDI_SONG || !midi_song_loaded())) return;
     uint32_t playback_irq_state = playback_lock();
     if (g_seq.transport.mode != mode) {
         g_seq.transport.state = TRANSPORT_STOPPED;
@@ -991,6 +1024,24 @@ void transport_set_mode(play_mode_t mode) {
         }
     }
     playback_unlock(playback_irq_state);
+}
+
+bool transport_open_midi_song(void) {
+    if (g_seq.transport.state != TRANSPORT_STOPPED || !midi_song_mount()) return false;
+    transport_set_mode(PLAY_MODE_MIDI_SONG);
+    return true;
+}
+
+void transport_midi_song_toggle(uint8_t track, bool solo) {
+    const uint32_t irq = playback_lock();
+    midi_song_toggle(track, solo);
+    playback_unlock(irq);
+}
+
+void transport_midi_song_view(midi_song_view_t *view) {
+    const uint32_t irq = playback_lock();
+    midi_song_view(timer_hw->timerawl, view);
+    playback_unlock(irq);
 }
 
 void transport_set_launch_quant(launch_quant_t q) {

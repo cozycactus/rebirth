@@ -708,51 +708,61 @@ void display_draw_pattern_select(uint8_t pattern,
 
 // ─── Track Config View ─────────────────────────────────────────
 
+#define CONFIG_Y        12
+#define CONFIG_PITCH    10
+#define CONFIG_ROWS     5
+
+static void track_config_row(const track_config_t *tc, uint8_t param,
+                             char *line, size_t len) {
+    switch (param) {
+        case TRACK_PARAM_TYPE:
+            snprintf(line, len, " Type:   %s", tc->type == TRACK_TYPE_SYNTH ? "Synth" : "Drum");
+            break;
+        case TRACK_PARAM_CHANNEL:
+            snprintf(line, len, " MIDI Ch: %d", tc->midi_channel + 1);
+            break;
+        case TRACK_PARAM_OUTPUT: {
+            const char *out = "MIDI";
+            if (tc->output_mode == OUTPUT_CV_GATE) out = "CV/Gate";
+            if (tc->output_mode == OUTPUT_BOTH) out = "MIDI+CV";
+            snprintf(line, len, " Output: %s", out);
+            break;
+        }
+        case TRACK_PARAM_GATE:
+            snprintf(line, len, " Gate:   %d%%", tc->gate_length_pct);
+            break;
+        case TRACK_PARAM_NOTE:
+            if (tc->type == TRACK_TYPE_DRUM) {
+                char note[5];
+                note_to_str(tc->drum_note, note);
+                snprintf(line, len, " Note:   %s (%d)", note, tc->drum_note);
+                break;
+            }
+            // Falls through.
+        default:
+            snprintf(line, len, " CV/Gate: %d", tc->cv_channel + 1);
+            break;
+    }
+}
+
 void display_draw_track_config(const track_config_t *tc, uint8_t track,
                                 uint8_t param_cursor) {
-    // Title
-    char title[22];
-    snprintf(title, sizeof(title), "TRACK %d CONFIG", track + 1);
-    ssd1309_draw_string(0, 0, title, false);
+    char line[22];
+    snprintf(line, sizeof(line), "TRACK %d CONFIG", track + 1);
+    ssd1309_draw_string(0, 0, line, false);
 
-    // Type
-    const char *type_str = (tc->type == TRACK_TYPE_SYNTH) ? "Synth" : "Drum";
-    char line0[22];
-    snprintf(line0, sizeof(line0), " Type:   %s", type_str);
-    ssd1309_draw_string(0, 12, line0, param_cursor == 0);
-
-    // MIDI channel
-    char line1[22];
-    snprintf(line1, sizeof(line1), " MIDI Ch: %d", tc->midi_channel + 1);
-    ssd1309_draw_string(0, 22, line1, param_cursor == 1);
-
-    // Output mode
-    const char *out_str;
-    switch (tc->output_mode) {
-        case OUTPUT_CV_GATE: out_str = "CV/Gate"; break;
-        case OUTPUT_BOTH:    out_str = "MIDI+CV"; break;
-        default:             out_str = "MIDI"; break;
+    const uint8_t first = param_cursor == TRACK_PARAM_DRUM_CV ? 1 : 0;
+    for (uint8_t row = 0; row < CONFIG_ROWS; row++) {
+        uint8_t param = first + row;
+        uint8_t y = CONFIG_Y + row * CONFIG_PITCH;
+        track_config_row(tc, param, line, sizeof(line));
+        ssd1309_draw_string(0, y, line, param_cursor == param);
+        if (param_cursor == param) ssd1309_draw_char(0, y, '>', false);
     }
-    char line2[22];
-    snprintf(line2, sizeof(line2), " Output: %s", out_str);
-    ssd1309_draw_string(0, 32, line2, param_cursor == 2);
-
-    // Gate length
-    char line3[22];
-    snprintf(line3, sizeof(line3), " Gate:   %d%%", tc->gate_length_pct);
-    ssd1309_draw_string(0, 42, line3, param_cursor == 3);
-
-    // Drum note (only for drum tracks)
-    if (tc->type == TRACK_TYPE_DRUM) {
-        char note_str[5];
-        note_to_str(tc->drum_note, note_str);
-        char line4[22];
-        snprintf(line4, sizeof(line4), " Note:   %s (%d)", note_str, tc->drum_note);
-        ssd1309_draw_string(0, 52, line4, param_cursor == 4);
+    if (first) ssd1309_draw_char(OLED_WIDTH - FONT_CHAR_W, CONFIG_Y, '^', false);
+    else if (tc->type == TRACK_TYPE_DRUM) {
+        ssd1309_draw_char(OLED_WIDTH - FONT_CHAR_W, CONFIG_Y + (CONFIG_ROWS - 1) * CONFIG_PITCH, 'v', false);
     }
-
-    // Cursor arrow on selected param
-    ssd1309_draw_char(0, 12 + param_cursor * 10, '>', false);
 }
 
 // ─── Kit Config View ───────────────────────────────────────────
@@ -760,10 +770,6 @@ void display_draw_track_config(const track_config_t *tc, uint8_t track,
 // Title, then five of the KIT_PARAM_COUNT rows (y=12..52, 10 px apart),
 // scrolled to keep the cursor row in view; '^'/'v' at the right edge when rows
 // lie above/below.
-
-#define CONFIG_Y        12
-#define CONFIG_PITCH    10
-#define CONFIG_ROWS     5
 
 // One row of the kit list into `line`: label, then value.
 static void kit_config_row(const track_config_t *tc, const kit_config_t *kc, uint8_t param,

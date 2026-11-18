@@ -94,7 +94,18 @@
   #log .device b { color: var(--accent); } #log .rig b { color: var(--rig); } #log .info { color: var(--info); font-weight: 600; }
   #log .warn b { color: var(--warn); }
   /* ─── Mini mixer ─── */
-  .mixer { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 4px; margin-bottom: 12px; }
+  .mixer { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 4px; margin-bottom: 12px; }
+  #midi-song-tracks { max-height: 16rem; overflow: auto; }
+  .pad[data-midi-track]::after {
+    content: attr(data-midi-track);
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: #092c26;
+    font: 700 1.4cqw system-ui, sans-serif;
+    pointer-events: none;
+  }
   .strip { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 6px 2px; border: 1px solid var(--line);
     border-radius: 8px; background: #191b22; min-width: 0; }
   .strip.master { background: #20232c; }
@@ -370,6 +381,29 @@
         </select>
       </div>
       <div id="progress"><i></i></div>
+      <details id="midi-library">
+        <summary>Импорт MIDI и пресетов TAL</summary>
+        <div class="row">
+          <label>Папка с MIDI и .bassline <input type="file" id="midi-folder" webkitdirectory multiple></label>
+          <span class="sub" id="midi-import-status" role="status"></span>
+        </div>
+        <div id="midi-song-settings" hidden>
+          <div class="row">
+            <label>Воспроизведение
+              <select id="midi-song-mode">
+                <option value="full">Полная MIDI-аранжировка</option>
+                <option value="firmware">MIDI Song · выходы ReBirth</option>
+              </select>
+            </label>
+            <button class="btn" id="midi-song-export" type="button">Скачать MIDI Song UF2</button>
+          </div>
+          <details>
+            <summary>Дорожки и аппаратная маршрутизация</summary>
+            <div class="sub">Исходные MIDI-каналы можно переназначить. Для CV/Gate выберите одну монофоническую партию на пару, при необходимости задайте перенос в диапазон нот 24–48.</div>
+            <div class="scroll" id="midi-song-tracks"></div>
+          </details>
+        </div>
+      </details>
       <div class="sub" id="phase">Прибор включён и ждёт. Можно играть самому или запустить артиста.</div>
       <div id="log"></div>
     </div>
@@ -450,14 +484,22 @@
           </div>
           <div class="sh101-scroller" id="sh101-fx"></div>
         </details>
+        <details class="sh101" id="sh101-pad-panel">
+          <summary>PAD · SH-101 <span class="sub">MIDI 9</span></summary>
+          <div class="row sh101-transport">
+            <button type="button" class="btn" id="sh101-pad-audition" disabled>Пробная нота C4</button>
+            <span class="sub" id="sh101-pad-status" role="status"></span>
+          </div>
+          <div class="sh101-scroller" id="sh101-pad"></div>
+        </details>
       </section>
       <div class="bench" id="effects"></div>
       <div class="bench" id="acid1"></div>
       <div class="bench" id="acid2"></div>
       <template id="sh101-rom-controls">
-        <label data-rom="input-label" data-tip="Клавиши и кнопки арпеджио подключают ROM этого канала. Для сета ReBirth выбери вход MIDI.">Вход
+        <label data-rom="input-label" data-tip="Источник высоты и Gate для этого SH-101. Клавиши и кнопки арпеджио подключают его ROM.">Вход
           <select data-rom="input" disabled>
-            <option value="midi">MIDI → CV/GATE</option>
+            <option value="midi">MIDI</option>
             <option value="rom">Клавиатура · ROM</option>
           </select>
         </label>
@@ -524,6 +566,7 @@
 <script src="core.js"></script>
 <script src="device.js"></script>
 <script src="artist.js"></script>
+<script src="midi_songs.js"></script>
 <script src="dsp.js"></script>
 <script src="acid.js"></script>
 <script src="sh101.js"></script>

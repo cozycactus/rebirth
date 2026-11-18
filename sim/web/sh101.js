@@ -90,6 +90,11 @@
       saw: 0.62, pulse: 0.25, sub: 0, noise: 0.8, resonance: 0.63, vca: 1,
       vcfMod: 0, vcoMod: 0, keyFollow: 0, envMod: 0,
     });
+    if (role === 'pad') Object.assign(p, {
+      saw: 0.58, pulse: 0.58, sub: 0.08, pwm: 0.46, lfoRate: 0.23, vcfMod: 0.07,
+      cutoff: 0.51, resonance: 0.29, envMod: 0.21, attack: 0.64,
+      decay: 0.59, sustain: 0.68, release: 0.72,
+    });
     if (role === 'rom') p.diodes = 1;
     return p;
   }
@@ -224,6 +229,7 @@
       this.rate = fs * 2;
       this.effects = effects;
       this.rom = rom;
+      this.cvInput = false;
       this.effect = null;
       this.filter = new Filter(this.rate, +rom);
       this.queue = [];
@@ -236,10 +242,12 @@
       this.width = 0.5;
       this.glide = false;
       this.bend = 0;
+      this.midiMod = 0;
+      this.velocityGain = 1;
       this.seed = 0x53483101;
       this.auditionEnd = Infinity;
       this.trigger = 0;
-      this.romGate = this.romEnvelopeGate = this.romReset = false;
+      this.controlGate = this.envelopeGate = this.romReset = false;
       this.romRange = this.lfoStep = 0;
       this.gateRate = rc(0.00055, this.rate);
       this.pwmRate = rc((100000 / 2) * 10e-9, this.rate);  // R94/R96 and C37
@@ -298,18 +306,36 @@
 
     event(e, t) {
       switch (e.type) {
-        case 'note': if (!this.rom) this.key(e.note, e.down); break;
-        case 'bend': if (!this.rom) this.bend = e.value; break;
+        case 'note':
+          if (!this.rom && !this.cvInput) {
+            this.key(e.note, e.down);
+            if (e.down) this.velocityGain = e.gain ?? 1;
+          }
+          break;
+        case 'bend': if (!this.rom && !this.cvInput) this.bend = e.value; break;
+        case 'mod': this.midiMod = e.value; break;
         case 'audition':
-          if (this.rom) break;
+          if (this.rom || this.cvInput) break;
           if (this.auditionEnd !== Infinity) this.key(this.auditionKey, false);
           this.auditionKey = 128 + e.note;
           this.key(this.auditionKey, true);
           this.auditionEnd = t + 0.65;
           break;
         case 'sweep':
-          if (this.effects && !this.rom) this.effect = { start: t, duration: e.duration, rise: e.rise };
+          if (this.effects && !this.rom && !this.cvInput) this.effect = { start: t, duration: e.duration, rise: e.rise };
           break;
+        case 'cv': {
+          if (!this.cvInput) break;
+          // 1 V/oct at the external jack. F3 at nominal RANGE 8′ is 17/12 V.
+          const note = 36 + 12 * e.volts;
+          this.glide = this.controlGate && e.gate;
+          if (e.gate && (!this.controlGate || (this.trigger === 0 && note !== this.note))) {
+            if (this.trigger !== 2) this.envStage = 'attack';
+          }
+          this.note = note;
+          this.controlGate = e.gate;
+          break;
+        }
         case 'romClock':
           if (!this.rom) break;
           this.lfoPhase = e.phase;
@@ -320,10 +346,10 @@
           // TRIG GEN monitors the keyboard CV before portamento. Range
           // CV feeds the oscillator separately and has no trigger path.
           const note = e.pitch + 36;  // F3 is code 17 with TRANSPOSE at M.
-          if (this.trigger === 0 && e.gate && this.romGate && note !== this.note) this.envStage = 'attack';
+          if (this.trigger === 0 && e.gate && this.controlGate && note !== this.note) this.envStage = 'attack';
           this.note = note;
           this.romRange = (e.range - 24) / 12;  // 8′ is code 24.
-          this.romGate = e.gate;
+          this.controlGate = e.gate;
           this.glide = e.glide;
           this.random = e.random / 31.5 - 1;
           this.romReset = e.reset;
@@ -332,6 +358,7 @@
         }
         case 'source':
           this.rom = e.rom;
+          this.cvInput = !!e.cv;
           this.amp = 0;
           // Switching the patched input also silences notes from that input.
           // Falls through.
@@ -341,8 +368,10 @@
           this.env = 0;
           this.envStage = 'release';
           this.bend = 0;
+          this.midiMod = 0;
+          this.velocityGain = 1;
           this.effect = null;
-          this.romGate = this.romEnvelopeGate = this.romReset = false;
+          this.controlGate = this.envelopeGate = this.romReset = this.glide = false;
           if (this.rom) this.amp = 0;
           break;
       }
@@ -360,7 +389,8 @@
       }
       if (!this.rom) this.lfoStep = lfoFrequency(p.lfoRate) / this.rate;
       this.lfoWave = Math.round(p.lfoWave);
-      this.vcoOffset = Math.round(p.range) + Math.round(p.transpose) - 2;
+      this.rangeOffset = Math.round(p.range) - 1;
+      this.transposeOffset = Math.round(p.transpose) - 1;
       this.a4 = p.pitchReference >= 0.5 ? ROLAND_A4 : REBIRTH_A4;
       this.tune = (p.tune - 0.5) / 12;
       this.pwmMode = Math.round(p.pwmMode);
@@ -397,12 +427,13 @@
     }
 
     step(p) {
-      const held = this.rom ? this.romGate : this.keys.length > 0 || !!this.effect;
+      const patched = this.rom || this.cvInput;
+      const held = patched ? this.controlGate : this.keys.length > 0 || !!this.effect;
       const lfo = this.lfoPhase, nextLfo = lfo + (this.romReset ? 0 : this.lfoStep);
-      if (this.rom) {
+      if (patched) {
         const envGate = held && (this.trigger !== 2 || lfo < 0.5);
-        if (envGate !== this.romEnvelopeGate) this.envStage = envGate ? 'attack' : 'release';
-        this.romEnvelopeGate = envGate;
+        if (envGate !== this.envelopeGate) this.envStage = envGate ? 'attack' : 'release';
+        this.envelopeGate = envGate;
       } else if (this.trigger === 2 && held) {
         if (nextLfo >= 1) this.envStage = 'attack';
         else if (lfo < 0.5 && nextLfo >= 0.5) this.envStage = 'release';
@@ -428,8 +459,8 @@
       if (this.lfoWave === 2) mod = this.random;
       if (this.lfoWave === 3) mod = this.noise;
       const keyboard = (this.cv - 69) / 12;
-      const range = this.rom ? this.romRange : this.vcoOffset;
-      const pitchBend = this.panelPitchBend + this.panelPitchLfo * triangle + this.bend / 6;
+      const range = this.rom ? this.romRange : this.rangeOffset + (this.cvInput ? 0 : this.transposeOffset);
+      const pitchBend = this.panelPitchBend + (this.panelPitchLfo + this.midiMod * p.bendLfo * 0.08) * triangle + this.bend / 6;
       const filterBend = this.panelFilterBend + this.panelFilterLfo * triangle;
       const freq = this.effect ? this.effectPitch * (this.a4 / REBIRTH_A4)
         : this.a4 * 2 ** (keyboard + range + this.tune + pitchBend + this.vcoModOctaves * mod);
@@ -455,11 +486,11 @@
       const gain = this.vcaMode === 0 && !this.effect ? this.env : +held;
       this.amp += this.gateRate * (gain - this.amp);
       const vcaInput = (vca - this.vcaDC) / (2 * THERMAL_VOLTAGE * 152);
-      return 0.8 * Math.tanh(vcaInput) * this.amp * p.volume;
+      return 0.8 * Math.tanh(vcaInput) * this.amp * p.volume * this.velocityGain;
     }
 
     render(out, t0, p) {
-      if (this.effects && !this.rom && !this.effect && !this.queue.length) {
+      if (this.effects && !this.rom && !this.cvInput && !this.effect && !this.queue.length) {
         out.fill(0);
         return;
       }
@@ -473,7 +504,7 @@
           this.key(this.auditionKey, false);
         }
         let level = 1;
-        if (this.effects && !this.rom) {
+        if (this.effects && !this.rom && !this.cvInput) {
           const e = this.effect;
           const elapsed = e ? t - e.start : 0;
           if (!e || elapsed >= e.duration) {
@@ -491,6 +522,47 @@
           level = ramp * (e.rise ? 0.12 + 0.88 * position ** 1.3 : Math.exp(-4 * position));
         }
         out[i] = 0.5 * level * (this.step(p) + this.step(p));
+      }
+    }
+  }
+
+  class MidiPart {
+    constructor(fs, { role, patch, poly }) {
+      this.settings = { ...defaults(role), ...patch };
+      this.slots = Array.from({ length: Math.max(1, poly) }, () => ({ key: -1, voice: new Voice(fs) }));
+      this.level = 1 / Math.sqrt(this.slots.length);
+      this.bend = this.mod = 0;
+      this.scratch = new Float32Array(128);
+    }
+
+    control(id, value) { this.settings[id] = value; }
+
+    midi(e) {
+      const type = e.status & 0xf0;
+      if (type === 0xe0 || (type === 0xb0 && e.d1 === 1)) {
+        if (type === 0xe0) this.bend = (((e.d2 << 7) + e.d1) - 8192) / 8192;
+        else this.mod = e.d2 / 127;
+        const control = type === 0xe0 ? { type: 'bend', value: this.bend, t: e.t } : { type: 'mod', value: this.mod, t: e.t };
+        for (const { voice } of this.slots) voice.enqueue(control);
+        return;
+      }
+      if (type !== 0x80 && type !== 0x90) return;
+      const down = type === 0x90 && e.d2 > 0;
+      const key = (e.status & 15) * 128 + e.d1;
+      const slot = this.slots.length === 1 ? this.slots[0]
+        : this.slots.find(s => s.key === (down ? -1 : key));
+      if (!slot) return;
+      slot.key = down ? key : -1;
+      slot.voice.enqueue({ type: 'note', note: e.d1, down, gain: 0.55 + 0.45 * e.d2 / 127, t: e.t });
+    }
+
+    render(out, t) {
+      out.fill(0);
+      if (out.length !== this.scratch.length) this.scratch = new Float32Array(out.length);
+      for (const { voice } of this.slots) {
+        if (!voice.keys.length && !voice.queue.length && Math.max(voice.env, voice.amp) < 1e-5) continue;
+        voice.render(this.scratch, t, this.settings);
+        for (let i = 0; i < out.length; i++) out[i] += this.scratch[i] * this.level;
       }
     }
   }
@@ -516,8 +588,23 @@
       }
     }
     registerProcessor('rebirth-sh101', SH101Processor);
+    class MidiPartProcessor extends AudioWorkletProcessor {
+      constructor(options) {
+        super();
+        this.part = new MidiPart(sampleRate, options.processorOptions);
+        this.port.onmessage = ({ data }) => {
+          if (data.type === 'control') this.part.control(data.id, data.value);
+          else this.part.midi(data);
+        };
+      }
+      process(_inputs, outputs) {
+        this.part.render(outputs[0][0], currentTime);
+        return true;
+      }
+    }
+    registerProcessor('rebirth-midi-part', MidiPartProcessor);
   } else {
-    const api = { Voice, Filter, groups, controls, defaults, max, cutoffPosition, lfoFrequency };
+    const api = { Voice, Filter, MidiPart, groups, controls, defaults, max, cutoffPosition, lfoFrequency };
     if (typeof module !== 'undefined' && module.exports) module.exports = api;
     else root.SH101 = api;
   }

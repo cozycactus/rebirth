@@ -27,6 +27,7 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **Pads as a keyboard** — while a step of a SYNTH clip is held, the 64 pads are a
   four-octave piano and a pad press sets the step's note, with no MIDI keyboard
 - **CV/Gate output** — 4 channels via MCP4822 DACs (1V/oct, 12-bit; default 0-2.048 V)
+- **MIDI Song playback** — import a timed MIDI arrangement with up to 64 source tracks and assign its output channels and CV/Gate pairs. [Import and playback](sim/README.md#midi-song)
 - **96 PPQN** internal timing, **24 PPQN** MIDI Clock, 20–300 BPM
 - **Swing value** per pattern (playback timing pending)
 - **Step flags** — accent, slide, tie (synth and drum tracks)

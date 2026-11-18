@@ -1,7 +1,7 @@
 // The page: draws the panel from what the device drives (LED frames, the OLED
 // bytes, the step LED latches), turns mouse input into pin and key levels,
-// keeps device time in step with the audio clock, and feeds the MIDI wire to
-// the synths.
+// keeps device time in step with the audio clock, and patches the device's
+// MIDI and CV/Gate outputs to the synths.
 (function () {
   'use strict';
 
@@ -15,6 +15,8 @@
   let speed = 1;
   let lastWall = 0, wallIsAudio = false;
   let show = null, phase = 'idle';  // idle | prep | live
+  let showPatch = [];
+  let importedSongs = [], midiRun = null, launchSerial = 0;
   const knobAngle = [0, 0];
   const anims = {};               // rig knob moves in progress, for the sliders
 
@@ -88,7 +90,12 @@
       for (let track = 0; track < 8; track++) {
         const pad = box('pad', PAD_X(track), PAD_Y(row), 80, 80);
         (els.pad[track] = els.pad[track] || [])[row] = pad;
-        bindHold(pad, down => device.pad(track, row, down));
+        bindHold(pad, down => device.pad(track, row, down), false, () => {
+          const song = fullMidiSong();
+          if (!song) return false;
+          openMidiPart(song.tracks[row * 8 + track]);
+          return true;
+        });
         pad.dataset.tip = 'Пэд: клип дорожки T' + (track + 1) + ' в ряду ' + (row + 1) + '.\n' +
           'На остановленном приборе клип выбирается сразу, во время игры встаёт в очередь до границы квантования (мигает). ' +
           'Ярко светится играющий клип, тускло — клип с шагами. Пустой пэд тоже запускается: дорожка замолкает.';
@@ -135,7 +142,7 @@
        'сброс счётчиков диагностики'][i - 8] || 'нет действия';
 
   // Press and hold with the pointer; Shift+click latches a control down.
-  function bindHold(el, set, latchable) {
+  function bindHold(el, set, latchable, handlePress) {
     const release = () => {
       if (!held.has(el)) return;
       held.delete(el);
@@ -143,7 +150,9 @@
       set(false);
     };
     el.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
       e.preventDefault();
+      if (handlePress?.()) return;
       takeOver();
       if (el.classList.contains('latched')) { release(); return; }
       el.setPointerCapture(e.pointerId);
@@ -229,10 +238,27 @@
   let lastStepLeds = -1;
   function drawLights() {
     const leds = device.leds();
+    const song = fullMidiSong();
     for (let row = 0; row < 8; row++) {
       for (let track = 0; track < 8; track++) {
         const i = row * 8 + track;
-        light(els.pad[track][row], leds[i * 3], leds[i * 3 + 1], leds[i * 3 + 2], 'var(--pad-off)', i);
+        const pad = els.pad[track][row];
+        const part = song?.tracks[i];
+        if (song) {
+          const hasMusic = !!part?.events.length;
+          const active = midiRun?.active[i] > 0;
+          const color = hasMusic ? (active ? [0, 32, 12] : [0, 12, 3]) : [0, 0, 0];
+          light(pad, ...color, 'var(--pad-off)', i);
+          const caption = hasMusic ? (i + 1) + ' · ' + part.name : '';
+          if (pad.title !== caption) {
+            pad.title = caption;
+            if (hasMusic) pad.dataset.midiTrack = String(i + 1);
+            else delete pad.dataset.midiTrack;
+          }
+        } else {
+          if (pad.title) { pad.title = ''; delete pad.dataset.midiTrack; }
+          light(pad, leds[i * 3], leds[i * 3 + 1], leds[i * 3 + 2], 'var(--pad-off)', i);
+        }
       }
       const s = 64 + row;
       light(els.scene[row], leds[s * 3], leds[s * 3 + 1], leds[s * 3 + 2], 'var(--pad-off)', s);
@@ -241,7 +267,8 @@
       const m = 72 + track;
       light(els.mute[track], leds[m * 3], leds[m * 3 + 1], leds[m * 3 + 2], 'var(--pad-off)', m);
     }
-    light(els.play, leds[240], leds[241], leds[242], 'var(--key-off)', 80);
+    if (midiRun?.player) light(els.play, 0, 32, 0, 'var(--key-off)', 80);
+    else light(els.play, leds[240], leds[241], leds[242], 'var(--key-off)', 80);
     light(els.beat, leds[243], leds[244], leds[245], '#2a2a2c', 81);
     const mask = device.stepLeds();
     if (mask !== lastStepLeds) {
@@ -309,6 +336,10 @@
       el.classList.toggle('down', a.down);
     },
     rig(id, value, ramp) { moveKnob(id, value, ramp, device.now()); },
+    padMidi(m) {
+      if (sounding()) rig.midi(m.status, m.d1, m.d2, audioTime(m.t));
+      if (m.d2) flashStrip(Artist.PAD_CHANNEL, m.t);
+    },
   };
 
   // ─── Synths ───────────────────────────────────────────────────
@@ -318,10 +349,21 @@
   const STRIPS = [
     { name: 'KICK', id: 'kick' }, { name: '909', id: 'drums' }, { name: 'BASS', id: 'bass' },
     { name: 'ACID 1', id: 'acid1' }, { name: 'ACID 2', id: 'acid2' }, { name: 'LEAD', id: 'lead' },
-    { name: 'ARP', id: 'arp' }, { name: 'FX', id: 'fx' }, { name: 'MASTER', level: 'master.volume' },
+    { name: 'ARP', id: 'arp' }, { name: 'FX', id: 'fx' }, { name: 'PAD', id: 'pad' },
+    { name: 'MASTER', level: 'master.volume' },
   ];
+  const CV_ROLES = Artist.CV_TRACKS.map(track => STRIPS[track].id);
+  const SH101_CHANNEL = { bass: 3, lead: 6, arp: 7, fx: 8, pad: 9 };
+  const CV_PATCH = {
+    bass: { range: 0 },
+    lead: { range: 3 },
+    arp: { range: 3 },
+    fx: { range: 2, trigger: 1, portaMode: 1, portaTime: 0.18, keyFollow: 0.85,
+      cutoff: 0.5, envMod: 0.36, vca: 0, attack: 0.07, sustain: 0.73, release: 0.28 },
+  };
+  const sh101Panels = {};
   for (const s of STRIPS) if (s.id) s.level = s.id + '.level';
-  const stripOf = (channel, note) => channel === 9 ? (note === 35 || note === 36 ? 0 : 1) : channel >= 2 && channel <= 7 ? channel : undefined;
+  const stripOf = (channel, note) => channel === 9 ? (note === 35 || note === 36 ? 0 : 1) : channel >= 2 && channel <= 8 ? channel : undefined;
   const KNOB_TIP = {
     tune: 'Tune: подстройка высоты генератора, в середине — без сдвига.',
     cutoff: 'Cut off freq: частота среза фильтра. Артист открывает и прикрывает её по ходу сета.',
@@ -362,6 +404,12 @@
     }
   }
   const userSet = (id, value) => { delete anims[id]; rig.setParam(id, value); };
+  function setVoiceControl(role, name, value) {
+    const part = sh101Panels[role]?.part;
+    if (!part) { userSet(role + '.' + name, value); return; }
+    (part.controls ||= {})[name] = value;
+    midiRun?.player?.control(part.track, name, value);
+  }
 
   // A knob drawn as the x0xb0x VCF Bench page draws its knobs: ticks, a gold
   // arc for the setting, a pointer. Drag up and down (Shift for fine), arrow
@@ -643,7 +691,7 @@
       if (def.accessory) {
         label.appendChild(input);
         accessories.prepend(label);
-        input.addEventListener('input', () => userSet(id, +input.value));
+        input.addEventListener('input', () => setVoiceControl(role, def.id, +input.value));
         sliders[id] = input;
         return null;
       }
@@ -667,7 +715,7 @@
         }
       };
       reflect();
-      input.addEventListener('input', () => { reflect(); userSet(id, +input.value); });
+      input.addEventListener('input', () => { reflect(); setVoiceControl(role, def.id, +input.value); });
       sliders[id] = { get value() { return input.value; }, set value(value) { input.value = value; reflect(); } };
       return label;
     };
@@ -710,12 +758,11 @@
 
   function buildSH101() {
     if (!window.SH101) return;
-    const panels = Object.fromEntries(Object.entries(rig.sh101)
-      .map(([role, voice]) => [role, buildSH101Panel(role, voice)]));
+    for (const [role, voice] of Object.entries(rig.sh101)) sh101Panels[role] = buildSH101Panel(role, voice);
     $('sh101').hidden = false;
     const openArpeggio = () => {
       $('sh101-arp-panel').open = true;
-      panels.arp.selectInput(true);
+      sh101Panels.arp.selectInput('rom');
     };
     $('sh101-arp-link').addEventListener('click', openArpeggio);
     const openLinkedPanel = () => {
@@ -729,7 +776,146 @@
     };
     window.addEventListener('hashchange', openLinkedPanel);
     openLinkedPanel();
-    loadSH101ROM(Object.values(panels));
+    loadSH101ROM(Object.values(sh101Panels));
+  }
+
+  const importStatus = message => { $('midi-import-status').textContent = message; };
+  function selectedMidiSong() {
+    const value = $('show-song').value;
+    return value.startsWith('midi:') ? importedSongs[Number(value.slice(5))] : null;
+  }
+
+  function fullMidiSong() {
+    if (midiRun) return midiRun.player ? midiRun.song : null;
+    if (phase === 'prep' || phase === 'live') return null;
+    return $('midi-song-mode').value === 'full' ? selectedMidiSong() : null;
+  }
+
+  function refreshMidiParts() {
+    const song = fullMidiSong();
+    for (const [role, panel] of Object.entries(sh101Panels)) {
+      panel.showParts(song?.tracks.filter(part => part.role === role && part.notes && !part.drum) ?? []);
+    }
+  }
+
+  function openMidiPart(part) {
+    if (!part || !part.events.length) return;
+    $('caption').textContent = 'MIDI ' + (part.track + 1) + ' · ' + part.name;
+    if (part.drum || !part.notes) return;
+    const panel = sh101Panels[part.role];
+    if (!panel) return;
+    panel.choosePart(part.track);
+    const details = $('sh101-' + part.role + '-panel');
+    details.open = true;
+    details.scrollIntoView({block: 'start'});
+  }
+
+  function showMidiTracks(song) {
+    $('midi-song-settings').hidden = !song;
+    for (const id of ['show-form', 'show-prep', 'prep-speed', 'show-variant']) $(id).disabled = !!song;
+    const list = $('midi-song-tracks');
+    list.replaceChildren();
+    refreshMidiParts();
+    if (!song) return;
+    for (const part of song.tracks.filter(p => p.notes || p.events.length)) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const route = document.createElement('select');
+      route.setAttribute('aria-label', 'Выход дорожки ' + part.track + ' ' + part.name);
+      route.add(new Option('MIDI из файла', ''));
+      for (let i = 0; i < 16; i++) route.add(new Option('MIDI ' + (i + 1), 'm' + i));
+      for (let i = 0; i < 4; i++) {
+        const option = new Option('CV/Gate ' + (i + 1), 'c' + i);
+        option.disabled = part.poly !== 1;
+        route.add(option);
+      }
+      route.add(new Option('Пропустить', 'mute'));
+      const transposition = document.createElement('input');
+      transposition.type = 'number';
+      transposition.min = -127;
+      transposition.max = 127;
+      transposition.value = part.route?.transpose ?? 0;
+      transposition.title = 'Сдвиг высоты CV в полутонах';
+      transposition.setAttribute('aria-label', 'Сдвиг высоты CV дорожки ' + part.track);
+      const routeValue = part.route;
+      if (routeValue?.mute) route.value = 'mute';
+      else if (routeValue?.cv !== undefined) route.value = 'c' + routeValue.cv;
+      else if (routeValue?.midi !== undefined) route.value = 'm' + routeValue.midi;
+      const update = () => {
+        const value = route.value, n = Number(value.slice(1));
+        transposition.hidden = !value.startsWith('c');
+        part.route = value === 'mute' ? { mute: true }
+          : value.startsWith('c') ? { cv: n, transpose: Number(transposition.value) || 0 }
+          : value.startsWith('m') ? { midi: n } : undefined;
+      };
+      route.addEventListener('change', update);
+      transposition.addEventListener('input', update);
+      update();
+      const name = document.createElement('button');
+      name.type = 'button';
+      name.className = 'btn';
+      name.disabled = !part.notes || !!part.drum || part.role === 'gate';
+      name.textContent = (part.track + 1) + ' · ' + part.name + (part.patch ? ' · TAL ' + part.patch.name : '');
+      name.addEventListener('click', () => openMidiPart(part));
+      row.append(route, transposition, name);
+      list.appendChild(row);
+    }
+  }
+
+  function firmwareMidiImage(song) {
+    return MidiSongs.image(song, Object.fromEntries(song.tracks.filter(p => p.route).map(p => [p.track, p.route])));
+  }
+
+  function initMidiLibrary() {
+    const select = $('show-song');
+    const group = document.createElement('optgroup');
+    group.label = 'Импортированные MIDI';
+    select.appendChild(group);
+    async function loadFiles(files, fromLocal = false) {
+      try {
+        const result = await MidiSongs.load(files);
+        importedSongs = result.songs;
+        group.replaceChildren();
+        importedSongs.forEach((song, i) => group.appendChild(new Option(song.title + ' · ' +
+          Math.round(song.bpm) + ' BPM · ' + song.tracks.length + ' дор.', 'midi:' + i)));
+        const request = new URLSearchParams(location.search).get('song');
+        const index = importedSongs.findIndex(song => song.id === request);
+        if (index >= 0 || !fromLocal) select.value = 'midi:' + Math.max(0, index);
+        select.dispatchEvent(new Event('change'));
+        const count = importedSongs.flatMap(song => song.tracks).filter(part => part.patch).length;
+        importStatus('Загружено песен: ' + importedSongs.length + ' · привязано пресетов TAL: ' + count +
+          (result.unmatched.length ? ' · без совпадения: ' + result.unmatched.map(p => p.file).join(', ') : ''));
+      } catch (error) { importStatus(error.message); }
+    }
+    const input = $('midi-folder');
+    $('midi-song-mode').addEventListener('change', refreshMidiParts);
+    input.addEventListener('change', () => { if (input.files.length) loadFiles(input.files); });
+    $('midi-song-export').addEventListener('click', () => {
+      const song = selectedMidiSong();
+      if (!song) return;
+      try {
+        const url = URL.createObjectURL(new Blob([MidiSongs.uf2(firmwareMidiImage(song))]));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = song.title + ' - ReBirth MIDI Song.uf2';
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) { importStatus(error.message); }
+    });
+    const local = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
+    if (local) {
+      const folder = './local-songs/twisted/';
+      fetch(folder + 'catalog.json').then(async response => {
+        if (!response.ok) return;
+        const paths = await response.json();
+        const files = await Promise.all(paths.map(async path => {
+          const result = await fetch(folder + path.split('/').map(encodeURIComponent).join('/'));
+          if (!result.ok) throw Error('Файл не найден: ' + path);
+          return new File([await result.blob()], path.split('/').pop());
+        }));
+        await loadFiles(files, true);
+      }).catch(error => importStatus(error.message));
+    }
   }
 
   function buildSH101Panel(role, voice) {
@@ -743,19 +929,71 @@
     fields.after(fragment.querySelector('[data-rom="hint"]'));
     fields.appendChild(fragment);
     const input = control('input');
+    const cvPair = CV_ROLES.indexOf(role), romOption = input.querySelector('[value="rom"]');
+    input.options[0].textContent = 'MIDI · CH ' + SH101_CHANNEL[role];
+    if (cvPair >= 0) input.add(new Option('CV/Gate ' + (cvPair + 1), 'cv'), romOption);
+    const inputBadge = details.querySelector('summary .sub');
+    const partPicker = document.createElement('label');
+    const partSelect = document.createElement('select');
+    partPicker.hidden = true;
+    partPicker.append('MIDI-партия ', partSelect);
+    details.querySelector('.sh101-transport').appendChild(partPicker);
+    const trackLevel = document.createElement('label');
+    const gain = document.createElement('input'), levelReadout = document.createElement('span');
+    gain.type = 'range';
+    gain.min = -18;
+    gain.max = 24;
+    gain.step = 1;
+    gain.setAttribute('aria-label', 'Уровень MIDI-партии, дБ');
+    trackLevel.hidden = true;
+    trackLevel.append('Уровень партии ', gain, levelReadout);
+    details.querySelector('.sh101-transport').appendChild(trackLevel);
+    let parts = [], selectedPart = null;
+    function showPartLevel() {
+      if (!selectedPart) return;
+      gain.value = selectedPart.levelDb ?? 0;
+      levelReadout.textContent = ' ' + gain.value + ' дБ';
+    }
+    function choosePart(track) {
+      selectedPart = parts.find(part => part.track === track) ?? null;
+      partSelect.value = selectedPart ? String(selectedPart.track) : '-1';
+      trackLevel.hidden = !selectedPart;
+      const patch = selectedPart && { ...window.SH101.defaults(role), ...selectedPart.patch?.settings, ...selectedPart.controls };
+      for (const def of window.SH101.controls) {
+        const id = role + '.' + def.id;
+        if (sliders[id]) sliders[id].value = patch?.[def.id] ?? rig.getParam(id);
+      }
+      showPartLevel();
+      syncControls();
+    }
+    function showParts(next) {
+      if (next.length === parts.length && next.every((part, i) => part === parts[i])) { showPartLevel(); return; }
+      parts = next;
+      partPicker.hidden = !parts.length;
+      partSelect.replaceChildren(new Option('Панель · MIDI/ROM', '-1'));
+      for (const part of parts) partSelect.add(new Option((part.track + 1) + ' · ' + part.name, part.track));
+      choosePart(parts[0]?.track);
+    }
+    partSelect.addEventListener('change', () => choosePart(Number(partSelect.value)));
+    gain.addEventListener('input', () => {
+      if (!selectedPart) return;
+      selectedPart.levelDb = Number(gain.value);
+      levelReadout.textContent = ' ' + gain.value + ' дБ';
+      midiRun?.player?.level(selectedPart.track, selectedPart.levelDb);
+    });
     const source = control('clock-source'), pulse = control('clock'), readout = control('readout');
     const arpHint = control('arp-hint'), arpExt = control('arp-ext');
     const power = control('power'), rateLED = control('lfo-led'), rateLabel = control('lfo-hz');
     const bender = control('bender'), lfoMod = control('bend-lfo');
     const fxMode = $('show-fx');
-    const note = { bass: 36, lead: 60, arp: 72, fx: 36 }[role];
+    const note = { bass: 36, lead: 60, arp: 72, fx: 36, pad: 60 }[role];
     const audition = bindSH101Audition(role, t => {
       if (!voice.external) return;
       if (fx) rig.fx.on(note, 100, t);
       else voice.send({ type: 'audition', note, t });
     });
     const leds = {}, releases = [];
-    let board, player, available = false, wantsROM = false, serviceMode = false;
+    let board, player, available = false, wantedInput = 'midi', serviceMode = false;
     const button = (parent, label, cls = 'btn') => {
       const el = document.createElement('button');
       el.type = 'button';
@@ -771,7 +1009,7 @@
       const press = () => {
         clearTimeout(timer);
         pressedAt = performance.now();
-        if (voice.powered && keyboard && !voice.useROM) selectInput(true);
+        if (voice.powered && keyboard && !voice.useROM) selectInput('rom');
         set(true);
         if (voice.powered) resume();
       };
@@ -844,13 +1082,13 @@
       bind(el, down => { board.keys = put(board.keys, 1 << i, down); }, true);
     }
     bind(pulse, down => { board.clockHigh = down; });
-    bind(lfoMod, down => { userSet(role + '.bendLfoPressed', Number(down)); }, false, false);
+    bind(lfoMod, down => { setVoiceControl(role, 'bendLfoPressed', Number(down)); }, false, false);
     const centerBender = () => {
       if (Number(bender.value) === 0.5) return;
       bender.value = 0.5;
-      userSet(role + '.bender', 0.5);
+      setVoiceControl(role, 'bender', 0.5);
     };
-    bender.addEventListener('input', () => { resume(); userSet(role + '.bender', +bender.value); });
+    bender.addEventListener('input', () => { resume(); setVoiceControl(role, 'bender', +bender.value); });
     bender.addEventListener('pointerdown', e => { if (e.button === 0) bender.setPointerCapture(e.pointerId); });
     for (const event of ['pointerup', 'pointercancel', 'lostpointercapture', 'blur']) {
       bender.addEventListener(event, centerBender);
@@ -874,8 +1112,10 @@
     const inputs = [...Object.values(leds), ...keys.children, pedal, source];
     function syncControls() {
       const { powered, useROM } = voice;
-      input.disabled = !available || !board;
-      input.value = useROM ? 'rom' : 'midi';
+      input.disabled = !available;
+      romOption.disabled = !board;
+      input.value = voice.input;
+      inputBadge.textContent = selectedPart?.name ?? input.selectedOptions[0].textContent;
       power.setAttribute('aria-pressed', String(powered));
       power.textContent = powered ? 'ON' : 'OFF';
       for (const el of inputs) {
@@ -884,23 +1124,25 @@
       }
       pulse.disabled = !powered || !available || !board?.external;
       bender.disabled = lfoMod.disabled = !powered || !available;
-      audition.hidden = useROM;
+      audition.hidden = !!selectedPart || voice.input !== 'midi';
       readout.hidden = !useROM;
-      audition.disabled = !powered || (!available && !fx);
-      if (fx) $('sh101-fx-sequencer').hidden = useROM;
+      audition.disabled = !powered || !available;
+      if (fx) $('sh101-fx-sequencer').hidden = !!selectedPart || voice.input !== 'midi';
     }
 
-    function selectInput(useROM) {
-      wantsROM = useROM;
-      if (!board || !available || voice.useROM === useROM) return;
+    function selectInput(value) {
+      wantedInput = value;
+      if (value === 'rom' && selectedPart) choosePart(-1);
+      if (!available || (value === 'rom' && !board) || voice.input === value) return;
       if (fx) rig.fx.kill(ctx.currentTime);
-      if (!useROM) releaseAll();
-      voice.setInput(useROM);
-      player = new api.Player(board, voice.send);
+      if (value !== 'rom') releaseAll();
+      voice.setInput(value);
+      if (board) player = new api.Player(board, voice.send);
+      if (value === 'cv') syncCV(cvPair);
       syncControls();
       update();
     }
-    input.addEventListener('change', () => selectInput(input.value === 'rom'));
+    input.addEventListener('change', () => selectInput(input.value));
 
     power.addEventListener('click', () => {
       if (fx) rig.fx.kill(ctx.currentTime);
@@ -915,8 +1157,9 @@
           board.buttons = held;
           player = new api.Player(board, voice.send);
           serviceMode = (held & service) === service;
-          if (serviceMode) { selectInput(true); resume(); }
+          if (serviceMode) { selectInput('rom'); resume(); }
         }
+        if (voice.input === 'cv') syncCV(cvPair);
         update();
       } else {
         releaseAll();
@@ -967,16 +1210,17 @@
         rig.fx.setSH101(available && fxMode.value === 'sh101');
       } else if (!available) status.textContent = 'SH-101 недоступен в этом браузере.';
       syncControls();
-      selectInput(wantsROM);
+      selectInput(wantedInput);
     };
     voice.ready.then(ready, () => ready('none'));
     return {
-      selectInput, update,
+      selectInput, update, showParts, choosePart,
+      get input() { return wantedInput; }, get part() { return selectedPart; },
       attach(next) {
         board = next;
         player = new api.Player(board, voice.send);
         syncControls();
-        selectInput(wantsROM);
+        selectInput(wantedInput);
       },
     };
   }
@@ -994,7 +1238,7 @@
         const image = await readImage();
         const boards = await api.Board.loadAll(createCore, image, panels.length);
         panels.forEach((panel, i) => panel.attach(boards[i]));
-        status.textContent = 'ROM 80C49-6-7301 загружен во все четыре SH-101';
+        status.textContent = 'ROM 80C49-6-7301 загружен в ' + boards.length + ' SH-101';
         fileLabel.hidden = file.hidden = true;
         setInterval(() => { for (const panel of panels) panel.update(); }, 10);
       } catch (error) {
@@ -1041,10 +1285,66 @@
     return ctx?.resume();
   }
 
+  // The device runs slightly ahead of audio. Apply each change on the audio
+  // clock using its pin/SPI timestamp, including changes while Gate stays high.
+  const cvCodes = new Uint16Array(CV_ROLES.length);
+  let gateMask = 0;
+  function syncCV(pair, t = ctx?.currentTime) {
+    const role = CV_ROLES[pair];
+    rig?.sh101[role]?.cvGate(device.dacVolts(cvCodes[pair]), !!(gateMask & (1 << pair)), t);
+  }
+  function onCV(e) {
+    if (e.type === 'dac') {
+      cvCodes[e.channel] = e.code;
+      if (sounding()) syncCV(e.channel, audioTime(e.t));
+      return;
+    }
+    const changed = gateMask ^ e.mask;
+    gateMask = e.mask;
+    for (let pair = 0; pair < CV_ROLES.length; pair++) {
+      const bit = 1 << pair;
+      if (!(changed & bit)) continue;
+      if (sounding()) syncCV(pair, audioTime(e.t));
+      if ((gateMask & bit) && rig?.sh101[CV_ROLES[pair]]?.input === 'cv') {
+        flashStrip(Artist.CV_TRACKS[pair], e.t);
+      }
+    }
+  }
+
+  function patchShow(song, importedPairs = []) {
+    for (const { panel, input, priorInput, controls } of showPatch) {
+      if (panel.input === input) panel.selectInput(priorInput);
+      for (const { id, value, prior } of controls) {
+        if (rig.getParam(id) === value) moveKnob(id, prior);
+      }
+    }
+    showPatch = [];
+    for (const [role, panel] of Object.entries(sh101Panels)) {
+      if (!song?.cv && !importedPairs.includes(CV_ROLES.indexOf(role))) continue;
+      const input = role === 'pad' ? 'midi' : 'cv';
+      const controls = Object.entries(song?.cv ? CV_PATCH[role] || {} : {}).map(([name, value]) => {
+        const id = role + '.' + name;
+        return { id, value, prior: rig.getParam(id) };
+      });
+      showPatch.push({ panel, input, priorInput: panel.input, controls });
+      for (const { id, value } of controls) moveKnob(id, value);
+      panel.selectInput(input);
+    }
+  }
+
+  function bootDevice() {
+    device.boot(false);
+    gateMask = device.gates();
+    for (let pair = 0; pair < cvCodes.length; pair++) cvCodes[pair] = device.dac(pair);
+  }
+
   // ─── MIDI wire → synths, monitor ──────────────────────────────
   const midiLines = [];
   let lastClock = 0, clockPeriod = 0, tempoSent = 0;
   const NOTE = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  function flashStrip(strip, t) {
+    lampHot[strip] = performance.now() + (t - playhead) / 1000 + 90;
+  }
   function onMidi(m) {
     if (midiLines.length > 3) midiLines.splice(0, midiLines.length - 3);
     if (m.status === 0xF8) {
@@ -1056,7 +1356,7 @@
       return;
     }
     if (m.status === 0xFA) { lastClock = 0; clockPeriod = 0; }
-    if (m.status === 0xFC && rig && sounding()) rig.allOff(audioTime(m.t));
+    if (m.status === 0xFC && sounding()) rig.allOff(audioTime(m.t), false);
     if (m.status >= 0xF0) {
       midiLines.push((m.t / 1e6).toFixed(3) + '  ' + ({ 0xFA: 'Start', 0xFC: 'Stop', 0xFB: 'Continue' }[m.status] || m.status.toString(16)));
       return;
@@ -1065,8 +1365,7 @@
     if (sounding()) rig.midi(m.status, m.d1, m.d2, audioTime(m.t));
     if (kind === 0x90 && m.d2 > 0) {
       const inst = stripOf(channel, m.d1);
-      const flash = performance.now() + (m.t - playhead) / 1000 + 90;
-      if (inst !== undefined) lampHot[inst] = flash;
+      if (inst !== undefined) flashStrip(inst, m.t);
       midiLines.push((m.t / 1e6).toFixed(3) + '  ch' + String(channel + 1).padStart(2) + '  ' +
         (NOTE[m.d1 % 12] + (Math.floor(m.d1 / 12) - 1)).padEnd(4) + ' vel ' + m.d2);
     }
@@ -1185,6 +1484,9 @@
       option.textContent = '«' + song.title + '» — ' + song.style + ', ' + song.key + ', ' + song.bpm + ' BPM';
       songs.appendChild(option);
     });
+    const requestedSong = new URLSearchParams(location.search).get('song');
+    const songIndex = Artist.SONGS.findIndex(song => song.id === requestedSong);
+    if (songIndex >= 0) songs.value = String(songIndex);
     const forms = $('show-form');
     const own = document.createElement('option');
     own.value = '';
@@ -1196,6 +1498,9 @@
       forms.appendChild(option);
     }
     const ownForm = () => {
+      const midiSong = selectedMidiSong();
+      showMidiTracks(midiSong);
+      if (midiSong) { $('midi-library').open = true; return; }
       const form = Artist.FORMS.find(f => f.id === Artist.SONGS[+songs.value].form);
       own.textContent = 'как задумано для песни: «' + form.title + '»';
     };
@@ -1251,7 +1556,10 @@
     // In slices, so the device's event buffer is emptied as it fills.
     while (device.now() < target) {
       hands.advance(Math.min(target, device.now() + 250000));
-      for (const e of device.drain()) if (e.type === 'midi') onMidi(e);
+      for (const e of device.drain()) {
+        if (e.type === 'midi') onMidi(e);
+        else onCV(e);
+      }
     }
   }
   function tick() {
@@ -1261,6 +1569,26 @@
     // the music slows for a moment instead of playing a bunch of notes at once.
     const dt = Math.min(Math.max(w - lastWall, 0), MAX_STEP_S);
     lastWall = w;
+    if (midiRun?.player) {
+      const { player, song, start } = midiRun;
+      const now = ctx.currentTime;
+      const until = (now + 0.075 - start) * 1e6;
+      while (midiRun.tempo < song.tempos.length && song.tempos[midiRun.tempo].time <= until) {
+        const segment = song.tempos[midiRun.tempo++];
+        rig.setTempo(60000000 / segment.us, Math.max(now, start + segment.time / 1e6));
+      }
+      while (midiRun.cursor < song.events.length && song.events[midiRun.cursor].t <= until) {
+        const e = song.events[midiRun.cursor++];
+        player.midi(e, Math.max(now, start + e.t / 1e6));
+        const on = MidiSongs.noteOn(e);
+        if (on) midiRun.active[e.track]++;
+        else if (MidiSongs.noteOff(e) && midiRun.active[e.track]) midiRun.active[e.track]--;
+        const role = song.tracks[e.track].role;
+        const strip = STRIPS.findIndex(s => s.id === role);
+        if (on && strip >= 0) lampHot[strip] = performance.now() + 100;
+      }
+      if (now >= start + song.duration / 1e6 + 1) endShow('MIDI Song сыграна.');
+    }
     if (phase === 'prep') {
       const target = speed === Infinity ? show.prepEnd : Math.min(show.prepEnd, device.now() + dt * 1e6 * speed);
       runTo(target);
@@ -1283,28 +1611,81 @@
     if (rig && ctx && ctx.state === 'running') rig.allOff(ctx.currentTime);
   }
   function startShow() {
+    const imported = selectedMidiSong();
+    if (imported) { startMidiSong(imported); return; }
     startAudio();
     hands.clear();
     releaseAll();
-    device.boot(false);
+    bootDevice();
     silence();      // a note the old device state left sounding gets no Note Off any more
     $('log').innerHTML = '';
     lastLed.fill('');
     const variant = $('show-variant').value;
     show = Artist.buildShow(undefined, { song: +$('show-song').value, form: $('show-form').value || undefined,
                                          fw2: variant !== 'base', keys: variant === 'keys', pads: variant === 'pads' });
+    patchShow(show.song);
     Artist.schedule(show, device, hands, io);
     phase = 'prep';
+    refreshMidiParts();
     speed = $('show-prep').checked ? +$('prep-speed').value : Infinity;
     playhead = 0;
     lastWall = wall();
     $('show-start').disabled = true;
     $('show-stop').disabled = false;
   }
+
+  async function startMidiSong(song) {
+    const request = ++launchSerial;
+    const firmware = $('midi-song-mode').value === 'firmware';
+    $('show-start').disabled = true;
+    $('show-stop').disabled = false;
+    try {
+      await startAudio();
+      if (request !== launchSerial) return;
+      hands.clear();
+      releaseAll();
+      bootDevice();
+      silence();
+      patchShow();
+      show = null;
+      playhead = device.now() - LOOKAHEAD_US;
+      speed = 1;
+      lastWall = wall();
+      $('log').replaceChildren();
+      if (firmware) {
+        if (!device.openMidiSong(firmwareMidiImage(song))) throw Error('Прошивка отклонила образ MIDI Song.');
+        midiRun = { song, firmware, start: device.now() };
+        phase = 'midi-firmware';
+        refreshMidiParts();
+        // PLAY, just as on the loaded hardware.
+        device.play(true);
+        device.play(false, device.now() + 80000);
+        patchShow(null, song.tracks.flatMap(p => p.route?.cv === undefined ? [] : [p.route.cv]));
+      } else {
+        if (!rig) throw Error('Нет звукового движка.');
+        phase = 'midi-loading';
+        const player = await rig.midiParts(song);
+        if (request !== launchSerial) { player.stop(ctx.currentTime); return; }
+        midiRun = {
+          song, player, cursor: 0, tempo: 0, active: new Uint16Array(song.tracks.length),
+          start: ctx.currentTime + 0.1,
+        };
+        phase = 'midi-full';
+        refreshMidiParts();
+      }
+    } catch (error) {
+      if (request === launchSerial) endShow(error.message);
+    }
+  }
   function endShow(message) {
+    launchSerial++;
+    midiRun?.player?.stop(ctx.currentTime);
+    midiRun = null;
     hands.clear();
     releaseAll();
+    if (show?.song?.padNotes) rig?.sh101.pad.kill(ctx.currentTime);
     phase = 'idle';
+    refreshMidiParts();
     speed = 1;
     playhead = device.now() - LOOKAHEAD_US;
     $('show-start').disabled = false;
@@ -1313,16 +1694,17 @@
   }
   // A hand on the panel during the show takes it away from the artist.
   function takeOver() {
-    if (phase !== 'idle') endShow('Артист остановлен: управление у вас.');
+    if (phase === 'prep' || phase === 'live') endShow('Артист остановлен: управление у вас.');
   }
   function reboot() {
     if (phase !== 'idle') endShow();
     hands.clear();
     releaseAll();
-    device.boot(false);
+    bootDevice();
     lastLed.fill('');
     playhead = device.now() - LOOKAHEAD_US;
     silence();
+    patchShow();
     say('info', 'Прибор выключен и включён: память как после включения питания.');
   }
 
@@ -1340,9 +1722,18 @@
     $('d-locks').textContent = info.lockErrors;
     const gates = device.gates();
     $('d-gates').textContent = [0, 1, 2, 3].map(i => (gates >> i) & 1 ? '█' : '·').join(' ');
-    $('d-cv').textContent = [0, 1, 2, 3].map(i => (device.dac(i) * 2.048 / 4096).toFixed(2)).join(' ');
+    $('d-cv').textContent = CV_ROLES.map((_, i) => device.dacVolts(device.dac(i)).toFixed(2)).join(' ');
     $('midi').textContent = midiLines.join('\n');
     if (info.fatal) $('phase').textContent = 'Ошибка симулятора: ' + info.fatal;
+    else if (phase === 'midi-loading') $('phase').textContent = 'Подготовка MIDI-дорожек…';
+    else if (midiRun) {
+      const { song, firmware, start } = midiRun;
+      const microseconds = firmware ? Math.max(0, device.now() - start) : Math.max(0, (ctx.currentTime - start) * 1e6);
+      if (firmware && microseconds > 150000 && info.state === 0) { endShow('MIDI Song остановлена.'); return; }
+      $('phase').textContent = (firmware ? 'MIDI Song · ReBirth · ' : 'Полный MIDI · ') + song.title + ' · ' +
+        (microseconds / 1e6).toFixed(0) + ' / ' + (song.duration / 1e6).toFixed(0) + ' с';
+      $('progress').firstElementChild.style.width = Math.min(100, 100 * microseconds / song.duration) + '%';
+    }
     else if (phase === 'prep') {
       $('phase').textContent = 'Подготовка: артист набирает клипы на остановленном приборе (' +
         Math.round(device.now() / 1e6) + ' из ' + Math.round(show.prepEnd / 1e6) + ' с времени прибора)';
@@ -1429,11 +1820,15 @@
     try {
       ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
       if (window.Rig) rig = new window.Rig(ctx);
+      ctx.addEventListener('statechange', () => {
+        if (sounding()) CV_ROLES.forEach((_, pair) => syncCV(pair));
+      });
     } catch (error) {
       console.error(error);
     }
     buildRigPanel();
     initKeyboard();
+    initMidiLibrary();
     initTips();
     showBuild();
 

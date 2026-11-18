@@ -5,6 +5,7 @@
 #include "sequencer.h"
 #include "midi_in.h"
 #include "kit.h"
+#include "midi_song.h"
 #include "ssd1309.h"
 #include "encoder.h"
 #include "mcp23017.h"
@@ -44,6 +45,7 @@ typedef enum {
     UI_TRACK_CONFIG,        // Track settings
     UI_SONG_EDIT,           // Song chain editor
     UI_KIT_STEP_EDIT,       // One kit step: all 12 lanes
+    UI_MIDI_SONG,           // Timed MIDI Song playback, eight tracks per page
 } ui_mode_t;
 
 // ─── UI State ──────────────────────────────────────────────────
@@ -82,6 +84,7 @@ typedef struct {
     // SONG_EDIT
     uint16_t song_cursor;           // Position in song
     uint8_t  song_field;            // 0=pattern, 1=repeats
+    uint8_t  midi_page;
 
     // Tempo LED
     uint32_t last_blink_ms;
@@ -464,6 +467,7 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
         thru_forget();
         midi_in_flush();
         midi_in_parser_reset(&ui.midi_parser);
+        if (ui.mode == UI_MIDI_SONG) transport_set_mode(PLAY_MODE_PATTERN);
         // Panel keys held through the panic must not fire afterwards.
         panel_input_resync();
         drop_pad_holds();
@@ -624,6 +628,16 @@ static void handle_panel_events(const step_buttons_t *steps) {
             ui.pad_seen[ev.track] &= (uint8_t)~(1u << ev.row);
         }
         if (!ev.down) continue;
+        if (ui.mode == UI_MIDI_SONG) {
+            if (ev.kind == PANEL_PLAY) toggle_transport();
+            if (ev.kind == PANEL_MUTE) transport_midi_song_toggle(ui.midi_page * 8 + ev.track, false);
+            if (ev.kind == PANEL_PAD || ev.kind == PANEL_SCENE) {
+                midi_song_view_t view;
+                transport_midi_song_view(&view);
+                if (ev.row * 8 < view.tracks) ui.midi_page = ev.row;
+            }
+            continue;
+        }
         switch (ev.kind) {
             case PANEL_PAD:
                 handle_pad_press(ev.track, ev.row, steps);
@@ -1330,6 +1344,11 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
     if (steps->pressed & (1u << 12)) {
         sequencer_reset_jitter_stats();
     }
+    // Step 14 enters the flash-backed MIDI Song player.
+    if (steps->pressed & (1u << 13)) {
+        if (g_seq.transport.state != TRANSPORT_STOPPED) show_notify("STOP FIRST");
+        else if (!ui_open_midi_song()) show_notify("NO MIDI SONG");
+    }
 }
 
 static uint16_t build_step_activity_mask(const pattern_t *pat, uint8_t track) {
@@ -1474,16 +1493,25 @@ static void update_step_leds(void) {
             // Button 1 = loop/stop, button 2 = song, button 3 = pattern playback.
             mask = (1u << 0) | (1u << 1) | (1u << 2);
             break;
+
+        case UI_MIDI_SONG: {
+            midi_song_view_t view;
+            transport_midi_song_view(&view);
+            for (uint8_t col = 0; col < 8; col++) {
+                const uint8_t track = ui.midi_page * 8 + col;
+                const uint64_t bit = UINT64_C(1) << track;
+                if ((view.present & bit) && (view.solo >= 0 ? view.solo == track : !(view.muted & bit))) {
+                    mask |= (uint16_t)(1u << col);
+                }
+            }
+            break;
+        }
     }
 
     step_leds_set_mask(mask);
 }
 
 // ─── Track Config Handler ──────────────────────────────────────
-
-// Rows of a SYNTH or DRUM track's config screen (NOTE on a drum only).
-enum { TRACK_PARAM_TYPE, TRACK_PARAM_CHANNEL, TRACK_PARAM_OUTPUT, TRACK_PARAM_GATE,
-       TRACK_PARAM_NOTE };
 
 #define TRACK_TYPE_COUNT 3
 _Static_assert(TRACK_TYPE_KIT + 1 == TRACK_TYPE_COUNT,
@@ -1521,7 +1549,7 @@ static void step_output_mode(uint8_t track, track_config_t config, int8_t direct
     seq_set_track_config(track, &config);
 }
 
-// CHANNEL, GATE and a drum's NOTE: the track's routing, written to all 32
+// CHANNEL, GATE, CV/Gate pair and a drum's NOTE are written to all 32
 // locations when it changes.
 static void edit_track_param(uint8_t track, track_config_t config, uint8_t param,
                              int8_t delta) {
@@ -1530,7 +1558,14 @@ static void edit_track_param(uint8_t track, track_config_t config, uint8_t param
     switch (param) {
         case TRACK_PARAM_CHANNEL: field = &config.midi_channel; hi = 15; break;
         case TRACK_PARAM_GATE: field = &config.gate_length_pct; lo = 10; hi = 100; break;
-        case TRACK_PARAM_NOTE: field = &config.drum_note; break;
+        case TRACK_PARAM_NOTE:
+            if (config.type == TRACK_TYPE_DRUM) {
+                field = &config.drum_note;
+                break;
+            }
+            // A synth has CV/Gate in the same position.
+            // Falls through.
+        case TRACK_PARAM_DRUM_CV: field = &config.cv_channel; hi = NUM_CV_CHANNELS - 1; break;
         default: return;
     }
     uint8_t next = step_value(*field, delta, lo, hi);
@@ -1588,9 +1623,9 @@ static void handle_track_config(encoder_turn_t e1, encoder_turn_t e2,
     seq_unlock(lock_state);
 
     // A kit lists TYPE, CHANNEL, GATE, FLAM, the velocities and the notes;
-    // the others TYPE, CHANNEL, OUTPUT, GATE and, on a drum, NOTE.
+    // the others TYPE, CHANNEL, OUTPUT, GATE, (drum) NOTE, and CV/Gate.
     uint8_t last = kit ? KIT_PARAM_COUNT - 1
-                       : (config.type == TRACK_TYPE_DRUM ? TRACK_PARAM_NOTE : TRACK_PARAM_GATE);
+                       : (config.type == TRACK_TYPE_DRUM ? TRACK_PARAM_DRUM_CV : TRACK_PARAM_SYNTH_CV);
     if (ui.config_param > last) ui.config_param = last;
 
     // Enc1 rotate: select parameter
@@ -1751,10 +1786,35 @@ static void render_notify(void) {
 
 // ─── Panel lights (RGB chain) ──────────────────────────────────
 
+static void midi_song_lights(rgb_t frame[LED_COUNT], bool playing) {
+    midi_song_view_t view;
+    transport_midi_song_view(&view);
+    memset(frame, 0, sizeof(rgb_t) * LED_COUNT);
+    for (uint8_t track = 0; track < view.tracks; track++) {
+        const uint64_t bit = UINT64_C(1) << track;
+        if (!(view.present & bit)) continue;
+        const bool enabled = view.solo >= 0 ? view.solo == track : !(view.muted & bit);
+        const rgb_t color = !enabled ? (rgb_t){ LED_LEVEL_HALF, 0, 0 }
+            : view.active & bit ? (rgb_t){ 0, LED_LEVEL_FULL, LED_LEVEL_HALF }
+            : (rgb_t){ 0, LED_LEVEL_HALF, LED_LEVEL_DIM };
+        frame[track] = color;
+        if (track / 8 == ui.midi_page) frame[LED_MUTE(track % 8)] = color;
+    }
+    frame[LED_SCENE(ui.midi_page)] = (rgb_t){ LED_LEVEL_DIM, LED_LEVEL_HALF, LED_LEVEL_DIM };
+    if (playing) frame[LED_PLAY] = (rgb_t){ 0, LED_LEVEL_FULL, 0 };
+}
+
 // Builds the 82-LED frame from the frame's transport snapshot and starts
 // sending it; a frame the chain is still busy with is skipped. Called with no
 // lock held: sequencer_clip_mask takes seq_lock itself.
 static void update_panel_lights(const transport_snapshot_t *snap) {
+    if (ui.mode == UI_MIDI_SONG) {
+        rgb_t frame[LED_COUNT];
+        midi_song_lights(frame, snap->state == TRANSPORT_PLAYING);
+        led_frame_apply_budget(frame, LED_RGB_BUDGET_MA);
+        rgb_leds_show(frame);
+        return;
+    }
     led_state_t state;
     state.bank = session_bank();
     state.clip_mask = sequencer_clip_mask(state.bank);
@@ -1853,6 +1913,54 @@ static void render_track_config(void) {
 
 // ─── UI Render (dispatches to display functions) ───────────────
 
+bool ui_open_midi_song(void) {
+    if (!transport_open_midi_song()) return false;
+    ui.midi_page = 0;
+    ui.select_short_pending = 0;
+    ui.mode = UI_MIDI_SONG;
+    return true;
+}
+
+static void handle_midi_song(encoder_turn_t track, button_event_t value, const step_buttons_t *steps) {
+    midi_song_view_t view;
+    transport_midi_song_view(&view);
+    const uint8_t last_page = view.tracks ? (view.tracks - 1) / 8 : 0;
+    if (track.detents) {
+        ui.midi_page = (uint8_t)clamp_i8(ui.midi_page + track.detents, 0, last_page);
+        ui.select_short_pending = 0;
+    }
+    uint16_t long_presses = 0;
+    const uint16_t short_presses = take_short_releases(&ui.select_short_pending, steps, 0xff, &long_presses);
+    for (uint8_t i = 0; i < 8; i++) {
+        if ((short_presses | long_presses) & (1u << i)) {
+            transport_midi_song_toggle(ui.midi_page * 8 + i, (long_presses & (1u << i)) != 0);
+        }
+    }
+    if (value == BTN_PRESS || value == BTN_LONG_PRESS) {
+        transport_set_mode(PLAY_MODE_PATTERN);
+        ui.mode = UI_PATTERN_SELECT;
+        ui.select_short_pending = 0;
+    }
+}
+
+static void render_midi_song(void) {
+    midi_song_view_t view;
+    transport_midi_song_view(&view);
+    char line[22];
+    snprintf(line, sizeof(line), "MIDI SONG  %u/%u", ui.midi_page + 1u, (view.tracks + 7u) / 8u);
+    ssd1309_draw_string(0, 0, line, false);
+    ssd1309_draw_string(0, 12, view.title, false);
+    const unsigned sec = view.position_us / 1000000u, duration = view.duration_us / 1000000u;
+    snprintf(line, sizeof(line), "%02u:%02u / %02u:%02u", sec / 60, sec % 60, duration / 60, duration % 60);
+    ssd1309_draw_string(0, 24, line, false);
+    for (uint8_t col = 0; col < 8 && ui.midi_page * 8 + col < view.tracks; col++) {
+        const uint8_t track = ui.midi_page * 8 + col;
+        snprintf(line, sizeof(line), "%2u", track + 1u);
+        ssd1309_draw_string(col * 16, 38, line, view.solo >= 0 ? view.solo == track : !(view.muted & (UINT64_C(1) << track)));
+    }
+    ssd1309_draw_string(0, 54, "1-8 MUTE / HOLD SOLO", false);
+}
+
 void ui_render(void) {
     // One copy of the transport per frame, taken with no lock held.
     transport_snapshot_t snap;
@@ -1899,6 +2007,9 @@ void ui_render(void) {
                 ui.edit_step,
                 seq_active_pattern(ui.selected_track)->kit_steps[ui.selected_track][ui.edit_step],
                 ui.kit_cursor);
+            break;
+        case UI_MIDI_SONG:
+            render_midi_song();
             break;
     }
 
@@ -2001,6 +2112,9 @@ void ui_update(void) {
             break;
         case UI_KIT_STEP_EDIT:
             handle_kit_step_edit(e1, e2, e1b, e2b, steps);
+            break;
+        case UI_MIDI_SONG:
+            handle_midi_song(e1, e2b, steps);
             break;
     }
 

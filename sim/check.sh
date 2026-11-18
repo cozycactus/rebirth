@@ -13,6 +13,7 @@ MODE=${1:-full}
 
 node sim/test/sh101_check.js
 node sim/test/sh101_rom_check.js
+node sim/test/midi_song_check.js
 
 SCORES=$(node -e '
   require("./sim/web/core.js")().then(core => {

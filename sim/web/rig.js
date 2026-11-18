@@ -96,9 +96,10 @@
       k('bass.level', 'Level', 'Bass', 0.8), k('lead.level', 'Level', 'Lead', 0.6),
       k('arp.level', 'Level', 'Arp', 0.5),
       k('drums.level', 'Kit level', 'Drums', 0.85), k('kick.level', 'Kick level', 'Drums', 0.9),
+      k('pad.level', 'Level', 'Pad', 0.55),
       k('fx.level', 'Level', 'FX', 0.6), k('fx.riserBars', 'Riser length', 'FX', 8, 1, 16, 'bars'));
     if (SH101) {
-      for (const role of ['bass', 'lead', 'arp', 'fx']) {
+      for (const role of ['bass', 'lead', 'arp', 'fx', 'pad']) {
         const patch = SH101.defaults(role);
         for (const def of SH101.controls) {
           out.push(k(role + '.' + def.id, def.label, role.toUpperCase(), patch[def.id], 0, SH101.max(def)));
@@ -112,107 +113,13 @@
     for (const [x, g, pan, delay, reverb] of [
       ['kick', 'Kick', 0.5, 0, 0], ['drums', 'Drums', 0.5, 0, 0.18], ['bass', 'Bass', 0.5, 0, 0],
       ['acid1', 'Acid 1', 0.375, 0.35, 0.5], ['acid2', 'Acid 2', 0.625, 0.35, 0.5],
-      ['lead', 'Lead', 0.55, 0.6, 0.25], ['arp', 'Arp', 0.45, 0.5, 0.2], ['fx', 'FX', 0.5, 0.3, 0.5]]) {
+      ['lead', 'Lead', 0.55, 0.6, 0.25], ['arp', 'Arp', 0.45, 0.5, 0.2], ['fx', 'FX', 0.5, 0.3, 0.5],
+      ['pad', 'Pad', 0.54, 0.28, 0.68]]) {
       out.push(k(x + '.pan', 'Pan', g, pan));
       if (delay != null) out.push(k(x + '.delay', 'Delay send', g, delay), k(x + '.reverb', 'Reverb send', g, reverb));
     }
     return out;
   }
-
-  // ---- Mono synth voice: a persistent graph driven by automation ----------
-  // oscillators -> lowpass stage(s) -> vca. Pitch and filter envelope are
-  // ConstantSourceNodes feeding the oscillators' and filters' detune (cents),
-  // so one param carries the pitch of every oscillator and the knob that
-  // owns filter.detune never meets the envelope.
-  const GLIDE_TC = 0.02;   // ~60 ms to arrive
-
-  class MonoVoice {
-    constructor(rig, o) {
-      const ctx = rig.ctx;
-      this.o = o;
-      this.note = -1;      // sounding note, by event order
-      this.skip = 0;       // note offs to ignore after a same-pitch legato on
-      this.lastT = 0;
-      this.rel = 0.01;
-      this.pitch = rig.constant(0);
-      this.env = rig.constant(0);
-      this.envAmt = rig.gain(o.envCents || 0);
-      this.env.connect(this.envAmt);
-      this.vca = rig.gain(0);
-      const sum = rig.gain(1);
-      for (const d of o.oscs) {
-        const osc = ctx.createOscillator();
-        osc.type = d.type;
-        osc.frequency.value = 440 * (d.ratio || 1);
-        osc.detune.value = d.cents || 0;
-        this.pitch.connect(osc.detune);
-        chain(osc, rig.gain(d.gain), sum);
-        osc.start(0);
-      }
-      this.filters = o.q.map((q) => {
-        const f = ctx.createBiquadFilter();
-        f.type = 'lowpass';
-        f.frequency.value = o.baseHz;
-        f.Q.value = q;
-        this.envAmt.connect(f.detune);
-        return f;
-      });
-      chain(sum, ...this.filters, this.vca);
-      this.out = this.vca;
-    }
-
-    on(note, vel, t) {
-      // Events of one voice are taken in arrival (wire) order; a stray earlier
-      // timestamp must not cancel automation that is already scheduled later.
-      t = this.lastT = Math.max(t, this.lastT);
-      const p = this.pitch.offset, c = (note - 69) * 100;
-      if (this.note >= 0) {
-        // Legato (slide): glide, keep the envelopes running.
-        if (note === this.note) { this.skip++; return; }
-        this.note = note;
-        this.skip = 0;
-        p.cancelScheduledValues(t);
-        p.setTargetAtTime(c, t, GLIDE_TC);
-        return;
-      }
-      this.note = note;
-      this.skip = 0;
-      p.cancelScheduledValues(t);
-      p.setValueAtTime(c, t);
-      const e = this.o.trig(vel, t), g = this.vca.gain, f = this.env.offset;
-      g.cancelScheduledValues(t);
-      g.setTargetAtTime(e.peak, t, e.atk);
-      g.setTargetAtTime(e.peak * e.sus, t + e.hold, e.dec);
-      f.cancelScheduledValues(t);
-      f.setTargetAtTime(e.fPeak, t, 0.0015);
-      f.setTargetAtTime(0, t + 0.006, e.fDec);
-      this.rel = e.rel;
-    }
-
-    off(note, t) {
-      if (note !== this.note) return;   // the slid-from note: already replaced
-      if (this.skip > 0) { this.skip--; return; }
-      t = this.lastT = Math.max(t, this.lastT);
-      this.note = -1;
-      this.release(t, this.rel);
-    }
-
-    // Panic: unlike on/off this cuts at t even if later events are scheduled.
-    kill(t) {
-      this.lastT = t;
-      this.note = -1;
-      this.skip = 0;
-      this.release(t, 0.005);
-    }
-
-    release(t, tc) {
-      const g = this.vca.gain;
-      g.cancelScheduledValues(t);
-      g.setTargetAtTime(0, t, tc);
-    }
-  }
-
-  const velGain = (vel) => 0.5 + 0.5 * Math.min(vel, 100) / 100;
 
   const SCORE_CUTOFF = { 'bass.cutoff': [60, 4000], 'lead.cutoff': [150, 12000] };
 
@@ -495,7 +402,7 @@
     }
   }
 
-  const SH101_STRIP_GAIN = { bass: 3.4, lead: 5.7, arp: 4.5 };
+  const SH101_STRIP_GAIN = { bass: 3.4, lead: 5.7, arp: 4.5, pad: 3.3 };
 
   class SH101Voice {
     constructor(rig, role, effectBus) {
@@ -503,7 +410,7 @@
       this.role = role;
       this.effectBus = effectBus;
       this.powered = true;
-      this.useROM = false;
+      this.input = 'midi';
       this.ready = SH101 ? this.start() : Promise.resolve('none');
     }
 
@@ -548,11 +455,12 @@
       return mode;
     }
 
-    get external() { return this.powered && !this.useROM; }
-    setInput(useROM) {
-      if (this.useROM === useROM) return;
-      this.useROM = useROM;
-      this.send?.({ type: 'source', rom: useROM, t: this.rig.ctx.currentTime });
+    get useROM() { return this.input === 'rom'; }
+    get external() { return this.powered && this.input === 'midi'; }
+    setInput(input) {
+      if (this.input === input) return;
+      this.input = input;
+      this.send?.({ type: 'source', rom: this.useROM, cv: input === 'cv', t: this.rig.ctx.currentTime });
     }
     setPower(powered) {
       this.powered = powered;
@@ -561,19 +469,12 @@
     on(note, _velocity, t) { if (this.external) this.send?.({ type: 'note', note, down: true, t }); }
     off(note, t) { if (this.external) this.send?.({ type: 'note', note, down: false, t }); }
     bend(value, t) { if (this.external) this.send?.({ type: 'bend', value, t }); }
-    kill(t) { if (this.external) this.send?.({ type: 'kill', t }); }
-  }
-
-  function makePad(rig) {
-    const v = new MonoVoice(rig, {
-      oscs: [{ type: 'sawtooth', cents: -7, gain: 0.5 }, { type: 'sawtooth', cents: 7, gain: 0.5 }],
-      baseHz: 1100, q: [-3],
-      trig(vel) {
-        return { peak: 0.5 * velGain(vel), atk: 0.03, hold: 0.12, sus: 0.8, dec: 0.3, rel: 0.2, fPeak: 0, fDec: 0.1 };
-      },
-    });
-    rig.strip(v.out, { k: 0.4, rev: 0.4 });
-    return v;
+    cvGate(volts, gate, t) {
+      if (this.powered && this.input === 'cv') this.send?.({ type: 'cv', volts, gate, t });
+    }
+    kill(t, includeCV = true) {
+      if (this.external || (includeCV && this.input === 'cv')) this.send?.({ type: 'kill', t });
+    }
   }
 
   // ---- One-shot voices: fresh nodes per hit, freed when the source ends ----
@@ -673,8 +574,8 @@
       rig.strip(this.amb, { id: 'drums', level: 'drums.level', k: 0.9 });
     }
 
-    on(note, vel, t) {
-      const lvl = Math.pow(vel / 127, 1.5);
+    on(note, vel, t, trim = 1) {
+      const lvl = Math.pow(vel / 127, 1.5) * trim;
       switch (note) {
         case 35: case 36: this.kick(lvl, t); break;
         case 38: this.snare(lvl, t); break;
@@ -683,10 +584,12 @@
         case 45: this.tom(95, 0.1, lvl, t); break;
         case 47: this.tom(135, 0.085, lvl, t); break;
         case 50: this.tom(190, 0.07, lvl, t); break;
-        case 42: this.hat(false, lvl, t); break;
+        case 42: case 44: this.hat(false, lvl, t); break;
         case 46: this.hat(true, lvl, t); break;
         case 49: this.crash(lvl, t); break;
         case 51: this.ride(lvl, t); break;
+        case 54: this.tambourine(lvl, t); break;
+        case 57: this.reverseCymbal(lvl, t); break;
         default: break;
       }
     }
@@ -743,6 +646,20 @@
       chain(this.loop(h, this.rig.sizzle), this.perc(h, 1, 0.001, open ? 0.11 : 0.013), h.out);
       this.go(h);
     }
+    tambourine(lvl, t) {
+      const h = this.hit(this.amb, 0.34 * lvl, t, 0.3);
+      chain(this.metal(h), this.filt(h, 'bandpass', 7900, 2.2), this.perc(h, 1, 0.001, 0.038), h.out);
+      this.go(h);
+    }
+    reverseCymbal(lvl, t) {
+      const h = this.hit(this.amb, 0.55 * lvl, t, 0.57);
+      const g = this.gain(h, 0);
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(1, t + 0.53);
+      g.gain.linearRampToValueAtTime(0, t + 0.56);
+      chain(this.noise(h), this.filt(h, 'highpass', 3800, 0), g, h.out);
+      this.go(h);
+    }
     crash(lvl, t) {
       const h = this.hit(this.amb, 0.5 * lvl, t, 2.4);
       const hp = this.filt(h, 'highpass', 4500, 0);
@@ -786,7 +703,7 @@
       if (vel >= 120) this.rise(t); else { this.zap(t); this.crash(t); }
     }
     off() { /* one-shots */ }
-    kill(t) { super.kill(t); this.riser = null; this.sh101?.kill(t); }
+    kill(t, includeCV) { super.kill(t); this.riser = null; this.sh101?.kill(t, includeCV); }
 
     zap(t) {
       const h = this.hit(this.bus, 0.5, t, 0.9);
@@ -835,8 +752,35 @@
   // ---- The rig -------------------------------------------------------------
   // Calibrated so a full mix peaks around -2.5 dBFS (0.76) at master.volume 0.8.
   const MASTER_TRIM = 1.08;
-  const CH_INDEX = [7, 7, 1, 2, 3, 4, 5, 6, 7, 0, 7, 7, 7, 7, 7, 7];
+  const CH_INDEX = [-1, -1, 1, 2, 3, 4, 5, 6, 7, 0, -1, -1, -1, -1, -1, -1];
   const LAMPS = 4;   // remembered triggers per instrument (events arrive ahead of time)
+  // Imported patches carry oscillator and envelope levels from TAL. Bring
+  // their quieter synth strips up to the kit without changing those controls.
+  const MIDI_PART_GAIN = { bass: 2.6, lead: 1.85, arp: 2.5, pad: 1.4, fx: 1.25 };
+
+  // Check the patch at a representative pitch before playback. A bounded
+  // trim raises unusually quiet patches while preserving note velocities,
+  // envelope shapes and expression automation from the file.
+  function midiPartTrim(track, settings) {
+    const notes = track.events
+      .filter(e => (e.status & 0xf0) === 0x90 && e.d2 > 0)
+      .sort((a, b) => a.d1 - b.d1);
+    const note = notes[Math.floor(notes.length / 2)];
+    const rate = 24000, block = new Float32Array(128);
+    const probe = new SH101.MidiPart(rate, { ...settings, poly: 1 });
+    probe.midi({ ...note, t: 0 });
+    let power = 0, peak = 0;
+    for (let i = 0; i < 80; i++) {
+      probe.render(block, i * block.length / rate);
+      if (i < 4) continue;
+      for (const sample of block) {
+        power += sample * sample;
+        peak = Math.max(peak, Math.abs(sample));
+      }
+    }
+    const level = Math.max(Math.sqrt(power / (76 * block.length)), peak * 0.18);
+    return level > 0.0001 ? Math.round(clamp(20 * Math.log10(0.016 / level), 0, 12)) : 0;
+  }
 
   class Rig {
     constructor(ctx) {
@@ -845,6 +789,7 @@
       this.tempo = new Line(145);
       this.params = knobDefs();
       this.knobs = new Map();
+      this.stripInputs = new Map();
       for (const d of this.params) this.knobs.set(d.id, { desc: d, line: new Line(d.value), binds: [], watchers: [] });
       this.lampT = new Float64Array(8 * LAMPS).fill(-1e9);
       this.lampV = new Float64Array(8 * LAMPS);
@@ -891,13 +836,13 @@
       this.sh101Module = SH101 && ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined'
         ? Promise.resolve().then(() => ctx.audioWorklet.addModule(HERE + 'sh101.js' + QUERY)).then(() => true, () => false)
         : Promise.resolve(false);
-      this.sh101 = Object.fromEntries(['bass', 'lead', 'arp'].map(role => [role, new SH101Voice(this, role)]));
+      this.sh101 = Object.fromEntries(['bass', 'lead', 'arp', 'pad'].map(role => [role, new SH101Voice(this, role)]));
       this.fx = new Fx(this);
       this.sh101.fx = this.fx.sh101;
       this.inst = [
         new Drums(this), this.sh101.bass,
         new AcidVoice(this, 'acid1', 'saw'), new AcidVoice(this, 'acid2', 'square'),
-        this.sh101.lead, this.sh101.arp, this.fx, makePad(this),
+        this.sh101.lead, this.sh101.arp, this.fx, this.sh101.pad,
       ];
       // Resolves once the 303s can sound; until then their notes are dropped.
       this.ready = this.startAcids([this.inst[2], this.inst[3]]);
@@ -929,7 +874,6 @@
 
     // -- construction helpers
     gain(v) { const g = this.ctx.createGain(); g.gain.value = v; return g; }
-    constant(v) { const c = this.ctx.createConstantSource(); c.offset.value = v; c.start(0); return c; }
     hz(f) { return Math.min(f, this.ctx.sampleRate * 0.45); }
 
     // Attach an AudioParam to a knob. Each binding keeps its own timeline in
@@ -971,6 +915,7 @@
         if (o.rev) chain(lvl, this.gain(o.rev), this.reverbIn);
         return;
       }
+      this.stripInputs.set(o.id, lvl);
       // A mono source panned to the centre comes out 3 dB down on each side.
       // A strip that had no panner before gets that back, so the mix stays
       // where it was calibrated; one that had (`panned`) was set with it.
@@ -985,6 +930,88 @@
         this.bind(o.id + '.' + name, s.gain, (x) => k * x);
         chain(lvl, s, bus);
       }
+    }
+
+    async midiParts(song) {
+      const ctx = this.ctx, worklet = await this.sh101Module;
+      const hasGate = song.tracks.some(part => part.role === 'gate');
+      const drum = this.inst[0];
+      const sources = new Map();
+      const gates = [];
+      let gateCount = 0;
+      for (const track of song.tracks) {
+        if (!track.notes || track.drum || track.role === 'gate') continue;
+        const settings = { role: track.role, patch: { ...track.patch?.settings, ...track.controls }, poly: track.poly };
+        track.levelDb ??= midiPartTrim(track, settings);
+        let node, send;
+        if (worklet) {
+          node = new AudioWorkletNode(ctx, 'rebirth-midi-part', {
+            numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1], processorOptions: settings,
+          });
+          send = e => node.port.postMessage(e);
+        } else {
+          const part = new SH101.MidiPart(ctx.sampleRate, settings);
+          node = ctx.createScriptProcessor(1024, 0, 1);
+          node.onaudioprocess = e => {
+            const out = e.outputBuffer.getChannelData(0);
+            for (let i = 0; i < out.length; i += 128) part.render(out.subarray(i, i + 128), e.playbackTime + i / ctx.sampleRate);
+          };
+          send = e => {
+            if (e.type === 'control') part.control(e.id, e.value);
+            else part.midi(e);
+          };
+        }
+        const trim = MIDI_PART_GAIN[track.role];
+        const level = this.gain(trim * 10 ** ((track.levelDb ?? 0) / 20));
+        const gate = this.gain(1);
+        if (track.gated && hasGate) gates.push(gate.gain);
+        chain(node, level, gate, this.stripInputs.get(track.role));
+        sources.set(track.track, { node, level: level.gain, send, trim, db: track.levelDb ?? 0, volume: 1, expression: 1 });
+      }
+      const updateLevel = (source, t) => {
+        source.level.setTargetAtTime(source.trim * 10 ** (source.db / 20) * source.volume * source.expression, t, 0.003);
+      };
+      return {
+        control(track, id, value) {
+          sources.get(track)?.send({ type: 'control', id, value });
+        },
+        level(track, db) {
+          const source = sources.get(track);
+          if (!source) return;
+          source.db = db;
+          updateLevel(source, ctx.currentTime);
+        },
+        midi(e, t) {
+          const part = song.tracks[e.track];
+          const type = e.status & 0xf0, on = type === 0x90 && e.d2 > 0;
+          if (part.role === 'gate') {
+            if (on) gateCount++;
+            else if ((type === 0x80 || type === 0x90) && gateCount) gateCount--;
+            for (const gate of gates) gate.setTargetAtTime(gateCount ? 1 : 0.06, t, 0.004);
+          } else if (part.drum) {
+            if (!on) return;
+            const note = part.drum === 42 && [42, 44, 46].includes(e.d1) ? e.d1 : part.drum;
+            drum.on(note, e.d2, t, part.role === 'kick' ? 0.62 : 0.82);
+          } else {
+            const source = sources.get(e.track);
+            if (!source) return;
+            if (type === 0xb0 && (e.d1 === 7 || e.d1 === 11)) {
+              if (e.d1 === 7) source.volume = e.d2 / 127;
+              else source.expression = e.d2 / 127;
+              updateLevel(source, t);
+            } else source.send({ ...e, t });
+          }
+        },
+        stop(t) {
+          drum.kill(t);
+          for (const { node } of sources.values()) {
+            node.disconnect();
+            node.port?.close();
+            if ('onaudioprocess' in node) node.onaudioprocess = null;
+          }
+          sources.clear();
+        },
+      };
     }
 
     buildMaster() {
@@ -1030,9 +1057,10 @@
         if (type !== 0x80 && type !== 0x90 && type !== 0xB0 && type !== 0xE0) return;
         const now = this.ctx.currentTime, t = clamp(num(time, now), now, now + 1e5);
         const a = d1 & 127, b = d2 & 127, i = CH_INDEX[channel], inst = this.inst[i];
+        if (!inst) return;
         if (type === 0xE0) inst.bend?.(((b << 7) + a - 8192) / 8192, t);
         else if (type === 0xB0) {
-          if (a === 120 || a === 123) inst.kill(t);
+          if (a === 120 || a === 123) inst.kill(t, false);
         } else if (type === 0x90 && b > 0) {
           this.lamp(i, b / 127, t);
           inst.on(a, b, t);
@@ -1084,10 +1112,10 @@
       } catch (e) { /* ignore */ }
     }
 
-    allOff(time) {
+    allOff(time, includeCV = true) {
       try {
         const now = this.ctx.currentTime, t = clamp(num(time, now), now, now + 1e5);
-        for (const inst of this.inst) inst.kill(t);
+        for (const inst of this.inst) inst.kill(t, includeCV);
       } catch (e) { /* ignore */ }
     }
 

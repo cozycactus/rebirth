@@ -5,3 +5,5 @@ web/core.js
 web/version.js
 web/sh101_cpu.js
 web/sh101.rom
+# Locally imported MIDI scores and soundbanks.
+web/local-songs/
