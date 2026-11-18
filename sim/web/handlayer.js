@@ -178,8 +178,12 @@
   // container: the element the canvas covers (#device, whose square is the
   // panel's 1400 units). opts.quality: 'full' (default) or 'light' (a 1024
   // shadow map and a pixel ratio of at most 1.5 instead of 2048 and 2).
-  // Resolves to the layer; rejects, leaving nothing behind, when WebGL2 or a
-  // texture is not available.
+  // opts.until: a function whose promise the building waits for once the
+  // textures are decoded (building is one long task; the page lets it run
+  // only where it delays nothing that sounds). Resolves to the layer;
+  // rejects, leaving nothing behind, when WebGL2 or a texture is not
+  // available, or WebGL would be drawn in software (a major performance
+  // caveat: the page shows the ring instead).
   function create(container, opts) {
     opts = opts || {};
     let canvas = null, renderer = null;
@@ -189,11 +193,12 @@
       const light = opts.quality === 'light';
       const maxRatio = light ? 1.5 : 2, shadowSize = light ? 1024 : 2048;
       const A = MODEL.textures;
-      return Promise.all([image(A.albedo), image(A.normal), image(A.orm)]).then(([al, no, orm]) => {
+      return Promise.all([image(A.albedo), image(A.normal), image(A.orm)])
+        .then(maps => Promise.resolve(opts.until && opts.until()).then(() => maps)).then(([al, no, orm]) => {
         canvas = document.createElement('canvas');
         canvas.className = 'handsgl';
         container.appendChild(canvas);
-        const r = renderer = new T.WebGLRenderer({ canvas, alpha: true, antialias: true });
+        const r = renderer = new T.WebGLRenderer({ canvas, alpha: true, antialias: true, failIfMajorPerformanceCaveat: true });
         r.setClearColor(0x000000, 0);
         r.shadowMap.enabled = true;
         r.shadowMap.type = T.PCFShadowMap;
@@ -269,9 +274,10 @@
         const render = () => r.render(scene, camera);
         const dotsWanted = () => /hands-dots/.test((root.location && root.location.hash) || '');
 
-        // The show: its plan and driver (setShow), the generation the page
-        // gave it; the hands leaving after drop(); what was drawn last.
-        let plan = null, driver = null, generation = null, leave = null;
+        // The show: its driver (setShow; driver.plan is its plan), the
+        // generation the page gave it; the hands leaving after drop(); what
+        // was drawn last; the WebGL context lost (until the browser restores it).
+        let driver = null, generation = null, leave = null, lost = false;
         let away = null;                // each hand out of the frame: the pose of its plan's first keyframe
         let shown = true, dirty = true, lastT = NaN, drawn = { left: [], right: [] };
         let last = null;                // the last frame: { t, left, right } as driver.pose() gave them
@@ -331,12 +337,12 @@
           // a leave under way: the new plan's hands start out of the frame.
           setShow(show, n) {
             if (driver && n === generation) return;
-            plan = driver = null;
+            driver = null;
             leave = null;
-            const p = HandPlan.build(show.actions), d = new HandRig.Driver(rigsOf(), p);
+            const d = new HandRig.Driver(rigsOf(), HandPlan.build(show.actions));
             if (!away) away = awayPoses(d);
             hide();
-            plan = p; driver = d; generation = n;
+            driver = d; generation = n;
             dirty = true; lastT = NaN;
           },
           // The show is over: the plan is dropped and the hands leave the
@@ -344,7 +350,7 @@
           // hidden).
           drop() {
             if (!driver) return;
-            plan = driver = null;
+            driver = null;
             dirty = true; lastT = NaN; last = null;
             layer.debugDots([]);
             const from = {};
@@ -383,17 +389,9 @@
             else layer.debugDots([]);
             render();
           },
-          // The control keys (as handplan.js names them) the plan holds down
-          // at device time t: the touches with tDown ≤ t < tUp.
-          heldNow(t) {
-            const out = [];
-            if (!plan) return out;
-            for (const x of plan.touches) {
-              if (x.tDown > t) break;
-              if (t < x.tUp) out.push(x.key);
-            }
-            return out;
-          },
+          // Whether the layer can draw: not while its WebGL context is lost
+          // (the page then shows the ring); again once it is restored.
+          get available() { return !lost; },
           // For the page's checks: the last frame's draw time and hands, the
           // driver, the show's generation.
           get last() { return last; },
@@ -458,6 +456,15 @@
         hide();
         layer.resize();
         if (root.ResizeObserver) new ResizeObserver(() => layer.resize()).observe(container);
+        // A lost context (the GPU reset, too many contexts) draws nothing
+        // until the browser restores it; three.js rebuilds its own state
+        // then, and the next frame draws everything again.
+        canvas.addEventListener('webglcontextlost', e => { e.preventDefault(); lost = true; });
+        canvas.addEventListener('webglcontextrestored', () => {
+          lost = false;
+          dirty = true; lastT = NaN;
+          layer.resize();
+        });
         return layer;
       });
     }).catch(e => {

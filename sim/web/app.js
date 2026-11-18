@@ -16,11 +16,13 @@
   let lastWall = 0, wallIsAudio = false;
   let show = null, phase = 'idle';  // idle | prep | live
   let generation = 0;             // the show's number: startShow, endShow and reboot each begin a new one
-  let lastTickMs = 0;             // performance.now() at the last tick
+  let lastTickWall = 0;           // wall() at the last tick
   // The hands (handlayer.js): the layer once loaded; whether the last
   // frame showed them (then the artist's touches get no ring); a generation
-  // whose plan failed (the ring for the rest of that show).
-  let handLayer = null, handsOn = false, handsFailed = -1;
+  // whose plan failed (the ring for the rest of that show); a generation
+  // that has logged a pose off its targets.
+  let handLayer = null, handsOn = false, handsFailed = -1, handsWarned = -1;
+  const artistHeld = new Set();   // the controls the artist holds down now, as io.touch set them
   const knobAngle = [0, 0];
   const anims = {};               // rig knob moves in progress, for the sliders
 
@@ -175,6 +177,7 @@
     device.encoderSwitch(0, false);
     device.encoderSwitch(1, false);
     hands.settleEncoders();
+    artistHeld.clear();
     deviceEl.querySelectorAll('.finger, .down').forEach(el => el.classList.remove('finger', 'down'));
   }
 
@@ -311,7 +314,8 @@
       }
       const el = elementFor(a);
       if (!el) return;
-      if (!handsOn) el.classList.toggle('finger', a.down);    // with the hands, a finger is drawn instead
+      if (a.down) artistHeld.add(el); else artistHeld.delete(el);
+      el.classList.toggle('finger', a.down && !handsShown());    // with the hands, a finger is drawn instead
       el.classList.toggle('down', a.down);
     },
     rig(id, value, ramp) { moveKnob(id, value, ramp, device.now()); },
@@ -862,8 +866,8 @@
     }
   }
   function tick() {
-    lastTickMs = performance.now();
     const w = wall();
+    lastTickWall = w;
     // A tick that comes late (a busy page, a hidden tab) advances the device by
     // less than the look-ahead, so nothing it produces is already in the past:
     // the music slows for a moment instead of playing a bunch of notes at once.
@@ -983,17 +987,30 @@
     }
   }
   function frame() {
-    const shown = handsShown();
-    if (shown !== handsOn) {
+    requestAnimationFrame(frame);
+    handsPart(() => {
+      const shown = handsShown();
+      if (shown === handsOn) return;
       handsOn = shown;
-      handLayer.setVisible(shown);
       redoTouches();
-    }
+      if (handLayer) handLayer.setVisible(shown);
+    });
     drawOled();
     drawLights();
     drawStatus();
-    if (shown) drawHands();
-    requestAnimationFrame(frame);
+    if (handsOn) handsPart(drawHands);
+  }
+  // The hands' part of a frame: whatever fails there ends the hands for
+  // this show (the ring comes back at the next frame, the canvas hidden),
+  // never the frame loop.
+  function handsPart(part) {
+    try {
+      part();
+    } catch (e) {
+      handsFailed = generation;
+      console.error('The hands stopped for this show:', e);
+      try { handLayer.canvas.style.display = 'none'; } catch (_) { /* no layer */ }
+    }
   }
 
   // ─── The hands ────────────────────────────────────────────────
@@ -1008,15 +1025,24 @@
   const HAND_SCRIPTS = ['three.js', 'handmodel.js', 'handrig.js', 'handplan.js', 'handlayer.js'];
   let handsLoad = null, handsChosen = false, handsDecided = Promise.resolve();
   const handsWanted = () => $('show-hands').checked;
-  // Shown: wanted, loaded, not failed on this show, and not in a
-  // preparation faster than x16 (there the ring).
-  const handsShown = () => handsWanted() && !!handLayer && handsFailed !== generation &&
+  // Shown: wanted, loaded, able to draw (its WebGL context not lost), not
+  // failed on this show, and not in a preparation faster than x16 (there
+  // the ring).
+  const handsShown = () => handsWanted() && !!handLayer && handLayer.available && handsFailed !== generation &&
     !(phase === 'prep' && (speed > 16 || speed === Infinity));
 
   // The hands' scripts, one after another, then the layer: once, memoised;
-  // null without WebGL2 or when anything fails (the ring stays). The 303s on
-  // the main thread (rig.js inline: the page from disk) get the lighter
-  // drawing. Nothing here holds up the device or the audio.
+  // null without WebGL2 (or with WebGL drawn in software) or when anything
+  // fails (the ring stays). The 303s on the main thread (rig.js inline: the
+  // page from disk) get the lighter drawing. Nothing here holds up the
+  // device or the audio: the scripts load at any time, but building the
+  // layer and its warm-up are one task of 0.2–0.3 s (sim/README.md, "The
+  // hands"), so they wait while the set sounds (the ring until then), and
+  // while the hands are not wanted.
+  const buildable = () => new Promise(resolve => {
+    const check = () => (phase !== 'live' && handsWanted() ? resolve() : setTimeout(check, 250));
+    check();
+  });
   function loadHands() {
     if (handsLoad) return handsLoad;
     const v = window.SIM_BUILD ? '?v=' + window.SIM_BUILD.short : '';
@@ -1031,7 +1057,7 @@
       .then(() => { if (!window.WebGL2RenderingContext) throw new Error('no WebGL2'); })
       .then(() => HAND_SCRIPTS.reduce((done, name) => done.then(() => script(name)), Promise.resolve()))
       .then(() => (rig ? rig.ready : null))
-      .then(how => window.HandLayer.create(deviceEl, { quality: how === 'inline' ? 'light' : 'full' }))
+      .then(how => window.HandLayer.create(deviceEl, { quality: how === 'inline' ? 'light' : 'full', until: buildable }))
       .then(layer => {
         layer.setVisible(false);      // until frame() shows it
         layer.warm();
@@ -1060,46 +1086,34 @@
     if (handLayer) plan();
     else handsDecided.then(() => { if (handsWanted()) loadHands().then(layer => { if (layer) plan(); }); });
   }
-  // The control element of a key as handplan.js names it.
-  function controlOf(key) {
-    const [kind, a, b] = key.split(':');
-    switch (kind) {
-      case 'pad': return els.pad[+a] ? els.pad[+a][+b] : null;
-      case 'scene': return els.scene[+a];
-      case 'mute': return els.mute[+a];
-      case 'step': return els.step[+a];
-      case 'play': return els.play;
-      case 'knob': return els.enc[+a];
-    }
-    return null;
-  }
   // The hands shown or hidden: the artist's controls held at this moment
-  // marked again from the plan, with classList alone (nothing reaches the
-  // device): `down` always, `finger` without the hands. The user's own
-  // presses stay down.
+  // (as io.touch left them, whatever became of the plan) marked again, with
+  // classList alone (nothing reaches the device): `down` always, `finger`
+  // without the hands. The user's own presses stay down.
   function redoTouches() {
     deviceEl.querySelectorAll('.finger, .down').forEach(el => el.classList.remove('finger', 'down'));
     for (const el of held.keys()) el.classList.add('down');
-    for (const key of handLayer.heldNow(device.now())) {
-      const el = controlOf(key);
-      if (!el) continue;
+    for (const el of artistHeld) {
       el.classList.add('down');
       if (!handsOn) el.classList.add('finger');
     }
   }
-  // The hands at device time: the device's now, and how far the wall clock
-  // has moved it on since the last tick (at most one tick's worth), which
-  // the driver never lets pass an unprocessed down or up; in a fast
-  // preparation, averaged over about two frames.
+  // The hands at device time: the device's now, and how far the clock that
+  // runs the device (wall(): the audio clock while the sound is on) has
+  // moved it on since the last tick (at most one tick's worth), which the
+  // driver never lets pass an unprocessed down, up or edge, nor fall back;
+  // in a fast preparation, averaged over about two frames. A pose off its
+  // targets is drawn as it is and logged once a show.
   function drawHands() {
     const now = device.now();
-    const extrapolated = now + Math.min((performance.now() - lastTickMs) * speed * 1000, 10000 * speed);
+    const extrapolated = now + Math.min(Math.max(0, (wall() - lastTickWall) * 1e6 * speed), 10000 * speed);
     const windowUs = phase === 'prep' && speed > 1 ? 2 * 16700 * speed : 0;
-    try {
-      handLayer.frame({ now, extrapolated, speed, windowUs });
-    } catch (e) {
-      handsFailed = generation;
-      console.error('The hands stopped for this show:', e);
+    handLayer.frame({ now, extrapolated, speed, windowUs });
+    const last = handLayer.last;
+    if (last && (!last.left.ok || !last.right.ok) && handsWarned !== generation) {
+      handsWarned = generation;
+      console.warn('The hands: a pose off its targets at device time ' + last.t + ' (' +
+        ['left', 'right'].filter(side => !last[side].ok).join(' and ') + ' hand), drawn as it is.');
     }
   }
 
