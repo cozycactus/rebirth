@@ -19,7 +19,7 @@
       { id: 'range', label: 'Диапазон', face: 'RANGE', dial: true, value: 1, options: ['16′', '8′', '4′', '2′'] },
       { id: 'pwm', label: 'Pulse width', face: 'P.W.', value: 0.38,
         tip: 'Ширина импульса в MAN и глубина её модуляции в ENV и LFO. Слышно при поднятом Pulse.' },
-      { id: 'pwmMode', label: 'Источник PWM', face: 'PWM', value: 2, options: ['ENV', 'MAN', 'LFO'],
+      { id: 'pwmMode', label: 'Источник PWM', face: 'PWM', value: 2, options: ['ENV', 'MAN', 'LFO'], order: [2, 1, 0],
         tip: 'Ширину импульса задаёт огибающая, ползунок Pulse width или треугольник LFO.' },
     ]],
     ['SOURCE MIXER', [
@@ -54,8 +54,9 @@
     ['CONTROLLERS', [
       { id: 'volume', label: 'VOLUME', face: 'VOL', dial: true, value: 0.75 },
       { id: 'portaTime', label: 'PORTAMENTO', face: 'PORTA', dial: true, value: 0.14 },
-      { id: 'portaMode', label: 'Режим портаменто', face: 'MODE', value: 1, options: ['OFF', 'AUTO', 'ON'] },
-      { id: 'transpose', label: 'TRANSPOSE', face: 'TRANS', value: 1, options: ['L', 'M', 'H'] },
+      { id: 'portaMode', label: 'Режим портаменто', face: 'MODE', value: 1, options: ['OFF', 'AUTO', 'ON'],
+        order: [1, 0, 2], horizontal: true },
+      { id: 'transpose', label: 'TRANSPOSE', face: 'TRANS', value: 1, options: ['L', 'M', 'H'], horizontal: true },
     ]],
     ['BENDER', [
       { id: 'bendVco', label: 'VCO BEND SENS', face: 'VCO', value: 1, tip: 'Диапазон рычага по высоте до ±12 полутонов.' },

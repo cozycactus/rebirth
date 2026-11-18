@@ -631,7 +631,8 @@
       const input = document.createElement(def.options ? 'select' : 'input');
       input.id = 'sh101-' + role + '-' + def.id;
       input.setAttribute('aria-label', def.label);
-      if (def.options) def.options.forEach((name, index) => input.add(new Option(name, index)));
+      const order = def.order || def.options?.map((_, index) => index);
+      if (order) for (const index of order) input.add(new Option(def.options[index], index));
       else {
         input.type = 'range';
         input.min = 0;
@@ -653,6 +654,7 @@
       setting.className = 'sh101-setting';
       setting.setAttribute('aria-hidden', 'true');
       label.className = 'sh101-control ' + (def.dial ? 'sh101-dial' : def.options ? 'sh101-switch' : 'sh101-fader');
+      if (def.horizontal) label.classList.add('sh101-horizontal');
       actuator.appendChild(input);
       if (def.dial || def.options) actuator.appendChild(document.createElement('i'));
       label.append(actuator, setting);
@@ -660,7 +662,7 @@
         const value = +input.value;
         if (def.dial) actuator.style.setProperty('--angle', (value / max * 270 - 135) + 'deg');
         if (def.options) {
-          actuator.style.setProperty('--travel', value / max);
+          actuator.style.setProperty('--travel', order.indexOf(value) / max);
           setting.textContent = (def.marks || def.options)[value];
         }
       };
@@ -753,7 +755,7 @@
       else voice.send({ type: 'audition', note, t });
     });
     const leds = {}, releases = [];
-    let board, player, available = false, wantsROM = false;
+    let board, player, available = false, wantsROM = false, serviceMode = false;
     const button = (parent, label, cls = 'btn') => {
       const el = document.createElement('button');
       el.type = 'button';
@@ -769,9 +771,9 @@
       const press = () => {
         clearTimeout(timer);
         pressedAt = performance.now();
-        if (keyboard && !voice.useROM) selectInput(true);
+        if (voice.powered && keyboard && !voice.useROM) selectInput(true);
         set(true);
-        resume();
+        if (voice.powered) resume();
       };
       const release = () => {
         if (latched) return;
@@ -821,10 +823,14 @@
       for (const [id, label] of Object.entries(buttons)) {
         const el = leds[id] = button(parent, label);
         el.setAttribute('aria-pressed', 'false');
-        bind(el, down => { board.buttons = put(board.buttons, api.BUTTON[id], down); }, id === 'hold' || id === 'transpose');
+        bind(el, down => {
+          board.buttons = put(board.buttons, api.BUTTON[id], down);
+          if (id === 'hold' && down) serviceMode = false;
+        }, id === 'load' || id === 'hold' || id === 'transpose');
       }
     }
-    const pedal = button(control('keyboard-functions'), 'Педаль HOLD');
+    const pedal = button(control('accessories'), 'Педаль HOLD');
+    pedal.dataset.tip = 'Педаль на входе HOLD. Shift + клик удерживает педаль.';
     bind(pedal, down => { board.pedal = down; }, true);
     let white = 0;
     for (let i = 0; i < 32; i++) {
@@ -872,7 +878,10 @@
       input.value = useROM ? 'rom' : 'midi';
       power.setAttribute('aria-pressed', String(powered));
       power.textContent = powered ? 'ON' : 'OFF';
-      for (const el of inputs) el.disabled = !powered || !board || !available;
+      for (const el of inputs) {
+        const serviceSwitch = el === leds.load || el === leds.transpose;
+        el.disabled = !board || !available || (!powered && !serviceSwitch);
+      }
       pulse.disabled = !powered || !available || !board?.external;
       bender.disabled = lfoMod.disabled = !powered || !available;
       audition.hidden = useROM;
@@ -899,8 +908,14 @@
       syncControls();
       if (voice.powered) {
         if (board) {
+          // The 80C49 reads LOAD and KEY TRANSPOSE during its service-mode boot.
+          const held = board.buttons;
+          const service = api.BUTTON.load | api.BUTTON.transpose;
           board.powerOn();
+          board.buttons = held;
           player = new api.Player(board, voice.send);
+          serviceMode = (held & service) === service;
+          if (serviceMode) { selectInput(true); resume(); }
         }
         update();
       } else {
@@ -921,7 +936,7 @@
       const audible = voice.useROM && ctx.state === 'running';
       const s = player.tick(performance.now() / 1000, audible ? ctx.currentTime : null);
       if (!details.open) return;
-      const showArpHint = voice.useROM && (s.mode === 'up' || s.mode === 'down' || s.mode === 'upDown');
+      const showArpHint = !serviceMode && voice.useROM && (s.mode === 'up' || s.mode === 'down' || s.mode === 'upDown');
       if (arpHint.hidden === showArpHint) arpHint.hidden = !showArpHint;
       const lfoOn = String(board.phase < 0.5);
       if (rateLED.dataset.on !== lfoOn) rateLED.dataset.on = lfoOn;
@@ -1437,8 +1452,8 @@
       if (ctx.state === 'running') { if (rig) rig.allOff(ctx.currentTime); ctx.suspend(); } else ctx.resume();
     });
     $('fault-keys').addEventListener('click', () => {
-      device.chipReset(0x22);
-      say('warn', 'Расширитель строк клавиатуры U801 (MCP23017) сброшен. Прошивка найдёт это в начале следующего скана и настроит его заново; повисшие строки не должны стать нажатиями.');
+      device.chipReset(0x34);
+      say('warn', 'Сканер пэдов TCA8418 сброшен. Прошивка заметит это при проверке раз в секунду и настроит его заново.');
     });
     $('fault-steps').addEventListener('click', () => {
       device.chipReset(0x20);

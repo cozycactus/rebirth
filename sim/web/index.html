@@ -220,8 +220,10 @@
   .sh101-left .sh101-control { grid-template-rows: 10px 32px 9px; font-size: 7px; }
   .sh101-left .sh101-bank-controls { padding-top: 4px; padding-bottom: 0; }
   .sh101-left .sh101-dial .sh101-actuator { width: min(86%, 24px); }
-  .sh101-left .sh101-switch .sh101-actuator { height: 25px; }
-  .sh101-left .sh101-switch .sh101-actuator i { top: calc(7px + var(--travel, 0) * 11px); }
+  .sh101-horizontal .sh101-actuator { width: 92%; height: 20px; }
+  .sh101-horizontal .sh101-actuator::before { inset: calc(50% - 2px) 3px; }
+  .sh101-horizontal .sh101-actuator i { top: 50%; left: calc(4px + var(--travel, 0) * (100% - 8px));
+    width: 8px; height: 9px; transform: translate(-50%, -50%); }
   .sh101-left .sh101-fader .sh101-actuator, .sh101-left .sh101-fader input { height: 32px; }
   .sh101-bender-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px 6px; padding: 0 4px; }
   .sh101-bender-actions label { display: grid; place-items: center; order: 1; width: 100%; font-size: 8px; }
@@ -471,7 +473,8 @@
         <div class="sh101-face" data-rom="keyboard-panel">
           <div class="sh101-banks" data-rom="voice-controls"></div>
           <div class="rom-functions">
-            <fieldset><legend>POWER</legend><button class="btn" data-rom="power" type="button" aria-label="Питание SH-101" aria-pressed="true">ON</button></fieldset>
+            <fieldset><legend>POWER</legend><button class="btn" data-rom="power" type="button" aria-label="Питание SH-101" aria-pressed="true"
+              data-tip="Для сервисного теста выключи POWER, удержи LOAD и KEY TRANSPOSE через Shift + клик и снова включи. HOLD завершает тест.">ON</button></fieldset>
             <fieldset data-rom="sequencer"><legend>SEQUENCER</legend></fieldset>
             <fieldset class="rom-arpeggio" data-rom="arpeggio"><legend>ARPEGGIO</legend></fieldset>
             <fieldset data-rom="keyboard-functions"><legend>KEYBOARD</legend></fieldset>

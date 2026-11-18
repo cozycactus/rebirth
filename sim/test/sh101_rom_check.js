@@ -206,6 +206,31 @@ async function testIndependentBoards(image) {
   assert.equal(arp.state().pitch, notes[2] - 36, 'the ARP sequence survives its own POWER cycle');
 }
 
+async function testServiceMode(image) {
+  const unit = bench(await Board.load(createCore, image));
+  const outputs = () => {
+    const { pitch, range, gate } = unit.state();
+    return [pitch, range, gate];
+  };
+  unit.board.powerOn();
+  unit.board.buttons = BUTTON.load | BUTTON.transpose;
+  unit.advance();
+  assert.deepEqual(outputs(), [0, 0, false]);
+  unit.board.buttons = 0;
+  unit.advance();
+  // Roland Service Notes, printed p. 2. One LSB is a twelfth of a volt.
+  for (const [button, values] of [
+    ['play', [33, 0, false]], ['down', [30, 0, false]],
+    ['upDown', [57, 0, true]], ['up', [0, 57, true]], ['load', [0, 0, false]],
+  ]) {
+    unit.tap(button);
+    assert.deepEqual(outputs(), values, 'service table: ' + button);
+  }
+  unit.tap('hold');
+  unit.notes(53);
+  assert.deepEqual(outputs(), [17, 24, true], 'HOLD exits the service test');
+}
+
 async function main() {
   await testBus();
   const fixture = process.env.SH101_ROM || path.join(__dirname, '../web/sh101.rom');
@@ -213,7 +238,8 @@ async function main() {
     const image = fs.readFileSync(fixture);
     await testROM(image);
     await testIndependentBoards(image);
-    console.log('SH-101 ROM: bus/DAC, 32 keys, ARP/HOLD, SEQ/LEGATO/REST, POWER, gated audio and four independent boards OK');
+    await testServiceMode(image);
+    console.log('SH-101 ROM: bus/DAC, 32 keys, ARP/HOLD, SEQ/LEGATO/REST, POWER, service CV/Gate table and four boards OK');
   } else {
     console.log('SH-101 ROM: bus/DAC OK; original ROM scenarios require SH101_ROM=/path/to/sh101.rom');
   }

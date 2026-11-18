@@ -211,6 +211,12 @@ while LOAD is active. Shift-click holds a virtual key or switch and a
 second click releases it.
 [Roland SH-101 Owner's Manual, pp. 33–38](https://cdn.roland.com/assets/media/pdf/SH-101_OM.pdf)
 
+To enter the service test, switch a voice's POWER off, hold LOAD and KEY
+TRANSPOSE with Shift-click, then turn POWER on. Release the two buttons and
+select a test output using the function buttons. The displayed KCV, RANGE
+and Gate follow the service table. Press HOLD to exit.
+[Roland SH-101 Service Notes, printed p. 2](https://manuals.fdiskc.com/flat/Roland%20SH101%20Service%20Manual.pdf#page=4)
+
 The Rev-A netlist has active-low Gate through Q9, P24 wired to the Q7/Q6
 reset circuit and separate sample-and-hold outputs from U10. U14 has
 four 240 pF integrators with 68 kΩ and 560 Ω feedback. The resonance path
