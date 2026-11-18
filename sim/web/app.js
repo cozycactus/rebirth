@@ -999,10 +999,14 @@
   // ─── The hands ────────────────────────────────────────────────
   // Two hands drawn over the panel (handlayer.js) play what the artist does;
   // without them a ring marks the control under the artist's finger. The
-  // checkbox is kept in localStorage (absent: on).
+  // checkbox is kept in localStorage. Absent, it is on, except where the 303s
+  // run on the main thread (rig.js inline: the page from disk): there the
+  // hands' heaviest frames delay the 303s' callbacks (sim/README.md, "The
+  // hands"), so it is off until ticked. handsDecided settles that default
+  // before anything loads the hands.
   const HANDS_KEY = 'rebirth.hands';
   const HAND_SCRIPTS = ['three.js', 'handmodel.js', 'handrig.js', 'handplan.js', 'handlayer.js'];
-  let handsLoad = null;
+  let handsLoad = null, handsChosen = false, handsDecided = Promise.resolve();
   const handsWanted = () => $('show-hands').checked;
   // Shown: wanted, loaded, not failed on this show, and not in a
   // preparation faster than x16 (there the ring).
@@ -1054,7 +1058,7 @@
       }
     };
     if (handLayer) plan();
-    else if (handsWanted()) loadHands().then(layer => { if (layer) plan(); });
+    else handsDecided.then(() => { if (handsWanted()) loadHands().then(layer => { if (layer) plan(); }); });
   }
   // The control element of a key as handplan.js names it.
   function controlOf(key) {
@@ -1191,8 +1195,18 @@
       device.play(false, device.now() + 80000);
     });
 
-    try { if (localStorage.getItem(HANDS_KEY) === 'off') $('show-hands').checked = false; } catch (e) { /* on */ }
+    try {
+      const kept = localStorage.getItem(HANDS_KEY);
+      if (kept === 'off') $('show-hands').checked = false;
+      handsChosen = kept === 'on' || kept === 'off';
+    } catch (e) { /* not kept: the default */ }
+    if (!handsChosen && rig) {
+      handsDecided = rig.ready.then(how => {
+        if (how === 'inline' && !handsChosen) $('show-hands').checked = false;
+      }, () => { /* the hands stay on */ });
+    }
     $('show-hands').addEventListener('change', () => {
+      handsChosen = true;
       try { localStorage.setItem(HANDS_KEY, handsWanted() ? 'on' : 'off'); } catch (e) { /* not kept */ }
       if (handsWanted()) planHands();
     });

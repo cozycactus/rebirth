@@ -200,20 +200,43 @@ WebGL2 canvas over the panel, only while a hand moves. `app.js` loads these
 scripts, with `three.js` and `handmodel.js`, one after another once the device
 is up, so the hands hold up neither the device nor the sound; from disk too.
 
-The checkbox "показывать руки" in the artist's card hides them (on by
-default; the browser keeps the choice). Without the hands a ring marks the
-control under the artist's finger, as before. The ring is also what shows
-when the browser has no WebGL2, when the hands' scripts fail to load, and in
-a preparation shown at x40. At x8 and x16 the hands play the preparation
-approximately: the fingertips are exact at normal speed only. Opened from
-disk, with the 303s on the main thread, the hands are drawn lighter (a
-1024 px shadow map and a pixel ratio of at most 1.5, instead of 2048 and 2).
+The checkbox "показывать руки" in the artist's card shows and hides them,
+and the browser keeps the choice. Until it is first changed it is ticked,
+except on the page opened from disk: there the 303s run on the main thread,
+the hands' heaviest frames delay them (see the frame cost below), and so the
+hands are off until the box is ticked; ticked, they are drawn lighter there
+(a 1024 px shadow map and a pixel ratio of at most 1.5, instead of 2048 and
+2). Without the hands a ring marks the control under the artist's finger, as
+before. The ring is also what shows when the browser has no WebGL2, when the
+hands' scripts fail to load, and in a preparation shown at x40. At x8 and x16
+the hands play the preparation approximately: the fingertips are exact at
+normal speed only.
 
 `node sim/test/hands_unit.js` checks the assets, the rig, the planner and
 the driver; `node sim/test/hands_check.js` plans every song in every
 arrangement in all four scores and poses 32 of those shows (every press on
 its control, the hand rules, nothing through a control or the plate, the
 hands' speed). `sim/check.sh` runs both.
+
+The frame cost was measured on an Apple M1 (headless Chrome 157, WebGL
+through ANGLE on Metal), the page at 1500 × 1000 and a pixel ratio of 2, the
+sound on, over 60 s of a live set with pad launches, two MUTE pairs and held
+steps edited with the encoder (the fw2 score, song 3), with and without the
+hands, three to six runs each:
+
+- Over HTTP the hands take 0.1 ms of the main thread per frame (median; p99
+  1 ms) and draw about one frame in four. Frame times are the same with and
+  without them (median 16.7 ms, p95 16.8 ms), and no task over 50 ms came in
+  that minute in any run, from disk either. The heaviest frames, 8–11 ms,
+  are the first poses of a pinch or of held steps, when the fingers are
+  fitted to them for the first time.
+- From disk the 303s' callbacks (every 21.3 ms) came at most 24–28 ms apart
+  without the hands and 30–33 ms with them, the late ones always at those
+  first poses; in two of six runs an interval passed 32 ms (1.5 buffers).
+  Hence the hands off by default there.
+- Once per page, building the hands after the device is up is one task of
+  0.2–0.3 s, its warm-up (shaders compiled, textures uploaded) included;
+  planning a show takes 13–16 ms at its start.
 
 Where the hands come from:
 
