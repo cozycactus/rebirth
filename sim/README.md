@@ -180,3 +180,56 @@ the page offers only the variants that fit (`Device.features()`):
 
 The page has an on-screen keyboard, computer keys and Web MIDI for the same
 input. With a firmware that does not listen on its DIN input it says so.
+
+## The hands
+
+Two hands drawn over the panel play what the artist does: they press and
+hold the keys, hold steps while the other hand turns an encoder, press two
+MUTE keys at once, copy a clip with index and thumb, and turn the encoders in
+a pinch and press them. At normal speed a fingertip lands on its control when
+the firmware sees the press and leaves when it sees the release; between
+gestures the hands lift and leave the panel. They only watch the score:
+nothing they do reaches the device. They do not play the synths' knobs, the
+MIDI keyboard card, or the user's own presses.
+
+`sim/web/handplan.js` turns the show's actions into a plan per hand (which
+hand and finger, where, when); `handrig.js` builds a hand from the model,
+poses it and fits its fingertips onto the controls, and its driver samples
+the plan into poses at the device's time; `handlayer.js` draws them in a
+WebGL2 canvas over the panel, only while a hand moves. `app.js` loads these
+scripts, with `three.js` and `handmodel.js`, one after another once the device
+is up, so the hands hold up neither the device nor the sound; from disk too.
+
+The checkbox "показывать руки" in the artist's card hides them (on by
+default; the browser keeps the choice). Without the hands a ring marks the
+control under the artist's finger, as before. The ring is also what shows
+when the browser has no WebGL2, when the hands' scripts fail to load, and in
+a preparation shown at x40. At x8 and x16 the hands play the preparation
+approximately: the fingertips are exact at normal speed only. Opened from
+disk, with the 303s on the main thread, the hands are drawn lighter (a
+1024 px shadow map and a pixel ratio of at most 1.5, instead of 2048 and 2).
+
+`node sim/test/hands_unit.js` checks the assets, the rig, the planner and
+the driver; `node sim/test/hands_check.js` plans every song in every
+arrangement in all four scores and poses 32 of those shows (every press on
+its control, the hand rules, nothing through a control or the plate, the
+hands' speed). `sim/check.sh` runs both.
+
+Where the hands come from:
+
+- `sim/web/three.js`: three.js 0.187.0 (MIT), only the parts the hands use,
+  bundled into one classic script with esbuild 0.25.0.
+- `sim/web/handmodel.js`: the hands of
+  [Godot XR Tools](https://github.com/GodotVR/godot-xr-tools) at commit
+  `6fc5361` (CC0 1.0, DigitalN8m4r3; the mesh is MakeHuman output, CC0):
+  their mesh and skeleton, and their three textures as JPEG, embedded as
+  base64.
+- `sim/web/notices.txt`: the notices of both, published with the page.
+
+Both are committed as built. `sim/vendor/README.md` says how they are built
+and holds the SHA-256 of every source file; to build them again:
+
+```bash
+sim/vendor/build-three.sh                     # needs Node, npm and a network
+python3 sim/vendor/build-handmodel.py [DIR]   # macOS (sips), Python 3.9+; downloads the sources, or reads them from DIR
+```

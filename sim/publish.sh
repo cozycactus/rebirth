@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # The files of the page this script owns in the site's rebirth/ folder.
-PAGE_FILES="index.html app.js artist.js device.js rig.js acid.js dsp.js core.js version.js"
+PAGE_FILES="index.html app.js artist.js device.js rig.js acid.js dsp.js core.js version.js three.js handmodel.js handrig.js handplan.js handlayer.js notices.txt"
 
 fail() { echo "publish: $*" >&2; exit 1; }
 
@@ -48,6 +48,7 @@ package() {
     cp -R src include "$out/source/"
     cp -R test/fakes "$out/source/test/"
     cp -R sim/core sim/test sim/build.sh sim/check.sh sim/README.md "$out/source/sim/"
+    cp -R sim/vendor "$out/source/sim/"
     local subject date emcc
     subject=$(git log -1 --format=%s)
     date=$(git log -1 --format=%cd --date=short)
@@ -71,11 +72,16 @@ corresponding source of that build, under the GNU General Public License v3.0
   from \`sim/web/\`: copy \`index.html\` and the \`.js\` files from one level up
   into \`sim/web/\` first (without the \`?v=\` the page adds to their names).
 - \`sim/README.md\`: what is real, what is modelled, and what the simulator does not show.
+- \`sim/vendor/\`: how \`three.js\` and \`handmodel.js\` one level up are built.
 
-The page scripts (\`app.js\`, \`artist.js\`, \`device.js\`, \`rig.js\`, \`acid.js\`) are
-served as written, one level up. \`dsp.js\` there is the x0xb0x filter model from
+The page scripts (\`app.js\`, \`artist.js\`, \`device.js\`, \`rig.js\`, \`acid.js\`,
+\`handrig.js\`, \`handplan.js\`, \`handlayer.js\`) are served as written, one level
+up. \`dsp.js\` there is the x0xb0x filter model from
 [x0xb0x VCF Bench](https://github.com/cozycactus/x0xb0x-vcf-bench), copied
-unchanged from its commit 8384696 (CC0). \`manual-ru.pdf\` is the user manual.
+unchanged from its commit 8384696 (CC0). \`three.js\` (three.js 0.187.0, MIT) and
+\`handmodel.js\` (the hands of Godot XR Tools, CC0) are built from other people's
+work by the scripts in \`sim/vendor/\`; \`notices.txt\` beside the page holds
+their notices. \`manual-ru.pdf\` is the user manual.
 
 Behaviour of the original ReBirth RB-338 is taken from
 [OpenRB-338](https://github.com/pingw33n/openrb-338) (also GPL-3.0).
