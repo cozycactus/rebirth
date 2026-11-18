@@ -205,8 +205,13 @@ set plays: when the box is first ticked during a set (the hands not built on
 the page yet), or the scripts arrive after "Сыграть" with the preparation
 skipped, the ring stays until the set ends or is stopped, and the hands are
 there from the next show on. Once built, unticking and ticking the box hides
-and shows them at once. A preparation and
-an idle page do not sound, so the build may run there.
+and shows them at once. The build waits for the artist's live set only:
+it may run in a preparation (silent, as it is played faster than real time)
+and on an idle page, and so also while the device sounds there, after a
+click on the panel has taken a set over (the artist stops, the sequencer
+plays on) or while the user plays the device. Its task then holds up the
+main thread once while the music plays, which may be heard (from disk the
+303s run on that thread).
 
 The checkbox "показывать руки" in the artist's card shows and hides them,
 and the browser keeps the choice. Until it is first changed it is ticked,
@@ -235,35 +240,24 @@ The frame cost was measured on an Apple M1 (headless Chrome 157, WebGL
 through ANGLE on Metal), the page at 1500 × 1000 and a pixel ratio of 2, the
 sound on, over 60 s of a live set with pad launches, two MUTE pairs and held
 steps edited with the encoder (the fw2 score, song 3), with and without the
-hands, three to six runs each:
+hands, three runs each over HTTP and six from disk:
 
 - Over HTTP the hands take 0.1 ms of the main thread per frame (median; p99
   1 ms) and draw about one frame in four. Frame times are the same with and
   without them (median 16.7 ms, p95 16.8 ms), and no task over 50 ms came in
-  that minute in any run, from disk either. The heaviest frames, 8–11 ms,
+  that minute in any run, from disk either. The heaviest frames, 10–11 ms,
   are the first poses of a pinch or of held steps, when the fingers are
   fitted to them for the first time.
-- From disk the 303s' callbacks (every 21.3 ms) came at worst 24.4–28.4 ms
-  apart without the hands and 29.6–33.3 ms with them, the late ones always at
-  those first poses. Over six runs each, 3 intervals passed 32 ms (1.5
-  buffers; 32.4–33.3 ms) in 2 of the 6 runs with the hands (2 in one run, 1
-  in another), none in the runs without them. Hence the hands off by default
-  there.
-- On a busier machine (load average 7–14) a run from disk with the box
-  ticked had 14 intervals between callbacks over 32 ms, the worst 48 ms, at
-  the same first poses. Of three runs from disk without the hands then, two
-  had none and one had 5, all from one stall of the machine itself (the
-  worst 135 ms, with no hands loaded).
-- Once per page, building the hands after the device is up is one task of
-  0.2–0.3 s, its warm-up (shaders compiled, textures uploaded) included, and
-  never inside a live set (see above); planning a show takes 13–16 ms at its
-  start.
-- These runs predate the clearance of every fingertip vertex (the fingertips'
-  sides kept out of the keys too). With it the driver alone (in Node, posing
-  the same stretch every 16.7 ms) takes 0.036 ms a pose once its keyframes
-  are fitted instead of 0.030 (p99 0.20 ms instead of 0.15), and the first
-  poses of a keyframe are as heavy as before (the same 11 over 4 ms, at most
-  11–12 ms).
+- From disk the 303s' callbacks (every 21.3 ms) came at worst 24.1–26.7 ms
+  apart without the hands and 27.5–33.6 ms with them, the late ones at those
+  first poses. One interval passed 32 ms (1.5 buffers): 33.6 ms, in one of
+  the six runs with the hands; none did in the runs without them. (An
+  earlier round, before the last fixes to the hands, had 3 such intervals
+  in 2 of 6 runs with the hands, none without.) Hence the hands off by
+  default there.
+- Once per page, building the hands is one task of 0.2–0.3 s, its warm-up
+  (shaders compiled, textures uploaded) included, and never inside a live
+  set (see above); planning a show takes 13–18 ms at its start.
 
 Where the hands come from:
 
