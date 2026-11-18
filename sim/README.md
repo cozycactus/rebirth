@@ -258,8 +258,8 @@ hands, three to six runs each:
   start.
 - These runs predate the clearance of every fingertip vertex (the fingertips'
   sides kept out of the keys too). With it the driver alone (in Node, posing
-  the same stretch every 16.7 ms) takes 0.042 ms a pose once its keyframes
-  are fitted instead of 0.030 (p99 0.25 ms instead of 0.15), and the first
+  the same stretch every 16.7 ms) takes 0.036 ms a pose once its keyframes
+  are fitted instead of 0.030 (p99 0.20 ms instead of 0.15), and the first
   poses of a keyframe are as heavy as before (the same 11 over 4 ms, at most
   11–12 ms).
 
