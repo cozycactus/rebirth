@@ -201,9 +201,11 @@ scripts, with `three.js` and `handmodel.js`, one after another once the device
 is up, so the hands hold up neither the device nor the sound; from disk too.
 Building the hands from them (the canvas, the two rigs, shaders compiled and
 textures uploaded) is one task of 0.2–0.3 s, so it never runs while a live
-set plays: when the box is ticked during a set, or the scripts arrive after
-"Сыграть" with the preparation skipped, the ring stays until the set ends or
-is stopped, and the hands are there from the next show on. A preparation and
+set plays: when the box is first ticked during a set (the hands not built on
+the page yet), or the scripts arrive after "Сыграть" with the preparation
+skipped, the ring stays until the set ends or is stopped, and the hands are
+there from the next show on. Once built, unticking and ticking the box hides
+and shows them at once. A preparation and
 an idle page do not sound, so the build may run there.
 
 The checkbox "показывать руки" in the artist's card shows and hides them,
