@@ -71,7 +71,8 @@ corresponding source of that build, under the GNU General Public License v3.0
 - \`test/fakes/\`: host-side stand-ins for the Pico SDK headers.
 - \`sim/core/\`: the virtual board around the firmware.
 - \`sim/sh101/\`: the SH-101 MCS-48 decoder and virtual board (\`../sh101_cpu.js\`).
-  The Roland ROM image is supplied locally by the user.
+  The page fetches the Roland ROM from a pinned upstream GitHub revision and
+  checks its SHA-256. The file picker is available if the download fails.
 - \`sim/build.sh\`: builds the native core and the two WebAssembly modules.
 - \`sim/test/\`, \`sim/check.sh\`: checks. The Node checks load the page scripts
   from \`sim/web/\`: copy \`index.html\` and the \`.js\` files from one level up

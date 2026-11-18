@@ -171,11 +171,13 @@ would require test signals and captures from a real SH-101.
 
 ### Original 80C49 ROM
 
-Open **SH-101 · ROM 80C49** in the synths card and select the 2048-byte
-80C49-6-7301 image. The page verifies its hash and runs it locally on the
-MCS-48 decoder from `cozycactus/sh101_midi` at 6 MHz. The 32-key matrix,
-panel buttons, HOLD pedal and LFO or manual EXT CLK feed the virtual
-U6. Its keyboard CV, oscillator RANGE, random DAC, Gate, portamento and
+The page automatically fetches the 2048-byte 80C49-6-7301 image at startup,
+verifies its SHA-256 and runs it locally on the MCS-48 decoder from
+`cozycactus/sh101_midi` at 6 MHz. The controls are in **SH-101 · ROM 80C49**.
+[Pinned ROM source](https://github.com/joebritt/SH101_Disassembled/blob/708cde01906312de7801204989628aa4610a4e45/80C49_SH101.bin)
+
+The 32-key matrix, panel buttons, HOLD pedal and LFO or manual EXT CLK feed
+the virtual U6. Its keyboard CV, oscillator RANGE, random DAC, Gate, portamento and
 clock-reset outputs drive the same SH-101 audio model. [MCS-48 decoder source](https://github.com/cozycactus/sh101_midi/blob/8142852/src/mcs48_core.h)
 
 For a tied sequencer note, hold HOLD while entering the new note and
@@ -191,10 +193,10 @@ uses Q26/Q27 (2SC1815), C52 (10 µF), R129 (5.6 kΩ), R113 (15 kΩ), and
 the antiparallel 1N4148 pair. The DSP models Q26/Q27 by their nominal
 gain and follower behavior. [SH-101 schematic at tag Rev-A, 68f0691](https://github.com/cozycactus/sh-101/blob/Rev-A/sh-101.kicad_sch)
 
-The web bundle contains the controller emulator. Supply the image through
-the file picker, or use `?sh101=local` on a loopback server with a private
-`sh101.rom` beside `index.html`. To extract that file from a sibling
-`sh101_midi` checkout and exercise the original ROM regression:
+If the download fails, the ROM panel offers a file picker. For local use,
+`?sh101=local` on a loopback server loads `sh101.rom` beside `index.html`.
+To extract the file from a sibling `sh101_midi` checkout and exercise the
+original ROM regression:
 
 ```sh
 python3 - ../sh101_midi/src/sh101_rom.h sim/web/sh101.rom <<'PY'

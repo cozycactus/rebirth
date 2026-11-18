@@ -701,7 +701,8 @@
   function buildSH101ROM() {
     const api = window.SH101ROM, createCore = window.SH101Core;
     if (!api || !createCore || !window.SH101) return;
-    const details = $('sh101-rom'), panel = $('rom-panel'), file = $('rom-file'), status = $('rom-status');
+    const details = $('sh101-rom'), panel = $('rom-panel'), status = $('rom-status');
+    const file = $('rom-file'), fileLabel = $('rom-file-label');
     const source = $('rom-clock-source'), pulse = $('rom-clock'), readout = $('rom-readout');
     const leds = {}, releases = [];
     let board, player;
@@ -805,6 +806,7 @@
     async function load(readImage) {
       if (file.disabled) return;
       file.disabled = true;
+      status.textContent = 'Загружается ROM 80C49-6-7301…';
       try {
         const next = await api.Board.load(createCore, await readImage());
         const voice = rig.createSH101ROMVoice();
@@ -812,12 +814,13 @@
         board = next;
         player = new api.Player(board, voice.send);
         status.textContent = 'Оригинальный ROM 80C49-6-7301 загружен';
-        $('rom-file-label').hidden = file.hidden = true;
+        fileLabel.hidden = file.hidden = true;
         panel.hidden = false;
         update();
         setInterval(update, 10);
       } catch (error) {
         status.textContent = error.message;
+        fileLabel.hidden = file.hidden = false;
         file.disabled = false;
         file.value = '';
       }
@@ -825,16 +828,25 @@
 
     file.addEventListener('change', () => { if (file.files.length) load(() => file.files[0].arrayBuffer()); });
     details.hidden = false;
-    if (location.hash === '#' + details.id) details.open = true;
     const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
-    if (loopback && new URLSearchParams(location.search).get('sh101') === 'local') {
-      details.open = true;
-      load(async () => {
-        const response = await fetch('./sh101.rom');
-        if (!response.ok) throw new Error('Локальный файл sh101.rom недоступен. Выбери ROM вручную.');
-        return response.arrayBuffer();
-      });
-    }
+    const local = loopback && new URLSearchParams(location.search).get('sh101') === 'local';
+    if (local || location.hash === '#' + details.id) details.open = true;
+    // Use the upstream dump at a fixed revision. Board.load checks its SHA-256.
+    const romURL = local ? './sh101.rom'
+      : 'https://raw.githubusercontent.com/joebritt/SH101_Disassembled/708cde01906312de7801204989628aa4610a4e45/80C49_SH101.bin';
+    load(async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+      try {
+        const response = await fetch(romURL, { signal: controller.signal });
+        if (response.ok) return await response.arrayBuffer();
+      } catch {
+        // Network errors and timeouts both allow the user to pick the ROM.
+      } finally {
+        clearTimeout(timer);
+      }
+      throw new Error('Не удалось загрузить ROM автоматически. Выбери локальный образ.');
+    });
   }
 
   function buildRigPanel() {
