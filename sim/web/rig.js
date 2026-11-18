@@ -21,10 +21,10 @@
   const SRC = typeof document !== 'undefined' && document.currentScript && document.currentScript.src || '';
   const HERE = SRC.replace(/\?.*$/, '').replace(/[^/]*$/, '');
   const QUERY = (SRC.match(/\?.*$/) || [''])[0];
+  const SH101 = typeof window === 'undefined' ? require('./sh101.js') : window.SH101;
 
   const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
   const num = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d);
-  const cents = (hi, lo) => 1200 * Math.log2(hi / lo);
   const chain = (...n) => { for (let i = 1; i < n.length; i++) n[i - 1].connect(n[i]); return n[n.length - 1]; };
 
   // Seeded noise: offline renders must be reproducible.
@@ -93,11 +93,17 @@
         k(x + '.level', 'Level', g, 0.7));
     }
     out.push(
-      k('bass.cutoff', 'Cutoff', 'Bass', 0.45), k('bass.level', 'Level', 'Bass', 0.8),
-      k('lead.cutoff', 'Cutoff', 'Lead', 0.6), k('lead.level', 'Level', 'Lead', 0.6),
+      k('bass.level', 'Level', 'Bass', 0.8), k('lead.level', 'Level', 'Lead', 0.6),
       k('arp.level', 'Level', 'Arp', 0.5),
       k('drums.level', 'Kit level', 'Drums', 0.85), k('kick.level', 'Kick level', 'Drums', 0.9),
       k('fx.level', 'Level', 'FX', 0.6), k('fx.riserBars', 'Riser length', 'FX', 8, 1, 16, 'bars'));
+    if (SH101) {
+      for (const role of ['bass', 'lead', 'rom']) {
+        const patch = SH101.defaults(role);
+        for (const def of SH101.controls) out.push(k(role + '.' + def.id, def.label, role.toUpperCase(), patch[def.id], 0, SH101.max(def)));
+      }
+      out.push(k('fx.diodes', 'D30/D31', 'FX', 0, 0, 1));
+    }
     // The mixer strips' pan (0.5 is the centre) and their sends to the
     // shared delay and reverb, set where the mix had them fixed before. The
     // 303s had an echo and a tail of their own: their delay sends give the
@@ -207,7 +213,7 @@
 
   const velGain = (vel) => 0.5 + 0.5 * Math.min(vel, 100) / 100;
 
-  const CUT_BASS = cents(4000, 60), CUT_LEAD = cents(12000, 150);
+  const SCORE_CUTOFF = { 'bass.cutoff': [60, 4000], 'lead.cutoff': [150, 12000] };
 
   // ---- The two 303s: the x0xb0x model of dsp.js, run by acid.js -----------
   // MIDI becomes the four lines a x0xb0x's firmware drives. A note struck
@@ -488,34 +494,60 @@
     }
   }
 
-  function makeBass(rig) {
-    const v = new MonoVoice(rig, {
-      oscs: [{ type: 'sawtooth', gain: 0.6 }, { type: 'square', gain: 0.25 }, { type: 'sine', gain: 0.5 }],
-      baseHz: 60, q: [3, -3], envCents: 2600,
-      trig(vel) {
-        const acc = vel >= 120 ? 1 : 0;
-        return { peak: 0.8 * velGain(vel) * (1 + 0.25 * acc), atk: 0.002, hold: 0.008, sus: 0.3, dec: 0.045, rel: 0.012,
-                 fPeak: 1 + 0.3 * acc, fDec: 0.035 };
-      },
-    });
-    for (const f of v.filters) rig.bind('bass.cutoff', f.detune, (x) => x * CUT_BASS);
-    rig.strip(v.out, { id: 'bass', level: 'bass.level', k: 1.0 });
-    return v;
-  }
+  class SH101Voice {
+    constructor(rig, role, effectBus) {
+      this.rig = rig;
+      this.role = role;
+      this.effectBus = effectBus;
+      this.ready = SH101 ? this.start() : Promise.resolve('none');
+    }
 
-  function makeLead(rig) {
-    const v = new MonoVoice(rig, {
-      oscs: [{ type: 'sawtooth', cents: -9, gain: 0.5 }, { type: 'sawtooth', cents: 9, gain: 0.5 },
-             { type: 'sawtooth', ratio: 2, cents: 3, gain: 0.22 }],
-      baseHz: 150, q: [7, -3], envCents: 1200,
-      trig(vel) {
-        return { peak: 0.8 * (0.6 + 0.4 * vel / 127), atk: 0.004, hold: 0.02, sus: 0.75, dec: 0.15, rel: 0.07,
-                 fPeak: 1, fDec: 0.12 };
-      },
-    });
-    for (const f of v.filters) rig.bind('lead.cutoff', f.detune, (x) => x * CUT_LEAD);
-    rig.strip(v.out, { id: 'lead', level: 'lead.level', k: 1.78, panned: true });
-    return v;
+    async start() {
+      const rig = this.rig, ctx = rig.ctx, role = this.role;
+      const effects = role === 'fx', rom = role === 'rom';
+      const parameters = effects ? ['diodes'] : SH101.controls.map(({ id }) => id);
+      let node, send, mode;
+      try {
+        if (await rig.sh101Module) {
+          node = new AudioWorkletNode(ctx, 'rebirth-sh101', {
+            numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
+            processorOptions: { effects, rom },
+          });
+          for (const id of parameters) rig.bind(role + '.' + id, node.parameters.get(id), (value) => value);
+          send = (event) => node.port.postMessage(event);
+          mode = 'worklet';
+        }
+      } catch (error) {
+        node = null;  // Loaded from disk, or this browser cannot run the processor.
+      }
+      if (!node && ctx.createScriptProcessor) {
+        const voice = new SH101.Voice(ctx.sampleRate, effects, rom), settings = SH101.defaults(role);
+        node = ctx.createScriptProcessor(1024, 0, 1);
+        node.onaudioprocess = (event) => {
+          const output = event.outputBuffer.getChannelData(0);
+          const start = event.playbackTime ?? ctx.currentTime;
+          for (let i = 0; i < output.length; i += 128) {
+            const time = start + i / ctx.sampleRate;
+            for (const id of parameters) settings[id] = rig.knobAt(role + '.' + id, time);
+            voice.render(output.subarray(i, i + 128), time, settings);
+          }
+        };
+        send = (event) => voice.enqueue(event);
+        mode = 'inline';
+      }
+      if (!node) return 'none';
+      if (effects) chain(node, rig.gain(3.3), this.effectBus);
+      else if (rom) rig.strip(node, { k: 4.5 });
+      else rig.strip(node, { id: role, level: role + '.level', k: role === 'bass' ? 3.4 : 5.7, panned: role === 'lead' });
+      this.node = node;
+      this.send = send;
+      return mode;
+    }
+
+    on(note, _velocity, t) { this.send?.({ type: 'note', note, down: true, t }); }
+    off(note, t) { this.send?.({ type: 'note', note, down: false, t }); }
+    bend(value, t) { this.send?.({ type: 'bend', value, t }); }
+    kill(t) { this.send?.({ type: 'kill', t }); }
   }
 
   function makeArp(rig) {
@@ -734,13 +766,25 @@
       this.bus = rig.gain(1);
       this.riser = null;
       rig.strip(this.bus, { id: 'fx', level: 'fx.level', k: 1.4 });
+      this.sh101 = new SH101Voice(rig, 'fx', this.bus);
+      this.useSH101 = false;
+    }
+    setSH101(enabled) {
+      if (!this.sh101?.send || enabled === this.useSH101) return;
+      this.kill(this.ctx.currentTime);
+      this.useSH101 = enabled;
     }
     on(note, vel, t) {
+      if (this.useSH101) {
+        const rise = vel >= 120;
+        this.sh101.send({ type: 'sweep', rise, duration: rise ? this.riserDuration(t) : 0.75, t });
+        return;
+      }
       if (this.riser) { this.choke(this.riser, Math.max(t, this.riser.t0)); this.riser = null; }
       if (vel >= 120) this.rise(t); else { this.zap(t); this.crash(t); }
     }
     off() { /* one-shots */ }
-    kill(t) { super.kill(t); this.riser = null; }
+    kill(t) { super.kill(t); this.riser = null; this.sh101?.kill(t); }
 
     zap(t) {
       const h = this.hit(this.bus, 0.5, t, 0.9);
@@ -760,9 +804,13 @@
       chain(hp, this.perc(h, 1, 0.002, 0.3), h.out);
       this.go(h);
     }
-    rise(t) {
+    riserDuration(t) {
       const rig = this.rig;
-      const dur = clamp((rig.knobAt('fx.riserBars', t) * 240) / rig.tempo.at(t), 0.25, 20);
+      return clamp((rig.knobAt('fx.riserBars', t) * 240) / rig.tempo.at(t), 0.25, 20);
+    }
+
+    rise(t) {
+      const rig = this.rig, dur = this.riserDuration(t);
       const h = this.hit(this.bus, 1.4, t, dur + 0.06);
       const bp = this.filt(h, 'bandpass', 300, 1.2), g = this.gain(h, 0);
       bp.frequency.setValueAtTime(300, t);
@@ -838,13 +886,23 @@
         sd[i] = x - a - b;
       }
 
+      this.sh101Module = SH101 && ctx.audioWorklet && typeof AudioWorkletNode !== 'undefined'
+        ? Promise.resolve().then(() => ctx.audioWorklet.addModule(HERE + 'sh101.js' + QUERY)).then(() => true, () => false)
+        : Promise.resolve(false);
+      this.sh101 = { bass: new SH101Voice(this, 'bass'), lead: new SH101Voice(this, 'lead') };
+      this.fx = new Fx(this);
       this.inst = [
-        new Drums(this), makeBass(this),
+        new Drums(this), this.sh101.bass,
         new AcidVoice(this, 'acid1', 'saw'), new AcidVoice(this, 'acid2', 'square'),
-        makeLead(this), makeArp(this), new Fx(this), makePad(this),
+        this.sh101.lead, makeArp(this), this.fx, makePad(this),
       ];
       // Resolves once the 303s can sound; until then their notes are dropped.
       this.ready = this.startAcids([this.inst[2], this.inst[3]]);
+    }
+
+    createSH101ROMVoice() {
+      this.romVoice ??= new SH101Voice(this, 'rom');
+      return this.romVoice;
     }
 
     startAcids(acids) {
@@ -970,11 +1028,12 @@
       try {
         status |= 0;
         if (status < 0x80 || status > 0xEF) return;
-        const type = status & 0xF0;
-        if (type !== 0x80 && type !== 0x90 && type !== 0xB0) return;
+        const type = status & 0xF0, channel = status & 15;
+        if (type !== 0x80 && type !== 0x90 && type !== 0xB0 && type !== 0xE0) return;
         const now = this.ctx.currentTime, t = clamp(num(time, now), now, now + 1e5);
-        const a = d1 & 127, b = d2 & 127, i = CH_INDEX[status & 15], inst = this.inst[i];
-        if (type === 0xB0) {
+        const a = d1 & 127, b = d2 & 127, i = CH_INDEX[channel], inst = this.inst[i];
+        if (type === 0xE0) inst.bend?.(((b << 7) + a - 8192) / 8192, t);
+        else if (type === 0xB0) {
           if (a === 120 || a === 123) inst.kill(t);
         } else if (type === 0x90 && b > 0) {
           this.lamp(i, b / 127, t);
@@ -1062,6 +1121,10 @@
     time: (v) => divOf(v)[1],
     size: (v) => rt60(v).toFixed(1) + ' s',
     drive: (v) => (v < 0.005 ? 'off' : (v * 10).toFixed(1)),
+  };
+  Rig.scoreValue = (id, x) => {
+    const range = SCORE_CUTOFF[id];
+    return range && SH101 ? SH101.cutoffPosition(range[0] * (range[1] / range[0]) ** x) : x;
   };
   if (typeof window !== 'undefined') window.Rig = Rig;
   if (typeof module !== 'undefined' && module.exports) module.exports = Rig;

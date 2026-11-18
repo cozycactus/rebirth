@@ -322,8 +322,6 @@
   ];
   for (const s of STRIPS) if (s.id) s.level = s.id + '.level';
   const stripOf = (channel, note) => channel === 9 ? (note === 35 || note === 36 ? 0 : 1) : channel >= 2 && channel <= 7 ? channel : undefined;
-  // The other synths' knobs that stay as plain sliders.
-  const KNOBS = ['bass.cutoff', 'lead.cutoff'];
   const KNOB_TIP = {
     tune: 'Tune: подстройка высоты генератора, в середине — без сдвига.',
     cutoff: 'Cut off freq: частота среза фильтра. Артист открывает и прикрывает её по ходу сета.',
@@ -341,7 +339,7 @@
     level: 'Уровень в общем миксе.',
   };
   const NOT_DEVICE = '\nЭто ручка синтезатора, не прибора: прибор CC не шлёт.';
-  const lampHot = new Array(8).fill(0);
+  const lampHot = new Array(STRIPS.length - 1).fill(0);
   const sliders = {};             // rig knob id -> something with a `value`: a range input or a drawn knob
   const meters = [];              // what drawStatus keeps moving: () => void
 
@@ -351,6 +349,7 @@
   const sounding = () => rig && ctx && ctx.state === 'running' && speed === 1;
 
   function moveKnob(id, value, ramp, deviceUs) {
+    if (rig) value = Rig.scoreValue(id, value);
     const slider = sliders[id];
     const from = slider ? +slider.value : value;
     if (sounding() && ramp > 0) {
@@ -613,34 +612,246 @@
     });
   }
 
+  function buildSH101Fields(role, fields) {
+    for (const [group, entries] of window.SH101.groups) {
+      const fieldset = document.createElement('fieldset');
+      const legend = document.createElement('legend');
+      legend.textContent = group;
+      fieldset.appendChild(legend);
+      for (const def of entries) {
+        const id = role + '.' + def.id;
+        const label = document.createElement('label');
+        label.textContent = def.label;
+        if (def.tip) label.dataset.tip = def.tip;
+        const input = document.createElement(def.options ? 'select' : 'input');
+        input.id = 'sh101-' + role + '-' + def.id;
+        if (def.options) def.options.forEach((name, index) => input.add(new Option(name, index)));
+        else {
+          input.type = 'range';
+          input.min = 0;
+          input.max = 1;
+          input.step = 0.005;
+        }
+        input.value = rig.getParam(id);
+        input.addEventListener('input', () => userSet(id, +input.value));
+        sliders[id] = input;
+        label.appendChild(input);
+        fieldset.appendChild(label);
+      }
+      fields.appendChild(fieldset);
+    }
+  }
+
+  function buildSH101() {
+    const panel = $('sh101'), track = $('sh101-track'), audition = $('sh101-audition');
+    const status = $('sh101-status'), fxMode = $('show-fx');
+    if (!window.SH101) { fxMode.value = 'original'; return; }
+    const patches = {
+      bass: { note: 36, name: 'C2', fields: $('sh101-bass') },
+      lead: { note: 60, name: 'C4', fields: $('sh101-lead') },
+    };
+    const update = () => {
+      const role = track.value;
+      for (const [id, patch] of Object.entries(patches)) patch.fields.hidden = id !== role;
+      audition.textContent = 'Пробная нота ' + patches[role].name;
+      audition.disabled = !rig.sh101[role].send;
+      status.textContent = patches[role].unavailable ? 'SH-101 недоступен в этом браузере.' : '';
+    };
+    for (const [role, patch] of Object.entries(patches)) {
+      buildSH101Fields(role, patch.fields);
+      const unavailable = () => { patch.unavailable = true; update(); };
+      rig.sh101[role].ready.then(mode => {
+        if (mode === 'none') unavailable();
+        else update();
+      }, unavailable);
+    }
+    track.addEventListener('change', update);
+    audition.addEventListener('click', async () => {
+      try {
+        const role = track.value, voice = rig.sh101[role];
+        await startAudio();
+        if (ctx.state !== 'running' || !voice.send) return;
+        voice.send({ type: 'audition', note: patches[role].note, t: ctx.currentTime + 0.01 });
+        lampHot[STRIPS.findIndex(s => s.id === role)] = performance.now() + 100;
+      } catch (error) {
+        status.textContent = 'Браузер не запустил звук.';
+      }
+    });
+    panel.hidden = false;
+    update();
+    const fxDiodes = $('show-fx-diodes');
+    const { options, tip } = window.SH101.controls.find(def => def.id === 'diodes');
+    options.forEach((name, index) => fxDiodes.add(new Option(name, index)));
+    fxDiodes.dataset.tip = tip;
+    fxDiodes.value = rig.getParam('fx.diodes');
+    fxDiodes.addEventListener('input', () => userSet('fx.diodes', +fxDiodes.value));
+    const updateFx = () => {
+      const enabled = fxMode.value === 'sh101' && !!rig.fx.sh101.send;
+      rig.fx.setSH101(enabled);
+      $('show-fx-diodes-label').hidden = fxDiodes.hidden = !enabled;
+    };
+    fxMode.addEventListener('change', updateFx);
+    const fallback = () => { fxMode.value = 'original'; };
+    rig.fx.sh101.ready.then(mode => {
+      if (mode === 'none') fallback();
+      else { fxMode.disabled = false; updateFx(); }
+    }, fallback);
+  }
+
+  function buildSH101ROM() {
+    const api = window.SH101ROM, createCore = window.SH101Core;
+    if (!api || !createCore || !window.SH101) return;
+    const details = $('sh101-rom'), panel = $('rom-panel'), file = $('rom-file'), status = $('rom-status');
+    const source = $('rom-clock-source'), pulse = $('rom-clock'), readout = $('rom-readout');
+    const leds = {}, releases = [];
+    let board, player;
+    const button = (parent, label, cls = 'btn') => {
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = cls;
+      el.textContent = label;
+      parent.appendChild(el);
+      return el;
+    };
+    const resume = () => startAudio()?.catch(() => { status.textContent = 'Браузер не запустил звук.'; });
+    const bind = (el, change, latchable = false) => {
+      let pressedAt = 0, timer, latched = false, fromKeyboard = false;
+      const set = (down) => { el.classList.toggle('rom-down', down); change(down); };
+      const press = () => {
+        clearTimeout(timer);
+        pressedAt = performance.now();
+        set(true);
+        resume();
+      };
+      const release = () => {
+        if (latched) return;
+        clearTimeout(timer);
+        // Even a quick tap must survive a complete keyboard scan.
+        timer = setTimeout(() => set(false), Math.max(0, 24 - (performance.now() - pressedAt)));
+      };
+      releases.push(() => { latched = false; release(); });
+      el.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        if (latched) { latched = false; release(); return; }
+        latched = latchable && e.shiftKey;
+        el.setPointerCapture(e.pointerId);
+        press();
+      });
+      el.addEventListener('lostpointercapture', release);
+      el.addEventListener('pointerup', release);
+      el.addEventListener('pointercancel', release);
+      el.addEventListener('keydown', e => {
+        if (e.key !== ' ' && e.key !== 'Enter') return;
+        e.preventDefault();
+        if (e.repeat) return;
+        if (latched) { latched = false; release(); return; }
+        fromKeyboard = true;
+        press();
+      });
+      const releaseKeyboard = () => {
+        if (!fromKeyboard) return;
+        fromKeyboard = false;
+        release();
+      };
+      el.addEventListener('keyup', e => { if (e.key === ' ' || e.key === 'Enter') releaseKeyboard(); });
+      el.addEventListener('blur', releaseKeyboard);
+      el.addEventListener('click', e => { if (e.detail === 0) { press(); release(); } });
+    };
+    const put = (word, mask, down) => down ? word | mask : word & ~mask;
+    const controls = $('rom-buttons'), keys = $('rom-keys');
+    for (const [id, label] of Object.entries({
+      load: 'LOAD', play: 'PLAY', down: 'DOWN', upDown: 'U&D', up: 'UP', hold: 'HOLD', transpose: 'KEY TRANSPOSE',
+    })) {
+      const el = leds[id] = button(controls, label);
+      el.setAttribute('aria-pressed', 'false');
+      bind(el, down => { board.buttons = put(board.buttons, api.BUTTON[id], down); }, id === 'hold' || id === 'transpose');
+    }
+    bind(button(controls, 'Педаль HOLD'), down => { board.pedal = down; }, true);
+    let white = 0;
+    for (let i = 0; i < 32; i++) {
+      const note = i + 53, name = NOTE[note % 12] + (Math.floor(note / 12) - 1);
+      const accidental = name.includes('#');
+      const el = button(keys, name, 'rom-key' + (accidental ? ' accidental' : ''));
+      if (accidental) {
+        el.style.left = (100 * white / 19) + '%';
+        el.style.width = (64 / 19) + '%';
+      } else white++;
+      bind(el, down => { board.keys = put(board.keys, 1 << i, down); }, true);
+    }
+    bind(pulse, down => { board.clockHigh = down; });
+    source.addEventListener('change', () => {
+      board.external = source.value === 'external';
+      pulse.disabled = !board.external;
+    });
+    const releaseAll = () => { if (board) for (const release of releases) release(); };
+    window.addEventListener('blur', releaseAll);
+    details.addEventListener('toggle', () => { if (!details.open) releaseAll(); });
+    buildSH101Fields('rom', $('rom-fields'));
+
+    function update() {
+      board.range = rig.getParam('rom.range');
+      board.octave = rig.getParam('rom.transpose');
+      board.trigger = rig.getParam('rom.trigger');
+      board.rate = window.SH101.lfoFrequency(rig.getParam('rom.lfoRate'));
+      const s = player.tick(performance.now() / 1000, ctx.state === 'running' ? ctx.currentTime : null);
+      for (const [id, el] of Object.entries(leds)) {
+        const on = String(s.mode === id || (id === 'hold' && s.hold) || (id === 'transpose' && s.transpose));
+        if (el.getAttribute('aria-pressed') !== on) el.setAttribute('aria-pressed', on);
+      }
+      const value = 'KCV ' + (s.pitch / 12).toFixed(2) + ' В · RANGE ' + (s.range / 12).toFixed(2) + ' В · Gate ' + Number(s.gate);
+      if (readout.textContent !== value) readout.textContent = value;
+    }
+
+    async function load(readImage) {
+      if (file.disabled) return;
+      file.disabled = true;
+      try {
+        const next = await api.Board.load(createCore, await readImage());
+        const voice = rig.createSH101ROMVoice();
+        if (await voice.ready === 'none') throw new Error('Звуковой движок SH-101 недоступен в этом браузере.');
+        board = next;
+        player = new api.Player(board, voice.send);
+        status.textContent = 'Оригинальный ROM 80C49-6-7301 загружен';
+        $('rom-file-label').hidden = file.hidden = true;
+        panel.hidden = false;
+        update();
+        setInterval(update, 10);
+      } catch (error) {
+        status.textContent = error.message;
+        file.disabled = false;
+        file.value = '';
+      }
+    }
+
+    file.addEventListener('change', () => { if (file.files.length) load(() => file.files[0].arrayBuffer()); });
+    details.hidden = false;
+    if (location.hash === '#' + details.id) details.open = true;
+    const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
+    if (loopback && new URLSearchParams(location.search).get('sh101') === 'local') {
+      details.open = true;
+      load(async () => {
+        const response = await fetch('./sh101.rom');
+        if (!response.ok) throw new Error('Локальный файл sh101.rom недоступен. Выбери ROM вручную.');
+        return response.arrayBuffer();
+      });
+    }
+  }
+
   function buildRigPanel() {
     buildMixer();
     if (!rig) {
-      $('knobs').textContent = 'Синтезаторы не загрузились (rig.js).';
+      $('synth-status').textContent = 'Синтезаторы не загрузились.';
+      $('show-fx').value = 'original';
       return;
     }
     buildEffects();
     buildAcid('acid1', 2, 'ACID 1', 4);
     buildAcid('acid2', 3, 'ACID 2', 5);
-    const byId = {};
-    for (const p of rig.params) byId[p.id] = p;
-    for (const id of KNOBS) {
-      const p = byId[id];
-      if (!p) continue;
-      const wrap = document.createElement('label');
-      wrap.textContent = (p.group ? p.group + ' · ' : '') + (p.label || id);
-      wrap.dataset.tip = (id.endsWith('.delay') ? 'Сколько сигнала инструмента уходит в общую задержку.' : KNOB_TIP[id.split('.')[1]]) + NOT_DEVICE;
-      const input = document.createElement('input');
-      input.type = 'range'; input.min = p.min; input.max = p.max; input.step = (p.max - p.min) / 200; input.value = p.value;
-      input.addEventListener('input', () => userSet(id, +input.value));
-      wrap.appendChild(input);
-      $('knobs').appendChild(wrap);
-      sliders[id] = input;
-    }
+    buildSH101();
+    buildSH101ROM();
   }
   function startAudio() {
-    if (!ctx) return;
-    ctx.resume();
+    return ctx?.resume();
   }
 
   // ─── MIDI wire → synths, monitor ──────────────────────────────
@@ -667,7 +878,8 @@
     if (sounding()) rig.midi(m.status, m.d1, m.d2, audioTime(m.t));
     if (kind === 0x90 && m.d2 > 0) {
       const inst = stripOf(channel, m.d1);
-      if (inst !== undefined) lampHot[inst] = performance.now() + (m.t - playhead) / 1000 + 90;
+      const flash = performance.now() + (m.t - playhead) / 1000 + 90;
+      if (inst !== undefined) lampHot[inst] = flash;
       midiLines.push((m.t / 1e6).toFixed(3) + '  ch' + String(channel + 1).padStart(2) + '  ' +
         (NOTE[m.d1 % 12] + (Math.floor(m.d1 / 12) - 1)).padEnd(4) + ' vel ' + m.d2);
     }

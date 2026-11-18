@@ -3,7 +3,7 @@
 #
 #   sim/publish.sh package OUT        after sim/build.sh web: OUT/page holds the
 #                                     page as served, OUT/source the GPL source
-#                                     of its core.js, from this checkout
+#                                     of its WebAssembly, from this checkout
 #   sim/publish.sh apply OUT SITE     lays OUT over a checkout of the site repo
 #                                     and stages the change; touches only the
 #                                     page's own files and rebirth/source/
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # The files of the page this script owns in the site's rebirth/ folder.
-PAGE_FILES="index.html app.js artist.js device.js rig.js acid.js dsp.js core.js version.js"
+PAGE_FILES="index.html app.js artist.js device.js rig.js acid.js dsp.js sh101.js sh101_cpu.js sh101_rom.js core.js version.js"
 
 fail() { echo "publish: $*" >&2; exit 1; }
 
@@ -26,7 +26,7 @@ package() {
     # OUT is emptied first: never the checkout or anything holding a repository.
     case "$(pwd)/" in "$out"/*) fail "OUT may not be the checkout or above it" ;; esac
     [ ! -e "$out/.git" ] || fail "OUT holds a git repository"
-    [ -f sim/web/core.js ] && [ -f sim/web/version.js ] || fail "build first: sim/build.sh web"
+    [ -f sim/web/core.js ] && [ -f sim/web/sh101_cpu.js ] && [ -f sim/web/version.js ] || fail "build first: sim/build.sh web"
     local commit short
     commit=$(git rev-parse HEAD)
     short=$(git rev-parse --short=7 HEAD)
@@ -38,16 +38,20 @@ package() {
     # The page, its scripts asked for with the commit, so a browser holding
     # files of the last build in its cache does not mix them with these.
     for f in $PAGE_FILES; do cp "sim/web/$f" "$out/page/$f"; done
-    sed -i.bak -E "s#<script src=\"([a-z]+\\.js)\"></script>#<script src=\"\\1?v=$short\"></script>#" "$out/page/index.html"
+    sed -i.bak -E "s#<script src=\"([a-z0-9_]+\\.js)\"></script>#<script src=\"\\1?v=$short\"></script>#" "$out/page/index.html"
     rm "$out/page/index.html.bak"
-    [ "$(grep -c "?v=$short\"" "$out/page/index.html")" -eq 8 ] || fail "index.html does not load the 8 scripts this script expects"
+    local scripts=0
+    for f in $PAGE_FILES; do
+        case "$f" in *.js) scripts=$((scripts + 1));; esac
+    done
+    [ "$(grep -c "?v=$short\"" "$out/page/index.html")" -eq "$scripts" ] || fail "index.html does not load all $scripts versioned scripts"
 
-    # The corresponding source of core.js: what sim/build.sh compiles, and
+    # The corresponding source of the WebAssembly: what sim/build.sh compiles, and
     # how. dsp.js stays beside the page: it is not part of the core (CC0).
     cp LICENSE "$out/source/"
     cp -R src include "$out/source/"
     cp -R test/fakes "$out/source/test/"
-    cp -R sim/core sim/test sim/build.sh sim/check.sh sim/README.md "$out/source/sim/"
+    cp -R sim/core sim/sh101 sim/test sim/build.sh sim/check.sh sim/README.md "$out/source/sim/"
     local subject date emcc
     subject=$(git log -1 --format=%s)
     date=$(git log -1 --format=%cd --date=short)
@@ -66,14 +70,16 @@ corresponding source of that build, under the GNU General Public License v3.0
 - \`src/\`, \`include/\`: the firmware, unmodified.
 - \`test/fakes/\`: host-side stand-ins for the Pico SDK headers.
 - \`sim/core/\`: the virtual board around the firmware.
-- \`sim/build.sh\`: builds the native core and, with Emscripten, \`core.js\`.
+- \`sim/sh101/\`: the SH-101 MCS-48 decoder and virtual board (\`../sh101_cpu.js\`).
+  The Roland ROM image is supplied locally by the user.
+- \`sim/build.sh\`: builds the native core and the two WebAssembly modules.
 - \`sim/test/\`, \`sim/check.sh\`: checks. The Node checks load the page scripts
   from \`sim/web/\`: copy \`index.html\` and the \`.js\` files from one level up
   into \`sim/web/\` first (without the \`?v=\` the page adds to their names).
 - \`sim/README.md\`: what is real, what is modelled, and what the simulator does not show.
 
-The page scripts (\`app.js\`, \`artist.js\`, \`device.js\`, \`rig.js\`, \`acid.js\`) are
-served as written, one level up. \`dsp.js\` there is the x0xb0x filter model from
+The page scripts (\`app.js\`, \`artist.js\`, \`device.js\`, \`rig.js\`, \`acid.js\`,
+\`sh101.js\`, \`sh101_rom.js\`) are served as written, one level up. \`dsp.js\` there is the x0xb0x filter model from
 [x0xb0x VCF Bench](https://github.com/cozycactus/x0xb0x-vcf-bench), copied
 unchanged from its commit 8384696 (CC0). \`manual-ru.pdf\` is the user manual.
 

@@ -93,9 +93,6 @@
   #log .when { color: var(--dim); font-variant-numeric: tabular-nums; text-align: right; }
   #log .device b { color: var(--accent); } #log .rig b { color: var(--rig); } #log .info { color: var(--info); font-weight: 600; }
   #log .warn b { color: var(--warn); }
-  .knobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 14px; }
-  .knobs label { display: grid; grid-template-columns: 1fr; font-size: 12px; color: var(--dim); }
-  .knobs input[type=range] { width: 100%; accent-color: var(--rig); margin: 2px 0 0; }
   /* ─── Mini mixer ─── */
   .mixer { display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 4px; margin-bottom: 12px; }
   .strip { display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 6px 2px; border: 1px solid var(--line);
@@ -122,6 +119,36 @@
   .strip .mknob .ptr { stroke: var(--text); stroke-width: 2.4; stroke-linecap: round; }
   .strip .mknob .mval { font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--dim); font-variant-numeric: tabular-nums; }
   .strip.muted .mknob { opacity: .5; }
+
+  .sh101 { background: #191b22; border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 12px 0; }
+  .sh101 h3 { color: var(--text); font-size: 15px; margin: 0 0 8px; }
+  .sh101 .row label { color: var(--dim); font-size: 12px; }
+  .sh101-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 190px), 1fr));
+    align-items: start; gap: 8px; margin-top: 10px; }
+  .sh101-fields[hidden] { display: none; }
+  .sh101-fields fieldset { min-width: 0; display: grid; gap: 6px; border: 1px solid var(--line);
+    border-radius: 6px; margin: 0; padding: 5px 8px 8px; }
+  .sh101-fields legend { color: var(--rig); font-size: 12px; padding: 0 4px; }
+  .sh101-fields label { display: grid; grid-template-columns: minmax(0, 1fr) minmax(80px, 1.35fr);
+    align-items: center; gap: 5px; color: var(--dim); font-size: 12px; }
+  .sh101-fields input { width: 100%; min-width: 0; margin: 0; accent-color: var(--rig); }
+  .sh101-fields select { min-width: 0; }
+  .rom summary { cursor: pointer; font-size: 15px; font-weight: 700; }
+  .rom .row { margin-top: 8px; }
+  .rom .btn { touch-action: none; user-select: none; }
+  .rom .btn.rom-down { border-color: var(--rig); }
+  .rom .btn[aria-pressed="true"] { color: #15181c; background: var(--accent); }
+  .rom-file { max-width: 100%; color: var(--dim); font-size: 12px; }
+  .rom-readout { font: 11px ui-monospace, monospace; color: var(--info); }
+  .rom-key-scroll { overflow-x: auto; margin-top: 8px; padding: 2px; }
+  .rom-keys { display: flex; position: relative; min-width: 520px; height: 84px; isolation: isolate; }
+  .rom-key { flex: 1; min-width: 0; display: flex; justify-content: center; align-items: flex-end;
+    padding: 0 0 5px; border: 1px solid #252833; border-radius: 0 0 4px 4px;
+    background: #e3e5eb; color: #252833; font-size: 10px; cursor: pointer; touch-action: none; user-select: none; }
+  .rom-key.accidental { position: absolute; z-index: 1; height: 63%; transform: translateX(-50%);
+    background: #21232b; color: #d3d6e0; border-color: #15161c; font-size: 9px; }
+  .rom-key.rom-down { background: var(--rig); color: #15181c; }
+  .rom-key:focus-visible { z-index: 2; outline: 2px solid var(--info); outline-offset: -2px; }
 
   /* ─── The two 303s, drawn as the x0xb0x VCF Bench page draws its one ───
      White solder mask, black silkscreen legends, gold for what is set; its own
@@ -229,6 +256,16 @@
           data-tip="Как из клипов песни складывается сет. Клип на приборе не длиннее 16 шагов, поэтому форма строится сменой клипов, MUTE и сценами. У каждой песни есть своя аранжировка, но любую песню можно сыграть в любой."></select>
       </div>
       <div class="row" style="margin-top:8px">
+        <label for="show-fx">Звук FX</label>
+        <select id="show-fx" disabled
+          data-tip="Обычная нота FX запускает нисходящий свип SH-101; акцент — райзер по темпу сета. Используется полоса FX.">
+          <option value="sh101" selected>SH-101</option>
+          <option value="original">ReBirth FX</option>
+        </select>
+        <label for="show-fx-diodes" id="show-fx-diodes-label" hidden>D30/D31 FX</label>
+        <select id="show-fx-diodes" hidden></select>
+      </div>
+      <div class="row" style="margin-top:8px">
         <label data-tip="С галочкой видно, как артист набирает клипы на остановленном приборе, в ускоренном времени. Без неё подготовка проходит мгновенно."><input type="checkbox" id="show-prep" checked> показать подготовку ускоренно</label>
         <select id="prep-speed" data-tip="Во сколько раз ускорить подготовку. Сам сет всегда идёт в настоящем времени."><option value="8">×8</option><option value="16" selected>×16</option><option value="40">×40</option></select>
       </div>
@@ -271,12 +308,43 @@
       <div class="row" style="margin-bottom:8px">
         <button class="btn" id="audio-toggle" data-tip="Включает и выключает синтезаторы страницы. Прибор при этом работает как обычно: он шлёт только MIDI и CV/Gate.">🔊 Включить звук</button>
         <span class="sub">Прибор шлёт только MIDI и CV/Gate; звук делают эти инструменты.</span>
+        <span class="sub" id="synth-status" role="status"></span>
       </div>
       <div class="mixer" id="mixer"></div>
       <div class="bench" id="effects"></div>
       <div class="bench" id="acid1"></div>
       <div class="bench" id="acid2"></div>
-      <div class="knobs" id="knobs"></div>
+      <section class="sh101" id="sh101" aria-labelledby="sh101-heading" hidden>
+        <h3 id="sh101-heading">SH-101</h3>
+        <div class="row">
+          <label for="sh101-track">Голос</label>
+          <select id="sh101-track"><option value="bass">BASS</option><option value="lead">LEAD</option></select>
+          <button type="button" class="btn" id="sh101-audition" disabled>Пробная нота C2</button>
+          <span class="sub" id="sh101-status" role="status"></span>
+        </div>
+        <div class="sh101-fields" id="sh101-bass"></div>
+        <div class="sh101-fields" id="sh101-lead" hidden></div>
+      </section>
+      <details class="sh101 rom" id="sh101-rom" hidden>
+        <summary>SH-101 · ROM 80C49</summary>
+        <div class="row">
+          <label for="rom-file" id="rom-file-label">Загрузить ROM</label>
+          <input type="file" class="rom-file" id="rom-file" accept=".bin,.rom,application/octet-stream">
+          <span class="sub" id="rom-status" role="status">Образ 80C49-6-7301, 2048 байт</span>
+        </div>
+        <div id="rom-panel" hidden>
+          <div class="row" id="rom-buttons"></div>
+          <div class="rom-key-scroll"><div class="rom-keys" id="rom-keys" role="group" aria-label="Клавиатура SH-101"></div></div>
+          <div class="row">
+            <label for="rom-clock-source">Источник такта</label>
+            <select id="rom-clock-source"><option value="lfo">LFO</option><option value="external">EXT CLK</option></select>
+            <button type="button" class="btn" id="rom-clock" disabled>Импульс EXT CLK</button>
+            <span class="rom-readout" id="rom-readout"></span>
+          </div>
+          <div class="hint"><kbd>Shift</kbd> + клик удерживает клавишу, HOLD или KEY TRANSPOSE. Следующий клик отпускает. LOAD записывает ноты, повторный LOAD завершает запись. PLAY запускает цикл.</div>
+          <div class="sh101-fields" id="rom-fields"></div>
+        </div>
+      </details>
     </div>
 
     <div class="card">
@@ -307,6 +375,9 @@
 <script src="artist.js"></script>
 <script src="dsp.js"></script>
 <script src="acid.js"></script>
+<script src="sh101.js"></script>
+<script src="sh101_cpu.js"></script>
+<script src="sh101_rom.js"></script>
 <script src="rig.js"></script>
 <script src="app.js"></script>
 </body>

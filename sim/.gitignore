@@ -3,3 +3,5 @@ build/
 # built by sim/build.sh web; CI builds them for the public page
 web/core.js
 web/version.js
+web/sh101_cpu.js
+web/sh101.rom
