@@ -1873,11 +1873,13 @@
     return handsLoad;
   }
   // The running show's plan for the hands: now if they are loaded, else
-  // once they are, if the show is still the same one.
+  // once they are, if the show is still the same one. Only the artist's
+  // set has one: an idle page and a MIDI Song (no artist, show null) have
+  // none.
   function planHands() {
     const gen = generation;
     const plan = () => {
-      if (gen !== generation || phase === 'idle') return;
+      if (gen !== generation || (phase !== 'prep' && phase !== 'live')) return;
       try {
         handLayer.setShow(show, gen);
       } catch (e) {
