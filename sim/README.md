@@ -389,13 +389,15 @@ set plays: when the box is first ticked during a set (the hands not built on
 the page yet), or the scripts arrive after "Сыграть" with the preparation
 skipped, the ring stays until the set ends or is stopped, and the hands are
 there from the next show on. Once built, unticking and ticking the box hides
-and shows them at once. The build waits for the artist's live set only:
-it may run in a preparation (silent, as it is played faster than real time)
-and on an idle page, and so also while the device sounds there, after a
-click on the panel has taken a set over (the artist stops, the sequencer
-plays on) or while the user plays the device. Its task then holds up the
-main thread once while the music plays, which may be heard (from disk the
-303s run on that thread).
+and shows them at once. The build also waits while a MIDI Song loads or
+plays (its task would stall the device's tick beyond the 60 ms look-ahead):
+ticked then, the hands are built when the song ends or is stopped. It may
+run in a preparation (silent, as it is played faster than real time) and on
+an idle page, and so also while the device sounds there, after a click on
+the panel has taken a set over (the artist stops, the sequencer plays on)
+or while the user plays the device. Its task then holds up the main thread
+once while the music plays, which may be heard (from disk the 303s and the
+SH-101s run on that thread).
 
 The checkbox "показывать руки" in the artist's card shows and hides them,
 and the browser keeps the choice. Until it is first changed it is ticked,

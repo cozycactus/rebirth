@@ -1839,10 +1839,12 @@
   // page from disk) get the lighter drawing. Nothing here holds up the
   // device or the audio: the scripts load at any time, but building the
   // layer and its warm-up are one task of 0.2–0.3 s (sim/README.md, "The
-  // hands"), so they wait while the set sounds (the ring until then), and
-  // while the hands are not wanted.
+  // hands"), so they wait while the set sounds (the ring until then) or a
+  // MIDI Song loads or plays (longer than the look-ahead: the tick would
+  // stall), and while the hands are not wanted: they build on an idle page
+  // or in a preparation only.
   const buildable = () => new Promise(resolve => {
-    const check = () => (phase !== 'live' && handsWanted() ? resolve() : setTimeout(check, 250));
+    const check = () => ((phase === 'idle' || phase === 'prep') && handsWanted() ? resolve() : setTimeout(check, 250));
     check();
   });
   function loadHands() {
