@@ -374,7 +374,9 @@ a pinch and press them. At normal speed a fingertip lands on its control when
 the firmware sees the press and leaves when it sees the release; between
 gestures the hands lift and leave the panel. They only watch the score:
 nothing they do reaches the device. They do not play the synths' knobs, the
-MIDI keyboard card, or the user's own presses.
+MIDI keyboard card, or the user's own presses. They play the artist's sets
+only: not a MIDI Song, nor the PAD phrases of the four SH-101 songs (MIDI
+the score sends straight to the synth, with no hand on the panel).
 
 `sim/web/handplan.js` turns the show's actions into a plan per hand (which
 hand and finger, where, when); `handrig.js` builds a hand from the model,
@@ -444,6 +446,9 @@ hands, three runs each over HTTP and six from disk:
 - Once per page, building the hands is one task of 0.2–0.3 s, its warm-up
   (shaders compiled, textures uploaded) included, and never inside a live
   set (see above); planning a show takes 13–18 ms at its start.
+
+These were measured before the SH-101 voices came to the page. From disk
+they too run on the main thread, which the numbers above do not include.
 
 Where the hands come from:
 

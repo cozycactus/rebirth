@@ -56,10 +56,12 @@ readable: the device is read by its lights.
 
 - Classic scripts only, no modules, no `fetch`: the page also opens from
   `file://` (see `sim/README.md`). Assets are embedded as base64.
-- `sim/publish.sh` copies `PAGE_FILES`, cache-busts `<script src="[a-z]+\.js">`
-  and requires exactly 8 such tags in `index.html`. So `index.html` keeps its
-  eight script tags; the hands' scripts are listed in `PAGE_FILES`, named
-  `[a-z]+.js`, and loaded from `app.js` with `?v=` added there.
+- `sim/publish.sh` copies `PAGE_FILES`, cache-busts `<script src="[a-z0-9_]+\.js">`
+  and requires as many such tags in `index.html` as `PAGE_FILES` has `.js`
+  files, less `LOADED_BY_APP` (12 tags since the merge of master's SH-101 and
+  MIDI Song work). The hands add no tag: their scripts are listed in
+  `PAGE_FILES` and in `LOADED_BY_APP`, and loaded from `app.js` with `?v=`
+  added there.
 - Global names `Hands`/`hands` are taken (`device.js`, `app.js`).
 - The repository is GPL-3.0. Everything added is MIT or CC0 and keeps its
   notice, also on the published page.
@@ -129,8 +131,8 @@ output, CC0). `build-handmodel.py` records each source file's SHA-256 in
 
 ### Loading, the toggle and the show's life cycle
 
-- `index.html` keeps its eight scripts. After the device is up, if the hands
-  are enabled and WebGL2 is available, `app.js` loads `three.js`,
+- `index.html` gets no script tag for the hands. After the device is up, if
+  the hands are enabled and WebGL2 is available, `app.js` loads `three.js`,
   `handmodel.js`, `handrig.js`, `handplan.js`, `handlayer.js` one after
   another (each script element's `onload` starts the next; `?v=` from
   `SIM_BUILD.short` when present), behind one promise. Nothing of the hands
@@ -413,7 +415,8 @@ and this revision fixes:
 - Life cycle: sequential loading behind one promise, a show generation
   number, `setHandsShown` owning the ring, hooks in `startShow`, `endShow`
   and `reboot`, shader warm-up.
-- Publishing: `index.html` keeps exactly eight script tags; notices are
+- Publishing: the hands add no script tag to `index.html` (`publish.sh`
+  counts the tags from `PAGE_FILES` less `LOADED_BY_APP`); notices are
   published with the page and the vendor recipes with the source.
 
 A second review, of the implementation plan, moved the turn threshold from
@@ -464,6 +467,16 @@ DeepSeek) led to one fix wave. What it changed against the text above:
   the grip's height put the approved grip's thumb 1.1–1.5 mm into the first
   pad row, and no variant fixed both; the owner approved the frames with this
   offset.
+- Merge of master's SH-101 voices, 64-track sequencer and MIDI Song player:
+  the score's `pad-midi` actions (the PAD phrases of the four SH-101 songs,
+  MIDI straight to the synth) touch no control. A MIDI Song has no artist
+  and gets no plan, and the hands are not built while one loads or plays
+  (the 0.2–0.3 s task would stall the device's tick beyond the look-ahead).
+  `index.html` has 12 script tags, the count `publish.sh` takes from
+  `PAGE_FILES` less `LOADED_BY_APP` (the five hand scripts `app.js` loads).
+  The check plans 240 shows; the preparation's speed bound is 9 m/s (two of
+  the new songs reach 8.00 and 8.33 m/s there, the old ones 7.90), the live
+  set's still 4 m/s.
 
 ## Left to the builder
 
