@@ -595,8 +595,10 @@ static void handle_pad_press(uint8_t track, uint8_t row, const step_buttons_t *s
     if (track < PANEL_TRACKS && row < PAD_ROWS) release_pad_key(track, row);
     if (ui.pad_keys_on && track < PANEL_TRACKS && row < PAD_ROWS) {
         // A pad shown as a key is never a copy source, and a stale hold of this
-        // very pad ends; the holds of other pads are left alone.
-        ui.pad_seen[track] &= (uint8_t)~(1u << row);
+        // very pad ends, on whichever page it was made; the holds of other
+        // pads are left alone.
+        for (uint8_t t = track; t < NUM_TRACKS; t += PANEL_TRACKS)
+            ui.pad_seen[t] &= (uint8_t)~(1u << row);
         uint8_t note = pad_key_note(ui.pad_keys_base, track, row);
         if (note != 0xFF) press_pad_key(track, row, note, steps);
         return;

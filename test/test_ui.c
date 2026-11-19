@@ -4539,6 +4539,49 @@ static void test_pad_pressed_as_a_key_clears_its_own_launcher_hold_only(void) {
     CHECK(ui.pad_seen[0] == 0 && ui.pad_seen[2] == (1u << 1));
 }
 
+// The same on a page past the first, where the pad's column is not its track.
+// The pad stays down as a key after the keyboard turns off: it must not be a
+// copy source for the next pad of its column.
+static void key_press_ends_the_launcher_hold_of(uint8_t track) {
+    uint8_t column = track % PANEL_TRACKS;
+    enter_pattern_view();
+    ui.selected_track = track;
+    pattern_set_step(&g_seq.patterns[7], track, 3, 71, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[3], track, 3, 99, 100, STEP_FLAG_ACTIVE);
+    hold_pad(column, 7);                    // a launcher press: a copy source
+    CHECK(ui.pad_seen[track] == (1u << 7));
+    step_down(1u << 2);
+    hold_pad(column, 7);                    // its release was lost: now a key
+    CHECK(ui.pad_key[column][7] != 0);
+    CHECK(ui.pad_seen[track] == 0);
+    step_up(1u << 2);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(column, 3);
+    CHECK(g_seq.patterns[3].steps[track][3].note == 99);    // not copied over
+    CHECK(transport_now().current[track] == 3);             // an ordinary launch
+}
+
+static void test_pad_pressed_as_a_key_on_a_later_page_is_no_copy_source(void) {
+    key_press_ends_the_launcher_hold_of(12);
+    reset();
+    key_press_ends_the_launcher_hold_of(60);
+}
+
+// The pad is one physical key on every page: pressed as a key, its launcher
+// hold of another page ends too, as a release ends it.
+static void test_pad_pressed_as_a_key_clears_its_launcher_hold_of_every_page(void) {
+    enter_pattern_view();
+    ui.selected_track = 4;
+    hold_pad(4, 7);
+    ui.selected_track = 12;                 // the same column, the next page
+    hold_pad(4, 6);
+    CHECK(ui.pad_seen[4] == (1u << 7) && ui.pad_seen[12] == (1u << 6));
+    step_down(1u << 2);
+    hold_pad(4, 7);                         // its release was lost: now a key
+    CHECK(ui.pad_key[4][7] != 0);
+    CHECK(ui.pad_seen[4] == 0 && ui.pad_seen[12] == (1u << 6));
+}
+
 static void test_pad_key_note_off_goes_to_the_channel_it_started_on(void) {
     keys_step_held(2, 57);
     hold_pad(0, 7);
@@ -4867,6 +4910,8 @@ int main(int argc, char **argv) {
     RUN(test_pad_pressed_with_its_step_in_one_pass_launches_and_the_frame_agrees);
     RUN(test_pad_pressed_with_the_last_step_released_follows_the_snapshot);
     RUN(test_pad_pressed_as_a_key_clears_its_own_launcher_hold_only);
+    RUN(test_pad_pressed_as_a_key_on_a_later_page_is_no_copy_source);
+    RUN(test_pad_pressed_as_a_key_clears_its_launcher_hold_of_every_page);
     RUN(test_pad_key_note_off_goes_to_the_channel_it_started_on);
     RUN(test_pad_key_released_once_when_the_generation_changes);
     RUN(test_pad_key_pressed_in_a_poll_that_lost_sync_does_not_hang);
