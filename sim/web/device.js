@@ -61,10 +61,11 @@
       this.input(IN_GPIO, PIN.ENC[enc].b, 0, phase === 2 || phase === 3 ? 0 : 1, at);
     }
     // What the firmware inside can do (sim/build.sh reads it from the source):
-    // {lastNote, midiIn, padKeys, quantMutes}. An older core reports nothing.
+    // {lastNote, midiIn, padKeys, quantMutes, extClock}. An older core reports nothing.
     features() {
       const bits = this.core._sim_features ? this.core._sim_features() : 0;
-      return { lastNote: !!(bits & 1), midiIn: !!(bits & 2), padKeys: !!(bits & 4), quantMutes: !!(bits & 8) };
+      return { lastNote: !!(bits & 1), midiIn: !!(bits & 2), padKeys: !!(bits & 4), quantMutes: !!(bits & 8),
+               extClock: !!(bits & 16) };
     }
     // Whether this firmware reads its DIN input at all (older builds do not).
     midiInListening() {
@@ -170,6 +171,13 @@
         ledsSkipped: c._sim_leds_skipped(),
         eventsDropped: c._sim_events_dropped(),
         midiInOverruns: c._sim_dbg_midi_in_overruns ? c._sim_dbg_midi_in_overruns() : 0,   // absent in an older core
+        // The external clock (absent in an older core): source 0 INT, 1 EXT, 2 AUTO.
+        clockSource: c._sim_dbg_clock_source ? c._sim_dbg_clock_source() : 0,
+        following: c._sim_dbg_clock_state ? !!(c._sim_dbg_clock_state() & 1) : false,
+        armed: c._sim_dbg_clock_state ? !!(c._sim_dbg_clock_state() & 2) : false,
+        clockPresent: c._sim_dbg_clock_state ? !!(c._sim_dbg_clock_state() & 4) : false,
+        extBpm: c._sim_dbg_ext_tenths ? c._sim_dbg_ext_tenths() / 10 : 0,
+        extLosses: c._sim_dbg_ext_losses ? c._sim_dbg_ext_losses() : 0,
         fatal: fatal ? c.UTF8ToString(fatal) : null,
       };
     }

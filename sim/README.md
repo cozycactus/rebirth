@@ -11,7 +11,7 @@ The public page, https://cozycactus.github.io/rebirth/, always runs `master`
 ```bash
 sim/build.sh native        # native core + smoke test, needs only a C compiler
 sim/build.sh web           # WebAssembly cores and version.js, needs sim/emsdk (see the script)
-sim/check.sh               # every check for every score this firmware takes; `quick` for the device check only
+sim/check.sh               # every check for every score this firmware takes, then the clock check; `quick` skips the artist
 node sim/test/artist_check.js       # every song in every arrangement; SONG=3 FORM=sunrise plays one
 python3 -m http.server 8765 --bind 127.0.0.1 --directory sim/web   # then open http://localhost:8765
 ```
@@ -34,8 +34,11 @@ Hovering over a control of the panel or the page shows what it does.
 CI (`.github/workflows/ci.yml`, job Simulator) builds the simulator on every
 push and pull request with Emscripten 7.0.0 and runs `sim/check.sh`: the device
 check and the artist check (every song in every arrangement) for every score
-the firmware takes, plus the offline SH-101 audio checks. A firmware change
-that breaks the artist's gestures shows
+the firmware takes, plus the offline SH-101 audio checks, and, for a firmware
+that follows an external clock, the clock check (`sim/test/clock_check.js`:
+Clocks at 145 BPM on the DIN input, the shown tempo, Start, one Clock out per
+Clock in, Stop, Continue after an SPP, a lost clock in EXT and in AUTO). A
+firmware change that breaks the artist's gestures shows
 there, on its own pull request. On a push to
 `master` it also packages the page with `sim/publish.sh package`: the page,
 its scripts asked for with the commit (so a browser never mixes two builds),
@@ -59,10 +62,10 @@ write access on the site repository) and the repository variable
 | `src/rgb_leds.c` (PIO + DMA) | `sim/core/sim_rgb_leds.c`: same interface, same refusal of a frame within 3 ms of the last |
 | Five MCP23017: step buttons (0x20, steps 8/16 on 0x24), step LEDs (0x21), the key matrix (0x22 rows, 0x23 SCENE/MUTE columns) | Register models on a virtual I2C bus (`sim/core/hal.c`): IPOL, directions, pull-ups, output latches; a matrix row reads low through a closed key in a column driven low, and low too with its pull-up off (a chip that reset); chip reset, bus faults |
 | UART | A PL011 with its FIFO off: 320 us a byte, TX interrupt when the holding register empties |
-| Timer | One virtual microsecond clock; alarm 0 fires the real `sequencer_timer_isr` |
+| Timer | One virtual microsecond clock; alarm 0 fires the real `sequencer_timer_isr`; a forced alarm 1 interrupt (INTF bit 1, the external clock's doorbell) runs the real `sequencer_clock_in_isr` at once |
 | OLED | The 1024 bytes of each `ssd1309_flush()` |
 | Encoders, PLAY, gates, tempo LED | GPIO levels; an encoder detent is four quadrature edges |
-| MIDI IN | Bytes arrive on the UART's one-byte receiver, 320 us apart; a byte that finds the last one unread is lost, as when a flash erase keeps interrupts off |
+| MIDI IN | Bytes arrive on the UART's one-byte receiver, 320 us apart; a byte that finds the last one unread is lost, as when a flash erase keeps interrupts off. A byte arrives at its own time also while core 0 waits out a bus timeout |
 | MCP4822 | Decoded SPI words |
 | Flash | A 2 MiB array; erase and program take typical (not measured) times and stall both cores |
 

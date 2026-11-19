@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "sequencer.h"
 #include "midi_in.h"
 #include "kit.h"
@@ -147,6 +148,13 @@ typedef struct {
     uint8_t  thru_channel[128];     // channel a passed-through note sounds on, THRU_NONE = off
     bool     thru_release_pending[128]; // its Note Off was refused: tried again every pass
     uint8_t  thru_pending_count;
+
+    // The tempo the screens show this frame (update_shown_tempo): the prefix (NULL
+    // with INT), the value, and the external tempo's shown tenth, which moves only
+    // when the measurement leaves it by more than 0.07 BPM (0 = none shown).
+    const char *tempo_prefix;
+    float    tempo_bpm;
+    uint16_t ext_tenths;
 
     // Flash notification: shown for ~1 second, then cleared
     char     notify_msg[17];    // up to 16 chars
@@ -457,8 +465,9 @@ static void show_notify(const char *msg) {
     ui.notify_ticks = 30;
 }
 
+// PLAY. A start that waits for the external clock is cancelled like a stop.
 static void toggle_transport(void) {
-    if (g_seq.transport.state == TRANSPORT_PLAYING) {
+    if (transport_running()) {
         transport_stop();
     } else if (g_seq.transport.state == TRANSPORT_PAUSED) {
         transport_continue();
@@ -863,6 +872,17 @@ static void open_editor_on_long_press(uint16_t long_presses, ui_mode_t from) {
     }
 }
 
+// A VALUE turn on the tempo: 0.1 BPM a click, only while the internal timer is the
+// source (INT, or AUTO with no external clock); otherwise it says so.
+static void tempo_turn(int8_t amount) {
+    if (amount == 0) return;
+    if (!transport_tempo_is_internal()) {
+        show_notify("TEMPO EXT");
+        return;
+    }
+    transport_set_bpm(g_seq.transport.bpm + (float)amount * 0.1f);
+}
+
 static void handle_session_view(encoder_turn_t e1, encoder_turn_t e2,
                                 button_event_t e1b, button_event_t e2b,
                                 step_buttons_t *steps) {
@@ -872,10 +892,7 @@ static void handle_session_view(encoder_turn_t e1, encoder_turn_t e2,
     }
 
     // VALUE rotate: tempo.
-    if (e2.amount != 0) {
-        float new_bpm = g_seq.transport.bpm + (float)e2.amount * 0.1f;
-        transport_set_bpm(new_bpm);
-    }
+    tempo_turn(e2.amount);
 
     session_focus_t focus = session_get_focus();
 
@@ -955,10 +972,7 @@ static void navigate_pattern_view(encoder_turn_t e1, encoder_turn_t e2,
                                   button_event_t e1b, button_event_t e2b) {
     if (e1.detents != 0) walk_pattern_view(e1.detents);
 
-    if (e2.amount != 0) {
-        float new_bpm = g_seq.transport.bpm + (float)e2.amount * 0.1f;
-        transport_set_bpm(new_bpm);
-    }
+    tempo_turn(e2.amount);
 
     session_focus_t cell = pattern_view_cell();
     if (e1b == BTN_PRESS) {
@@ -1400,7 +1414,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
 
     // Step button 9 (index 8): save to flash
     if (steps->pressed & (1u << 8)) {
-        if (g_seq.transport.state != TRANSPORT_STOPPED) {
+        if (transport_running()) {
             show_notify("STOP TO SAVE");
         } else {
             thru_release_all();     // the stall would leave a held key sounding
@@ -1416,7 +1430,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
 
     // Step button 10 (index 9): load from flash
     if (steps->pressed & (1u << 9)) {
-        if (g_seq.transport.state != TRANSPORT_STOPPED) {
+        if (transport_running()) {
             show_notify("STOP TO LOAD");
         } else {
             thru_release_all();
@@ -1470,6 +1484,17 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
     if (steps->pressed & (1u << 13)) {
         if (g_seq.transport.state != TRANSPORT_STOPPED) show_notify("STOP FIRST");
         else if (!ui_open_midi_song()) show_notify("NO MIDI SONG");
+    }
+
+    // Step button 15 (index 14): the clock source, INT -> EXT -> AUTO (not saved)
+    if (steps->pressed & (1u << 14)) {
+        static const char *const names[CLOCK_SOURCE_COUNT] = {
+            "CLOCK INT", "CLOCK EXT", "CLOCK AUTO",
+        };
+        clock_source_t source = (clock_source_t)((transport_get_clock_source() + 1u) %
+                                                 CLOCK_SOURCE_COUNT);
+        transport_set_clock_source(source);
+        show_notify(names[source]);
     }
 }
 
@@ -1546,6 +1571,8 @@ static uint16_t build_pattern_select_mask(void) {
     mask |= (1u << 11);
     // Button 13 resets jitter stats.
     mask |= (1u << 12);
+    // Button 15 is lit while the clock source is not INT.
+    if (transport_get_clock_source() != CLOCK_SOURCE_INT) mask |= (1u << 14);
     return mask;
 }
 
@@ -2000,7 +2027,7 @@ static void render_session_view(const transport_snapshot_t *snap) {
     }
     display_draw_session_view(session_bank(), session_common_row(snap), snap->mode,
                               focus.track, focus.location, length,
-                              g_seq.transport.bpm, transport_get_launch_quant(),
+                              ui.tempo_bpm, transport_get_launch_quant(),
                               bar_step, lane, lane ? strip : NULL, playhead);
 }
 
@@ -2027,7 +2054,7 @@ static void render_pattern_view(const transport_snapshot_t *snap) {
         // A SYNTH roll prints the tempo in its own info column.
         if (pat->tracks[track].type == TRACK_TYPE_SYNTH) return;
     }
-    display_draw_bpm(g_seq.transport.bpm);
+    display_draw_bpm(ui.tempo_prefix, ui.tempo_bpm);
 }
 
 // A kit track's config lists its kit settings; the others keep their list.
@@ -2043,6 +2070,46 @@ static void render_track_config(void) {
 }
 
 // ─── UI Render (dispatches to display functions) ───────────────
+
+// The tempo the screens show, from the frame's snapshot. INT as always. With EXT and
+// AUTO the source comes first: "EXT" and the measured tempo while the external clock
+// is followed or (stopped) present, "EXT --.-" in EXT without one, "INT" and the
+// internal tempo when AUTO runs on its own timer. The prefix blinks while a start
+// waits for the first Clock.
+static void update_shown_tempo(const transport_snapshot_t *snap) {
+    if (snap->clock_source == CLOCK_SOURCE_INT) {
+        ui.tempo_prefix = NULL;
+        ui.tempo_bpm = snap->bpm;
+        ui.ext_tenths = 0;
+        display_set_tempo(NULL, 0.0f);      // the screens read transport.bpm
+        return;
+    }
+    bool clock = snap->ext_following || snap->ext_present;
+    bool external = snap->clock_source == CLOCK_SOURCE_EXT || snap->ext_following ||
+                    (snap->state != TRANSPORT_PLAYING && snap->ext_present);
+    float bpm = snap->bpm;
+    if (external) {
+        bpm = 0.0f;
+        if (clock && snap->ext_shown_x16) {
+            float measured = 40000000.0f / (float)snap->ext_shown_x16;  // 60e6 / (24 x interval)
+            if (measured > 999.9f) measured = 999.9f;
+            if (ui.ext_tenths == 0 || fabsf(measured * 10.0f - (float)ui.ext_tenths) > 0.7f) {
+                ui.ext_tenths = (uint16_t)(measured * 10.0f + 0.5f);
+            }
+            bpm = (float)ui.ext_tenths / 10.0f;
+        } else {
+            ui.ext_tenths = 0;
+        }
+    } else {
+        ui.ext_tenths = 0;
+    }
+    const char *prefix = external ? "EXT" : "INT";
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (snap->ext_armed && (now_ms / 250u) % 2u) prefix = "   ";
+    ui.tempo_prefix = prefix;
+    ui.tempo_bpm = bpm;
+    display_set_tempo(prefix, bpm);
+}
 
 bool ui_open_midi_song(void) {
     if (!transport_open_midi_song()) return false;
@@ -2098,6 +2165,7 @@ void ui_render(void) {
     transport_snapshot_t snap;
     sequencer_snapshot(&snap);
     update_panel_lights(&snap);
+    update_shown_tempo(&snap);
 
     switch (ui.mode) {
         case UI_SESSION:

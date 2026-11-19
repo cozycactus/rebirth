@@ -68,7 +68,7 @@ void sim_chip_reset(int addr);                  // brown-out: registers back to 
 
 // Bit mask of what the firmware this core was built from can do, read from its
 // source by sim/build.sh: 1 last note and clip copy, 2 MIDI input, 4 pad keyboard,
-// 8 MUTE waits for the launch point.
+// 8 MUTE waits for the launch point, 16 it follows an external MIDI clock.
 int sim_features(void);
 
 // ─── Flash image (last 128 KiB of the 2 MiB), for keeping a save ─
@@ -94,6 +94,10 @@ uint32_t sim_dbg_overruns(void);
 int sim_dbg_midi_overflow(void);
 uint32_t sim_dbg_midi_in_overruns(void);         // bytes lost in the UART's one-byte receiver
 uint32_t sim_dbg_lock_errors(void);
+int sim_dbg_clock_source(void);                 // 0 INT, 1 EXT, 2 AUTO
+int sim_dbg_clock_state(void);                  // bit 0 following the Clock, 1 armed, 2 Clocks present
+int sim_dbg_ext_tenths(void);                   // the measured external tempo in 0.1 BPM, 0 = none
+uint32_t sim_dbg_ext_losses(void);              // followed clocks lost
 const char *sim_dbg_fatal(void);                // NULL while healthy
 
 #endif

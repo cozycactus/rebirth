@@ -31,7 +31,7 @@ unsigned fake_gate_rises;
 void (*fake_before_gate_commit)(void);
 void (*fake_before_lock)(spin_lock_t *lock);
 void (*fake_before_lockout)(void);
-void (*fake_irq_handlers[2])(void);
+void (*fake_irq_handlers[FAKE_IRQ_COUNT])(void);
 static spin_lock_t locks[32];
 static unsigned next_lock;
 _Alignas(256) uint8_t fake_flash[2 * 1024 * 1024] = {0};

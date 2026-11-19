@@ -624,11 +624,12 @@ static void test_midi_in_ring_wraps_over_several_rounds(void) {
     uint8_t next_in = 0, next_out = 0, byte = 0;
     for (unsigned round = 0; round < 7; round++) {
         uint8_t chunk[MIDI_IN_RING_SIZE - 5 + (round % 3)];
-        for (unsigned i = 0; i < sizeof(chunk); i++) chunk[i] = next_in++;
+        // Data bytes only: Clock, Start, Continue and Stop go to the external clock.
+        for (unsigned i = 0; i < sizeof(chunk); i++) chunk[i] = (uint8_t)(next_in++ & 0x7F);
         rx_push(chunk, sizeof(chunk));
         for (unsigned i = 0; i < sizeof(chunk); i++) {
             CHECK(midi_in_read(&byte));
-            CHECK(byte == next_out++);
+            CHECK(byte == (uint8_t)(next_out++ & 0x7F));
         }
         CHECK(!midi_in_read(&byte));
     }
@@ -671,11 +672,17 @@ static void test_midi_in_does_not_change_what_is_transmitted(void) {
     CHECK(fake_midi_length == sizeof(sent));
     CHECK(memcmp(fake_midi, sent, sizeof(sent)) == 0);
     CHECK(fake_uart_rx_pending() == 0);
+    // The Clock went to the external clock, the rest to the note ring.
     uint8_t byte = 0;
     for (unsigned i = 0; i < sizeof(input); i++) {
+        if (input[i] == MIDI_CLOCK) continue;
         CHECK(midi_in_read(&byte));
         CHECK(byte == input[i]);
     }
+    CHECK(!midi_in_read(&byte));
+    clock_in_event_t ev;
+    CHECK(clock_in_pop(&ev) && ev.kind == CLOCK_IN_TICK);
+    CHECK(!clock_in_pop(&ev));
 }
 
 static void play_song_entries(unsigned entries) {

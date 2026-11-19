@@ -1,7 +1,8 @@
 #!/bin/sh
 # Checks the built simulator (sim/web/core.js) the way the page will use it:
 # for every score the page offers on this firmware, the device check and,
-# unless `quick`, the artist check (every song in every arrangement).
+# unless `quick`, the artist check (every song in every arrangement); then,
+# when the firmware follows an external clock, the clock check.
 #   sim/check.sh          - all of it, seconds per score
 #   sim/check.sh quick    - the device check only
 # Which scores fit is read from the core, as the page does (app.js, initKeyboard):
@@ -56,3 +57,9 @@ for score in $SCORES; do
         exit 1
     fi
 done
+
+# The external clock, once: it does not depend on the score.
+if node -e 'require("./sim/web/core.js")().then(c => process.exit(c._sim_features && (c._sim_features() & 16) ? 0 : 1))'; then
+    echo "── external clock check"
+    node sim/test/clock_check.js
+fi

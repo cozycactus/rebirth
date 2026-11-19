@@ -3900,7 +3900,7 @@ static void test_midi_note_off_leaves_room_for_the_sequencer(void) {
 // may have overflowed and lost a Note Off.
 static void test_midi_input_from_before_the_ui_started_is_dropped(void) {
     uint8_t stream[3 + 61 + 3] = { KEY_ON, 60, 100 };
-    memset(stream + 3, 0xF8, 61);
+    memset(stream + 3, 0xFE, 61);           // Active Sensing: into the ring, ignored there
     stream[64] = KEY_OFF; stream[65] = 60; stream[66] = 0;     // does not fit the ring
     fake_uart_rx_push(stream, sizeof(stream));
     fake_irq_handlers[UART0_IRQ]();
@@ -3950,10 +3950,11 @@ static void test_midi_lost_bytes_are_a_gap(void) {
     step_down(1u << 2);
     MIDI_UPDATE(KEY_ON, 60, 100, 64, 100);
     CHECK(STEP(0, 2).note == 64);
-    // Between two updates more bytes arrive than the ring holds: 62 clock bytes, then a
-    // Note On cut after its note, and the rest of the stream lost.
+    // Between two updates more bytes arrive than the ring holds: 62 Active Sensing
+    // bytes (a Clock would go to the external clock instead), then a Note On cut after
+    // its note, and the rest of the stream lost.
     uint8_t burst[MIDI_IN_RING_SIZE + 8];
-    memset(burst, 0xF8, sizeof(burst));
+    memset(burst, 0xFE, sizeof(burst));
     burst[MIDI_IN_RING_SIZE - 2] = KEY_ON;
     burst[MIDI_IN_RING_SIZE - 1] = 70;
     midi_arrives(burst, sizeof(burst));
@@ -4660,6 +4661,148 @@ static void test_step_edit_long_press_without_a_key_still_toggles(void) {
     step_down(1u << 0);
     long_step(0);
     CHECK(STEP(0, 0).flags == STEP_FLAG_ACTIVE);
+}
+
+// ─── External clock ────────────────────────────────────────────
+
+// Text row y (8 pixels) across the whole width shows exactly `text` drawn at x.
+static bool row_is(uint8_t y, uint8_t x, const char *text) {
+    uint8_t saved[OLED_BUF_SIZE];
+    static bool actual[8][OLED_WIDTH];
+    memcpy(saved, ssd1309_get_framebuffer(), sizeof(saved));
+    for (int r = 0; r < 8; r++) {
+        for (int c = 0; c < OLED_WIDTH; c++) actual[r][c] = px(c, y + r);
+    }
+    display_clear();
+    ssd1309_draw_string(x, y, text, false);
+    bool same = true;
+    for (int r = 0; r < 8; r++) {
+        for (int c = 0; c < OLED_WIDTH; c++) if (actual[r][c] != px(c, y + r)) same = false;
+    }
+    memcpy(ssd1309_get_framebuffer(), saved, sizeof(saved));
+    return same;
+}
+
+// The cells `text` covers at (x, y) show exactly it.
+static bool text_is(uint8_t x, uint8_t y, const char *text) {
+    uint8_t saved[OLED_BUF_SIZE];
+    static bool actual[8][OLED_WIDTH];
+    unsigned width = FONT_CHAR_W * (unsigned)strlen(text);
+    memcpy(saved, ssd1309_get_framebuffer(), sizeof(saved));
+    for (int r = 0; r < 8; r++) {
+        for (unsigned c = 0; c < width; c++) actual[r][c] = px((int)(x + c), y + r);
+    }
+    display_clear();
+    ssd1309_draw_string(x, y, text, false);
+    bool same = true;
+    for (int r = 0; r < 8; r++) {
+        for (unsigned c = 0; c < width; c++) if (actual[r][c] != px((int)(x + c), y + r)) same = false;
+    }
+    memcpy(ssd1309_get_framebuffer(), saved, sizeof(saved));
+    return same;
+}
+
+// `count` Clocks 17,241 us apart (145 BPM) through the UART interrupt and core 1.
+static void clocks_in(unsigned count) {
+    for (unsigned i = 0; i < count; i++) {
+        timer_hw->timerawl += 17241;
+        uint8_t clock = MIDI_CLOCK;
+        fake_uart_rx_push(&clock, 1);
+        fake_irq_handlers[UART0_IRQ]();
+        if (timer_hw->intf & (1u << CLOCK_IN_ALARM)) sequencer_clock_in_isr();
+    }
+}
+
+static void test_step_15_cycles_the_clock_source(void) {
+    press_encoder(1, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    ui_update();
+    CHECK(!(led_mask & (1u << 14)));
+    press_step(14);
+    CHECK(transport_get_clock_source() == CLOCK_SOURCE_EXT);
+    CHECK(strcmp(ui.notify_msg, "CLOCK EXT") == 0);
+    CHECK(led_mask & (1u << 14));
+    release_step(14);
+    press_step(14);
+    CHECK(transport_get_clock_source() == CLOCK_SOURCE_AUTO);
+    CHECK(strcmp(ui.notify_msg, "CLOCK AUTO") == 0);
+    release_step(14);
+    press_step(14);
+    CHECK(transport_get_clock_source() == CLOCK_SOURCE_INT);
+    CHECK(!(led_mask & (1u << 14)));
+    // Shown beside the queue line.
+    transport_set_clock_source(CLOCK_SOURCE_AUTO);
+    ui.notify_ticks = 0;
+    display_clear();
+    ui_render();
+    CHECK(text_is(OLED_WIDTH - FONT_CHAR_W * 8, 30, "CLK AUTO"));
+}
+
+static void test_value_turns_set_the_tempo_only_on_the_internal_timer(void) {
+    turn(1, 5);
+    CHECK(fabsf(g_seq.transport.bpm - 120.5f) < 0.01f);
+    transport_set_clock_source(CLOCK_SOURCE_EXT);
+    turn(1, 5);
+    CHECK(fabsf(g_seq.transport.bpm - 120.5f) < 0.01f);
+    CHECK(strcmp(ui.notify_msg, "TEMPO EXT") == 0);
+    // AUTO: the knob works until Clocks arrive.
+    transport_set_clock_source(CLOCK_SOURCE_AUTO);
+    turn(1, -5);
+    CHECK(fabsf(g_seq.transport.bpm - 120.0f) < 0.01f);
+    clocks_in(5);
+    turn(1, 5);
+    CHECK(fabsf(g_seq.transport.bpm - 120.0f) < 0.01f);
+}
+
+static void test_session_tempo_line_names_the_source(void) {
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "120.0 BPM TRACK LOOP"));
+    transport_set_clock_source(CLOCK_SOURCE_EXT);
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "EXT  --.- TRACK LOOP"));
+    clocks_in(150);
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "EXT 145.0 TRACK LOOP"));
+    // AUTO with Clocks arriving shows them; without, its own tempo.
+    transport_set_clock_source(CLOCK_SOURCE_AUTO);
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "EXT 145.0 TRACK LOOP"));
+    timer_hw->timerawl += 500000;           // the Clocks stopped half a second ago
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "INT 120.0 TRACK LOOP"));
+}
+
+static void test_pattern_view_tempo_ends_left_of_the_transport_symbol(void) {
+    transport_set_clock_source(CLOCK_SOURCE_EXT);
+    clocks_in(150);
+    press_encoder(0, BTN_PRESS);            // Session -> Pattern view
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    // A DRUM track: the step grid view with the tempo top right.
+    ui.selected_track = 4;
+    display_clear();
+    ui_render();
+    CHECK(text_is(OLED_WIDTH - FONT_CHAR_W * 2 - FONT_CHAR_W * 9, 0, "EXT 145.0"));
+}
+
+static void test_play_arms_in_ext_and_save_waits(void) {
+    transport_set_clock_source(CLOCK_SOURCE_EXT);
+    panel(PANEL_PLAY, 0, 0);
+    CHECK(transport_armed() && g_seq.transport.state == TRANSPORT_STOPPED);
+    press_encoder(1, BTN_LONG_PRESS);
+    step_buttons.pressed = 1u << 8;
+    ui_update();
+    CHECK(fake_flash_erases == 0);
+    CHECK(strcmp(ui.notify_msg, "STOP TO SAVE") == 0);
+    panel(PANEL_PLAY, 0, 0);                // PLAY again: no longer armed
+    CHECK(!transport_armed() && g_seq.transport.state == TRANSPORT_STOPPED);
+    panel(PANEL_PLAY, 0, 0);
+    clocks_in(1);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
 }
 
 // ─── Quantised MUTE and mute groups ────────────────────────────
@@ -5394,6 +5537,11 @@ int main(int argc, char **argv) {
     RUN(test_selector_short_press_mutes_on_release);
     RUN(test_selector_leds_show_stored_mutes);
     RUN(test_flash_controls_are_blocked_during_playback);
+    RUN(test_step_15_cycles_the_clock_source);
+    RUN(test_value_turns_set_the_tempo_only_on_the_internal_timer);
+    RUN(test_session_tempo_line_names_the_source);
+    RUN(test_pattern_view_tempo_ends_left_of_the_transport_symbol);
+    RUN(test_play_arms_in_ext_and_save_waits);
     RUN(test_song_mode_has_a_return_to_pattern_playback);
     RUN(test_song_editor_lights_its_three_buttons);
     RUN(test_nonplaying_editor_hides_playhead);

@@ -56,10 +56,38 @@ void display_draw_text(uint8_t x, uint8_t y, const char *text) {
 
 // ─── BPM Display ───────────────────────────────────────────────
 
-void display_draw_bpm(float bpm) {
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%5.1f", (double)bpm);
-    ssd1309_draw_string(78, 0, buf, false);
+static const char *tempo_prefix;    // NULL: INT, shown as always
+static float tempo_bpm;             // 0: transport.bpm (no prefix) or not known
+
+void display_set_tempo(const char *prefix, float bpm) {
+    tempo_prefix = prefix;
+    tempo_bpm = bpm;
+}
+
+// The tempo the screens show; <= 0 when an external one is not known.
+static float shown_bpm(void) {
+    if (!tempo_prefix && tempo_bpm <= 0.0f) return g_seq.transport.bpm;
+    return tempo_bpm;
+}
+
+// "%5.1f", or with a prefix "EXT 145.0" / "EXT  --.-".
+static void format_tempo(char *buf, size_t size, const char *prefix, float bpm) {
+    if (!prefix) {
+        snprintf(buf, size, "%5.1f", (double)bpm);
+    } else if (bpm > 0.0f) {
+        snprintf(buf, size, "%s %5.1f", prefix, (double)bpm);
+    } else {
+        snprintf(buf, size, "%s  --.-", prefix);
+    }
+}
+
+void display_draw_bpm(const char *prefix, float bpm) {
+    char buf[12];
+    format_tempo(buf, sizeof(buf), prefix, bpm);
+    // Without a prefix at x 78 as always; with one it ends left of the transport
+    // symbol, clear of the header (at most 10 characters).
+    uint8_t x = prefix ? (uint8_t)(OLED_WIDTH - FONT_CHAR_W * 2 - FONT_CHAR_W * strlen(buf)) : 78;
+    ssd1309_draw_string(x, 0, buf, false);
 }
 
 // ─── Step Grid (shared by multiple views) ──────────────────────
@@ -256,8 +284,15 @@ void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mod
     }
     ssd1309_draw_string(0, 14, line, false);
 
-    snprintf(line, sizeof(line), "%5.1f BPM %s", (double)bpm,
-             display_launch_quant_name(quant));
+    if (tempo_prefix) {
+        // "EXT 145.0 1 BAR": the prefix takes the place of the word BPM.
+        char tempo[12];
+        format_tempo(tempo, sizeof(tempo), tempo_prefix, bpm);
+        snprintf(line, sizeof(line), "%s %s", tempo, display_launch_quant_name(quant));
+    } else {
+        snprintf(line, sizeof(line), "%5.1f BPM %s", (double)bpm,
+                 display_launch_quant_name(quant));
+    }
     ssd1309_draw_string(0, 28, line, false);
 
     uint8_t bar_y = BAR_Y, bar_h = BAR_H;
@@ -476,7 +511,12 @@ static void draw_piano_roll(const pattern_t *p, uint8_t track, uint8_t play_step
     char note_str[5];
     note_to_str((uint8_t)base, note_str);
     ssd1309_draw_string(0, 48, note_str, false);
-    snprintf(text, sizeof(text), "%d", (int)(g_seq.transport.bpm + 0.5f));
+    float bpm = shown_bpm();
+    if (bpm > 0.0f) {
+        snprintf(text, sizeof(text), "%d", (int)(bpm + 0.5f));
+    } else {
+        snprintf(text, sizeof(text), "--");
+    }
     ssd1309_draw_string(0, 56, text, false);
 
     // Held step marker in column 23, the spare column of the info column. It
@@ -681,6 +721,12 @@ void display_draw_pattern_select(uint8_t pattern,
     } else {
         ssd1309_draw_string(12, 30, "Queued: ---", false);
     }
+    // The clock source (step 15), right of the queue line.
+    static const char *const sources[CLOCK_SOURCE_COUNT] = {"INT", "EXT", "AUTO"};
+    char clk[9];
+    snprintf(clk, sizeof(clk), "CLK %s",
+             g_seq.clock_source < CLOCK_SOURCE_COUNT ? sources[g_seq.clock_source] : "?");
+    ssd1309_draw_string(OLED_WIDTH - FONT_CHAR_W * (uint8_t)strlen(clk), 30, clk, false);
 
     char len[22];
     snprintf(len, sizeof(len), "Len: %2d step", length);
@@ -705,10 +751,17 @@ void display_draw_pattern_select(uint8_t pattern,
         ssd1309_draw_string(0, 8, drops, false);
     }
     char jit_line[22];
-    snprintf(jit_line, sizeof(jit_line), "J:%ld P:%lu I:%lu",
-             (long)jit.max_irq_latency_us,
-             (unsigned long)jit.max_abs_period_error_us,
-             (unsigned long)jit.max_isr_duration_us);
+    if (g_seq.clock_source != CLOCK_SOURCE_INT) {
+        // The external clock: largest Clock deviation, losses, bursts caught up.
+        snprintf(jit_line, sizeof(jit_line), "X:%lu L:%lu C:%lu",
+                 (unsigned long)jit.ext_max_dev_us, (unsigned long)jit.ext_losses,
+                 (unsigned long)jit.ext_catchups);
+    } else {
+        snprintf(jit_line, sizeof(jit_line), "J:%ld P:%lu I:%lu",
+                 (long)jit.max_irq_latency_us,
+                 (unsigned long)jit.max_abs_period_error_us,
+                 (unsigned long)jit.max_isr_duration_us);
+    }
     ssd1309_draw_string(0, 56, jit_line, false);
 }
 
@@ -797,7 +850,7 @@ static void kit_config_row(const track_config_t *tc, const kit_config_t *kc, uin
             break;
         case KIT_PARAM_FLAM: {
             // Pulses, and their time at the current tempo.
-            float bpm = g_seq.transport.bpm;
+            float bpm = shown_bpm();
             float ms = bpm > 0.0f ? (float)kc->flam_pulses * 60000.0f / (bpm * (float)PPQN) : 0.0f;
             snprintf(label, sizeof(label), "FLAM");
             snprintf(value, sizeof(value), "%u %.1fms", (unsigned)kc->flam_pulses, (double)ms);
