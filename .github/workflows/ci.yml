@@ -105,6 +105,12 @@ jobs:
           path: build/pico2-release/rebirth_pico2.uf2
           if-no-files-found: error
 
+      - name: Configure firmware for Rev B
+        run: cmake --preset revb-rp2354b
+
+      - name: Build firmware for Rev B
+        run: cmake --build --preset revb-rp2354b --parallel
+
   simulator:
     name: Simulator (build and checks)
     runs-on: ubuntu-latest
