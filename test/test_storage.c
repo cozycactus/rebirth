@@ -347,6 +347,64 @@ static void test_legacy_images(void) {
     CHECK(!flash_storage_load());
 }
 
+// ─── A current slot with no valid save, next to an old save ────
+// A save cut short leaves the current slot looking exactly like one that was
+// never written, so the two cannot be told apart. Whenever the current slot
+// holds no valid save the load gives the eight-track one, and its result says
+// which save it gave.
+static void test_load_falls_back_on_the_old_save(void) {
+    fill_project(true);
+    ram_take();
+    fake_flash_programs = 0;
+    CHECK(flash_storage_save());
+    unsigned calls = fake_flash_programs;
+    write_legacy_image(6);                  // the old save; the current slot is blank again
+
+    // Never saved in the current format.
+    scribble_ram();
+    CHECK(flash_storage_load() == FLASH_LOAD_OLD_SAVE);
+    check_migrated(6);
+
+    // A save cut short with only its header missing.
+    ram_restore();
+    fake_flash_programs = 0;
+    fake_flash_program_limit = calls - 1;
+    CHECK(!flash_storage_save());
+    fake_flash_program_limit = UINT32_MAX;
+    CHECK(((store_header_t *)IMG)->magic != MAGIC);
+    scribble_ram();
+    CHECK(flash_storage_is_valid());
+    CHECK(flash_storage_load() == FLASH_LOAD_OLD_SAVE);
+    check_migrated(6);
+
+    // The header landed, part of the payload did not. The save must not pass
+    // for done because an old save is there.
+    ram_restore();
+    fake_flash_programs = 0;
+    fake_flash_program_skip = 0;
+    CHECK(!flash_storage_save());
+    fake_flash_program_skip = UINT32_MAX;
+    CHECK(((store_header_t *)IMG)->magic == MAGIC);
+    scribble_ram();
+    CHECK(flash_storage_is_valid());
+    CHECK(flash_storage_load() == FLASH_LOAD_OLD_SAVE);
+    check_migrated(6);
+
+    // A valid current save wins over the old one.
+    ram_restore();
+    CHECK(flash_storage_save());
+    scribble_ram();
+    CHECK(flash_storage_load() == FLASH_LOAD_OK);
+    CHECK(ram_unchanged());
+
+    // Neither is valid: nothing is loaded.
+    IMG[PAT_OFFSET] ^= 1;
+    (fake_flash + OLD_STORE)[V6_KIT_OFFSET] ^= 1;
+    CHECK(!flash_storage_is_valid());
+    CHECK(flash_storage_load() == FLASH_LOAD_FAILED);
+    CHECK(ram_unchanged());
+}
+
 enum { BAD_BIT24, BAD_AC2, BAD_NOTE, BAD_VEL0, BAD_FLAM13, BAD_THREE_KITS, BAD_COUNT };
 
 static void apply_bad(int which, pattern_t *patterns, kit_config_t *kits) {
@@ -565,10 +623,12 @@ int main(void) {
     test_load_resyncs_panel_input();
     test_v7_round_trip();
     test_legacy_images();
+    test_load_falls_back_on_the_old_save();
     test_v6_rejections();
     test_copies_one_pattern_per_lock_section();
     puts("PASS storage round-trip, playback guard, checksum, legacy validation, "
          "interrupted save, late MIDI before erase, resync after save and load, "
-         "v6 kits, v4/v5 migration, v6 rejections, one pattern per lock section");
+         "v6 kits, v4/v5/v6 migration, fallback on the old save, v6 rejections, "
+         "one pattern per lock section");
     return 0;
 }

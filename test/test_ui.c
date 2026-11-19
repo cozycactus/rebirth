@@ -654,6 +654,49 @@ static void test_play_pressed_during_panic_does_not_fire_after_it(void) {
     CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
 }
 
+// An eight-track save (version 4: no checksum) of the locations in RAM, where
+// the firmware before 64 tracks kept it: the last 128 KiB. A record holds the
+// first eight tracks; the song after the records is empty.
+static void write_old_save(void) {
+    typedef struct {
+        step_t steps[8][STEPS_PER_PATTERN];
+        track_config_t tracks[8];
+        uint8_t length, track_length[8], swing;
+        char name[9];
+    } old_pattern_t;
+    uint8_t *old = fake_flash + 0x001e0000u;
+    memset(old, 0, 128u * 1024);
+    memcpy(old, &(uint32_t){0x52425448u}, sizeof(uint32_t));    // 'RBTH'
+    old[4] = 4;
+    for (uint8_t i = 0; i < MAX_PATTERNS; i++) {
+        const pattern_t *p = &g_seq.patterns[i];
+        old_pattern_t record;
+        memset(&record, 0, sizeof(record));
+        memcpy(record.steps, p->steps, sizeof(record.steps));
+        memcpy(record.tracks, p->tracks, sizeof(record.tracks));
+        memcpy(record.track_length, p->track_length, sizeof(record.track_length));
+        memcpy(record.name, p->name, sizeof(record.name));
+        record.length = p->length;
+        record.swing = p->swing;
+        memcpy(old + 256 + i * sizeof(record), &record, sizeof(record));
+    }
+}
+
+// With no valid current save a load gives the eight-track one, and the notice
+// names it: it may be older than the save the user meant.
+static void test_load_of_the_old_save_says_so(void) {
+    memset(fake_flash, 0xFF, sizeof(fake_flash));
+    pattern_set_step(&g_seq.patterns[5], 2, 3, 64, 100, STEP_FLAG_ACTIVE);
+    write_old_save();
+    pattern_clear(&g_seq.patterns[5]);
+    press_encoder(1, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    step_down(1u << 9);                     // step 10: load
+    CHECK(strcmp(ui.notify_msg, "OLD SAVE LOADED") == 0);
+    CHECK(g_seq.patterns[5].steps[2][3].note == 64);
+    memset(fake_flash, 0xFF, sizeof(fake_flash));
+}
+
 static void test_step_held_through_save_or_load_does_not_mute(void) {
     press_encoder(1, BTN_LONG_PRESS);
     CHECK(ui.mode == UI_PATTERN_SELECT);
@@ -4736,6 +4779,7 @@ int main(int argc, char **argv) {
     RUN(test_second_held_step_does_not_toggle_in_the_editor);
     RUN(test_play_pressed_during_panic_does_not_fire_after_it);
     RUN(test_step_held_through_save_or_load_does_not_mute);
+    RUN(test_load_of_the_old_save_says_so);
     RUN(test_kit_step_cycles_on_release);
     RUN(test_kit_ac_toggle_and_ch_clears_oh);
     RUN(test_kit_step_beyond_length_does_nothing);

@@ -1307,7 +1307,13 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
             thru_release_all();
             midi_wait_output_idle();
             thru_retry_releases();
-            show_notify(flash_storage_load() ? "LOADED OK" : "LOAD FAILED");
+            // The eight-track save is named: it may not be the last one made.
+            static const char *const loaded[] = {
+                [FLASH_LOAD_FAILED] = "LOAD FAILED",
+                [FLASH_LOAD_OK] = "LOADED OK",
+                [FLASH_LOAD_OLD_SAVE] = "OLD SAVE LOADED",
+            };
+            show_notify(loaded[flash_storage_load()]);
             midi_in_gap();
             drop_step_gestures();
             drop_pad_holds();       // also when nothing was loaded
