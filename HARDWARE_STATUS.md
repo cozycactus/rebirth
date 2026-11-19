@@ -255,6 +255,11 @@ input circuit is the MIDI keyboard's (above).
 - A pad, a step button and PLAY held through a flash save/load, and through a
   panic, do nothing once released.
 - PLAY debounce (20 ms) on the real switch: one press, one start or stop.
+- `NOT VERIFIED` Quantised MUTE on the real panel: how the white flash of a
+  waiting change (white on odd sixteenths) and the steady white of a collected
+  group read against the track colours and the bank blinks, and holding one
+  MUTE key while pressing another on the real matrix (both reported, the held
+  key's release after the other's press).
 
 ## Known Follow-Ups
 

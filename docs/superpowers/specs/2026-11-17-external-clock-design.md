@@ -240,7 +240,7 @@ period error.
 - `sim_dbg_clock_source`, `sim_dbg_ext_tenths` (the shown tempo) and
   `sim_dbg_clock_state` let the check read the state.
 - `sim/test/clock_check.js`, run by `sim/check.sh` when the core reports
-  feature 8 (external clock): sets EXT from the panel, sends 145 BPM, checks
+  feature 16 (external clock): sets EXT from the panel, sends 145 BPM, checks
   the shown tempo, Start, one Clock out per Clock in, steps on the Clocks,
   Stop, a lost clock (stopped, gates low, Stop out), AUTO playing on through a
   loss and locking again, and Continue after an SPP.

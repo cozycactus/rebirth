@@ -95,6 +95,14 @@ static rgb_t mute_light(const led_state_t *s, uint8_t track) {
     if (focus) base = muted ? shade(WHITE, LED_LEVEL_DIM) : shade(TRACK_HUE[track % PANEL_TRACKS], LED_LEVEL_FULL);
     else       base = muted ? OFF : shade(TRACK_HUE[track % PANEL_TRACKS], LED_LEVEL_HALF);
 
+    // A group member is steady white. A change that waits flashes white on
+    // the odd sixteenths and shows the normal light between; while it waits
+    // the bank blinks are not shown.
+    if ((s->mute_group >> track) & 1u) return shade(WHITE, LED_LEVEL_FULL);
+    if ((s->mute_pending >> track) & 1u) {
+        return (s->pulse / (PPQN / 4)) % 2 == 1 ? shade(WHITE, LED_LEVEL_FULL) : base;
+    }
+
     bool blink;
     bool on;
     if (is_queued(s, track) && outside_bank(s, s->queued[track])) {

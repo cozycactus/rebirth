@@ -61,10 +61,11 @@
       this.input(IN_GPIO, PIN.ENC[enc].b, 0, phase === 2 || phase === 3 ? 0 : 1, at);
     }
     // What the firmware inside can do (sim/build.sh reads it from the source):
-    // {lastNote, midiIn, padKeys, extClock}. An older core reports nothing.
+    // {lastNote, midiIn, padKeys, quantMutes, extClock}. An older core reports nothing.
     features() {
       const bits = this.core._sim_features ? this.core._sim_features() : 0;
-      return { lastNote: !!(bits & 1), midiIn: !!(bits & 2), padKeys: !!(bits & 4), extClock: !!(bits & 8) };
+      return { lastNote: !!(bits & 1), midiIn: !!(bits & 2), padKeys: !!(bits & 4), quantMutes: !!(bits & 8),
+               extClock: !!(bits & 16) };
     }
     // Whether this firmware reads its DIN input at all (older builds do not).
     midiInListening() {

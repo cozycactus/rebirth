@@ -480,6 +480,32 @@ static void test_stop_and_continue_between_sub_pulses(void) {
     CHECK(fake_midi[sent] == MIDI_CONTINUE && fake_midi[sent + 1] == MIDI_CLOCK);
 }
 
+// A MUTE change made while following waits for the bar, which comes with its Clock;
+// a Stop from the wire drops a waiting one.
+static void test_a_waiting_mute_lands_on_the_bar_of_the_clock(void) {
+    reset(CLOCK_SOURCE_EXT);
+    every_step();
+    uint32_t t = now() + 1000;
+    wire(t, MIDI_START);
+    uint32_t last = clocks(t + T145, T145, 2);  // pulses 0-7: the bar's launch point is past
+    transport_toggle_mutes(TRACK_BIT(0));
+    CHECK(g_seq.mute_pending == TRACK_BIT(0) && g_seq.track_mutes == 0);
+    last = clocks(last + T145, T145, 94);       // Clocks 2-95: up to pulse 383
+    run_until(last + T145 - 10);
+    CHECK(g_seq.transport.pulse_count == 384);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == TRACK_BIT(0));
+    CHECK(note_ons(0, 40) == 1 && note_ons(0, 55) == 1);
+    wire(last + T145, MIDI_CLOCK);              // Clock 96: the second bar
+    CHECK(g_seq.track_mutes == TRACK_BIT(0) && g_seq.mute_pending == 0);
+    CHECK(note_ons(0, 40) == 1);                // its downbeat is muted
+    // A change back to audible waits, and the wire's Stop drops it.
+    transport_toggle_mutes(TRACK_BIT(0));
+    CHECK(g_seq.mute_pending == TRACK_BIT(0));
+    wire(last + T145 + 5000, MIDI_STOP);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED && g_seq.mute_pending == 0);
+    CHECK(g_seq.track_mutes == TRACK_BIT(0));
+}
+
 static void test_wire_transport_is_ignored_with_int(void) {
     reset(CLOCK_SOURCE_INT);
     every_step();
@@ -924,6 +950,7 @@ int main(void) {
     RUN(test_the_backlog_is_capped);
     RUN(test_two_kits_flamming_through_bursts_never_overflow);
     RUN(test_stop_and_continue_between_sub_pulses);
+    RUN(test_a_waiting_mute_lands_on_the_bar_of_the_clock);
     RUN(test_wire_transport_is_ignored_with_int);
     RUN(test_play_arms_in_ext_and_cancels);
     RUN(test_auto_starts_on_its_own_timer_without_a_clock);
