@@ -5,6 +5,7 @@
 #include "sequencer.h"
 #include "midi_in.h"
 #include "kit.h"
+#include "midi_song.h"
 #include "ssd1309.h"
 #include "encoder.h"
 #include "mcp23017.h"
@@ -44,6 +45,7 @@ typedef enum {
     UI_TRACK_CONFIG,        // Track settings
     UI_SONG_EDIT,           // Song chain editor
     UI_KIT_STEP_EDIT,       // One kit step: all 12 lanes
+    UI_MIDI_SONG,           // Timed MIDI Song playback, eight tracks per page
 } ui_mode_t;
 
 // ─── UI State ──────────────────────────────────────────────────
@@ -82,6 +84,7 @@ typedef struct {
     // SONG_EDIT
     uint16_t song_cursor;           // Position in song
     uint8_t  song_field;            // 0=pattern, 1=repeats
+    uint8_t  midi_page;
 
     // Tempo LED
     uint32_t last_blink_ms;
@@ -114,8 +117,8 @@ typedef struct {
     // For each pad pressed as a key the note it stands for plus one (0 = not a
     // key) and the panel layer's generation then. A key is released by what
     // was remembered at its press, not by whether the keyboard is still on.
-    uint8_t  pad_key[NUM_TRACKS][PAD_ROWS];
-    uint32_t pad_key_generation[NUM_TRACKS][PAD_ROWS];
+    uint8_t  pad_key[PANEL_TRACKS][PAD_ROWS];
+    uint32_t pad_key_generation[PANEL_TRACKS][PAD_ROWS];
     // Steps a key has written to during the hold of their button in the step
     // editor: that hold is a modifier, so its long press does not toggle.
     uint16_t key_wrote;
@@ -464,6 +467,7 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
         thru_forget();
         midi_in_flush();
         midi_in_parser_reset(&ui.midi_parser);
+        if (ui.mode == UI_MIDI_SONG) transport_set_mode(PLAY_MODE_PATTERN);
         // Panel keys held through the panic must not fire afterwards.
         panel_input_resync();
         drop_pad_holds();
@@ -475,6 +479,13 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
         return true;
     }
     return false;
+}
+
+// Which eight logical tracks the eight physical pad columns address.
+static uint8_t panel_first_track(void) {
+    uint8_t track = ui.mode == UI_SESSION ? session_get_focus().track :
+                    ui.mode == UI_TRACK_CONFIG ? ui.config_track : ui.selected_track;
+    return (track / PANEL_TRACKS) * PANEL_TRACKS;
 }
 
 // ─── Global panel controls (every screen) ──────────────────────
@@ -490,7 +501,7 @@ static int find_copy_source(uint8_t track, uint8_t target_row, uint32_t now) {
     uint32_t longest = 0;
     for (uint8_t row = 0; row < PAD_ROWS; row++) {
         if (row == target_row || !(ui.pad_seen[track] & (1u << row))) continue;
-        if (!panel_input_pad_down(track, row)) continue;
+        if (!panel_input_pad_down(track % PANEL_TRACKS, row)) continue;
         if (ui.pad_generation[track][row] != panel_input_generation()) continue;
         uint32_t held = (uint32_t)(now - ui.pad_down_ms[track][row]);
         if (held < PAD_COPY_HOLD_MS || (source >= 0 && held <= longest)) continue;
@@ -581,8 +592,8 @@ static void press_pad_key(uint8_t track, uint8_t row, uint8_t note, const step_b
 static void handle_pad_press(uint8_t track, uint8_t row, const step_buttons_t *steps) {
     // A release the panel layer lost and the sweep has not found yet: end the
     // old key before this press stands for the pad.
-    if (track < NUM_TRACKS && row < PAD_ROWS) release_pad_key(track, row);
-    if (ui.pad_keys_on && track < NUM_TRACKS && row < PAD_ROWS) {
+    if (track < PANEL_TRACKS && row < PAD_ROWS) release_pad_key(track, row);
+    if (ui.pad_keys_on && track < PANEL_TRACKS && row < PAD_ROWS) {
         // A pad shown as a key is never a copy source, and a stale hold of this
         // very pad ends; the holds of other pads are left alone.
         ui.pad_seen[track] &= (uint8_t)~(1u << row);
@@ -590,6 +601,7 @@ static void handle_pad_press(uint8_t track, uint8_t row, const step_buttons_t *s
         if (note != 0xFF) press_pad_key(track, row, note, steps);
         return;
     }
+    track += panel_first_track();
     uint32_t now = to_ms_since_boot(get_absolute_time());
     uint8_t target = pattern_make_index(session_bank(), row);
     int source = find_copy_source(track, row, now);
@@ -615,15 +627,21 @@ static void handle_panel_events(const step_buttons_t *steps) {
     panel_event_t ev;
     while (panel_input_next(&ev)) {
         // The pad tables are 8 by 8: a pad outside them is not one.
-        if (ev.kind == PANEL_PAD && (ev.track >= NUM_TRACKS || ev.row >= PAD_ROWS)) continue;
-        if (ev.kind == PANEL_PAD && !ev.down && ev.track < NUM_TRACKS) {
+        if (ev.kind == PANEL_PAD && (ev.track >= PANEL_TRACKS || ev.row >= PAD_ROWS)) continue;
+        if (ev.kind == PANEL_PAD && !ev.down && ev.track < PANEL_TRACKS) {
             if (ev.row < PAD_ROWS && ui.pad_key[ev.track][ev.row]) {
                 release_pad_key(ev.track, ev.row);
                 continue;
             }
-            ui.pad_seen[ev.track] &= (uint8_t)~(1u << ev.row);
+            for (uint8_t t = ev.track; t < NUM_TRACKS; t += PANEL_TRACKS)
+                ui.pad_seen[t] &= (uint8_t)~(1u << ev.row);
         }
         if (!ev.down) continue;
+        if (ui.mode == UI_MIDI_SONG) {
+            if (ev.kind == PANEL_PLAY) toggle_transport();
+            if (ev.kind == PANEL_MUTE) transport_midi_song_toggle(ui.midi_page * 8 + ev.track, false);
+            continue;
+        }
         switch (ev.kind) {
             case PANEL_PAD:
                 handle_pad_press(ev.track, ev.row, steps);
@@ -632,7 +650,7 @@ static void handle_panel_events(const step_buttons_t *steps) {
                 if (!session_scene(ev.row)) show_notify("SONG MODE");
                 break;
             case PANEL_MUTE:
-                session_mute(ev.track);
+                session_mute(panel_first_track() + ev.track);
                 break;
             case PANEL_PLAY:
                 toggle_transport();
@@ -652,7 +670,7 @@ static void handle_panel_events(const step_buttons_t *steps) {
 // been handled first.
 static void release_lost_pad_keys(uint32_t generation_before_poll) {
     bool lost_now = generation_before_poll != panel_input_generation();
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+    for (uint8_t track = 0; track < PANEL_TRACKS; track++) {
         for (uint8_t row = 0; row < PAD_ROWS; row++) {
             if (!ui.pad_key[track][row]) continue;
             if (lost_now || !panel_input_pad_down(track, row) ||
@@ -805,12 +823,12 @@ static bool turned(encoder_turn_t turn) {
 // TRACK in the Pattern view: walks the stops of the tracks' active patterns, a
 // kit's lanes included; the lane reached is the kit track's remembered one.
 static void walk_pattern_view(int8_t detents) {
-    uint8_t kit_mask = kit_cell_mask(g_seq.patterns, g_seq.active_pattern);
+    track_mask_t kit_mask = kit_cell_mask(g_seq.patterns, g_seq.active_pattern);
     uint8_t track = ui.selected_track;
     uint8_t lane = session_kit_lane(track);
     session_walk_stops(&track, &lane, detents, kit_mask);
     ui.selected_track = track;
-    if (kit_mask & (1u << track)) session_set_kit_lane(track, lane);
+    if (kit_mask & TRACK_BIT(track)) session_set_kit_lane(track, lane);
 }
 
 // The Pattern view's encoders when no hold gesture owns them: TRACK walks,
@@ -1244,19 +1262,19 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
     uint16_t short_releases = take_short_releases(&ui.select_short_pending, steps,
                                                   0xFFu, NULL);
     if (short_releases) {
-        for (int t = 0; t < NUM_TRACKS; t++) {
+        for (int t = 0; t < PANEL_TRACKS; t++) {
             if (short_releases & (1u << t)) {
-                seq_toggle_track_mute(t);
+                seq_toggle_track_mute(panel_first_track() + t);
             }
         }
     }
 
     // Step button long press on 1–8: enter track config
     if (steps->long_pressed) {
-        for (int t = 0; t < NUM_TRACKS; t++) {
+        for (int t = 0; t < PANEL_TRACKS; t++) {
             if (steps->long_pressed & (1u << t)) {
+                ui.config_track = panel_first_track() + t;
                 ui.mode = UI_TRACK_CONFIG;
-                ui.config_track = t;
                 ui.config_param = 0;
                 ui.select_short_pending = 0;
                 break;
@@ -1330,6 +1348,11 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
     if (steps->pressed & (1u << 12)) {
         sequencer_reset_jitter_stats();
     }
+    // Step 14 enters the flash-backed MIDI Song player.
+    if (steps->pressed & (1u << 13)) {
+        if (g_seq.transport.state != TRANSPORT_STOPPED) show_notify("STOP FIRST");
+        else if (!ui_open_midi_song()) show_notify("NO MIDI SONG");
+    }
 }
 
 static uint16_t build_step_activity_mask(const pattern_t *pat, uint8_t track) {
@@ -1391,11 +1414,11 @@ static uint16_t build_session_mask(const transport_snapshot_t *snap) {
 
 static uint16_t build_pattern_select_mask(void) {
     uint16_t mask = 0;
-    uint8_t mutes = seq_get_track_mutes();
+    uint8_t mutes = (uint8_t)(seq_get_track_mutes() >> panel_first_track());
 
     // Buttons 1-8 represent track mute state (lit = audible: neither the live
     // mute nor the stored mute of the playing location is set).
-    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+    for (uint8_t t = 0; t < PANEL_TRACKS; t++) {
         if (!(mutes & (1u << t))) {
             mask |= (uint16_t)(1u << t);
         }
@@ -1466,7 +1489,7 @@ static void update_step_leds(void) {
         case UI_TRACK_CONFIG:
             // Indicate currently configured track on buttons 1-8.
             if (ui.config_track < NUM_TRACKS) {
-                mask = (uint16_t)(1u << ui.config_track);
+                mask = (uint16_t)(1u << (ui.config_track % PANEL_TRACKS));
             }
             break;
 
@@ -1474,16 +1497,25 @@ static void update_step_leds(void) {
             // Button 1 = loop/stop, button 2 = song, button 3 = pattern playback.
             mask = (1u << 0) | (1u << 1) | (1u << 2);
             break;
+
+        case UI_MIDI_SONG: {
+            midi_song_view_t view;
+            transport_midi_song_view(&view);
+            for (uint8_t col = 0; col < 8; col++) {
+                const uint8_t track = ui.midi_page * 8 + col;
+                const uint64_t bit = UINT64_C(1) << track;
+                if ((view.present & bit) && (view.solo >= 0 ? view.solo == track : !(view.muted & bit))) {
+                    mask |= (uint16_t)(1u << col);
+                }
+            }
+            break;
+        }
     }
 
     step_leds_set_mask(mask);
 }
 
 // ─── Track Config Handler ──────────────────────────────────────
-
-// Rows of a SYNTH or DRUM track's config screen (NOTE on a drum only).
-enum { TRACK_PARAM_TYPE, TRACK_PARAM_CHANNEL, TRACK_PARAM_OUTPUT, TRACK_PARAM_GATE,
-       TRACK_PARAM_NOTE };
 
 #define TRACK_TYPE_COUNT 3
 _Static_assert(TRACK_TYPE_KIT + 1 == TRACK_TYPE_COUNT,
@@ -1505,6 +1537,8 @@ static uint8_t step_value(uint8_t value, int8_t delta, uint8_t lo, uint8_t hi) {
 // before it changes anything; KIT is then skipped with a message.
 static void step_track_type(uint8_t track, track_config_t config, int8_t direction) {
     config.type = next_track_type(config.type, direction);
+    if (track >= KIT_TRACK_SLOTS && config.type == TRACK_TYPE_KIT)
+        config.type = next_track_type(config.type, direction);
     if (seq_set_track_config(track, &config)) return;
     show_notify("MAX 2 KITS");
     config.type = next_track_type(config.type, direction);
@@ -1521,7 +1555,7 @@ static void step_output_mode(uint8_t track, track_config_t config, int8_t direct
     seq_set_track_config(track, &config);
 }
 
-// CHANNEL, GATE and a drum's NOTE: the track's routing, written to all 32
+// CHANNEL, GATE, CV/Gate pair and a drum's NOTE are written to all 32
 // locations when it changes.
 static void edit_track_param(uint8_t track, track_config_t config, uint8_t param,
                              int8_t delta) {
@@ -1530,7 +1564,14 @@ static void edit_track_param(uint8_t track, track_config_t config, uint8_t param
     switch (param) {
         case TRACK_PARAM_CHANNEL: field = &config.midi_channel; hi = 15; break;
         case TRACK_PARAM_GATE: field = &config.gate_length_pct; lo = 10; hi = 100; break;
-        case TRACK_PARAM_NOTE: field = &config.drum_note; break;
+        case TRACK_PARAM_NOTE:
+            if (config.type == TRACK_TYPE_DRUM) {
+                field = &config.drum_note;
+                break;
+            }
+            // A synth has CV/Gate in the same position.
+            // Falls through.
+        case TRACK_PARAM_DRUM_CV: field = &config.cv_channel; hi = NUM_CV_CHANNELS - 1; break;
         default: return;
     }
     uint8_t next = step_value(*field, delta, lo, hi);
@@ -1588,9 +1629,9 @@ static void handle_track_config(encoder_turn_t e1, encoder_turn_t e2,
     seq_unlock(lock_state);
 
     // A kit lists TYPE, CHANNEL, GATE, FLAM, the velocities and the notes;
-    // the others TYPE, CHANNEL, OUTPUT, GATE and, on a drum, NOTE.
+    // the others TYPE, CHANNEL, OUTPUT, GATE, (drum) NOTE, and CV/Gate.
     uint8_t last = kit ? KIT_PARAM_COUNT - 1
-                       : (config.type == TRACK_TYPE_DRUM ? TRACK_PARAM_NOTE : TRACK_PARAM_GATE);
+                       : (config.type == TRACK_TYPE_DRUM ? TRACK_PARAM_DRUM_CV : TRACK_PARAM_SYNTH_CV);
     if (ui.config_param > last) ui.config_param = last;
 
     // Enc1 rotate: select parameter
@@ -1751,13 +1792,43 @@ static void render_notify(void) {
 
 // ─── Panel lights (RGB chain) ──────────────────────────────────
 
+static void midi_song_lights(rgb_t frame[LED_COUNT], bool playing) {
+    midi_song_view_t view;
+    transport_midi_song_view(&view);
+    memset(frame, 0, sizeof(rgb_t) * LED_COUNT);
+    for (uint8_t track = 0; track < view.tracks; track++) {
+        const uint64_t bit = UINT64_C(1) << track;
+        if (!(view.present & bit)) continue;
+        const bool enabled = view.solo >= 0 ? view.solo == track : !(view.muted & bit);
+        const rgb_t color = !enabled ? (rgb_t){ LED_LEVEL_HALF, 0, 0 }
+            : view.active & bit ? (rgb_t){ 0, LED_LEVEL_FULL, LED_LEVEL_HALF }
+            : (rgb_t){ 0, LED_LEVEL_HALF, LED_LEVEL_DIM };
+        if (track / 8 == ui.midi_page) frame[LED_MUTE(track % 8)] = color;
+    }
+    if (playing) frame[LED_PLAY] = (rgb_t){ 0, LED_LEVEL_FULL, 0 };
+}
+
 // Builds the 82-LED frame from the frame's transport snapshot and starts
 // sending it; a frame the chain is still busy with is skipped. Called with no
 // lock held: sequencer_clip_mask takes seq_lock itself.
 static void update_panel_lights(const transport_snapshot_t *snap) {
+    if (ui.mode == UI_MIDI_SONG) {
+        rgb_t frame[LED_COUNT];
+        midi_song_lights(frame, snap->state == TRANSPORT_PLAYING);
+        led_frame_apply_budget(frame, LED_RGB_BUDGET_MA);
+        rgb_leds_show(frame);
+        return;
+    }
     led_state_t state;
     state.bank = session_bank();
-    state.clip_mask = sequencer_clip_mask(state.bank);
+    state.first_track = panel_first_track();
+    state.clip_mask = sequencer_page_clips(state.bank, state.first_track / PANEL_TRACKS);
+    uint64_t occupied = 0;
+    for (uint8_t page = 0; page < NUM_TRACKS / PANEL_TRACKS; page++)
+        occupied |= sequencer_page_clips(state.bank, page);
+    occupied |= occupied >> 32;
+    occupied |= occupied >> 16;
+    state.occupied_rows = (uint8_t)(occupied | (occupied >> 8));
     memcpy(state.current, snap->current, sizeof(state.current));
     memcpy(state.queued, snap->queued, sizeof(state.queued));
     state.muted = snap->live_mutes | snap->stored_mutes;
@@ -1853,6 +1924,54 @@ static void render_track_config(void) {
 
 // ─── UI Render (dispatches to display functions) ───────────────
 
+bool ui_open_midi_song(void) {
+    if (!transport_open_midi_song()) return false;
+    ui.midi_page = 0;
+    ui.select_short_pending = 0;
+    ui.mode = UI_MIDI_SONG;
+    return true;
+}
+
+static void handle_midi_song(encoder_turn_t track, button_event_t value, const step_buttons_t *steps) {
+    midi_song_view_t view;
+    transport_midi_song_view(&view);
+    const uint8_t last_page = view.tracks ? (view.tracks - 1) / 8 : 0;
+    if (track.detents) {
+        ui.midi_page = (uint8_t)clamp_i8(ui.midi_page + track.detents, 0, last_page);
+        ui.select_short_pending = 0;
+    }
+    uint16_t long_presses = 0;
+    const uint16_t short_presses = take_short_releases(&ui.select_short_pending, steps, 0xff, &long_presses);
+    for (uint8_t i = 0; i < 8; i++) {
+        if ((short_presses | long_presses) & (1u << i)) {
+            transport_midi_song_toggle(ui.midi_page * 8 + i, (long_presses & (1u << i)) != 0);
+        }
+    }
+    if (value == BTN_PRESS || value == BTN_LONG_PRESS) {
+        transport_set_mode(PLAY_MODE_PATTERN);
+        ui.mode = UI_PATTERN_SELECT;
+        ui.select_short_pending = 0;
+    }
+}
+
+static void render_midi_song(void) {
+    midi_song_view_t view;
+    transport_midi_song_view(&view);
+    char line[22];
+    snprintf(line, sizeof(line), "MIDI SONG  %u/%u", ui.midi_page + 1u, (view.tracks + 7u) / 8u);
+    ssd1309_draw_string(0, 0, line, false);
+    ssd1309_draw_string(0, 12, view.title, false);
+    const unsigned sec = view.position_us / 1000000u, duration = view.duration_us / 1000000u;
+    snprintf(line, sizeof(line), "%02u:%02u / %02u:%02u", sec / 60, sec % 60, duration / 60, duration % 60);
+    ssd1309_draw_string(0, 24, line, false);
+    for (uint8_t col = 0; col < 8 && ui.midi_page * 8 + col < view.tracks; col++) {
+        const uint8_t track = ui.midi_page * 8 + col;
+        snprintf(line, sizeof(line), "%2u", track + 1u);
+        ssd1309_draw_string(col * 16, 38, line, view.solo >= 0 ? view.solo == track : !(view.muted & (UINT64_C(1) << track)));
+    }
+    ssd1309_draw_string(0, 54, "1-8 MUTE / HOLD SOLO", false);
+}
+
 void ui_render(void) {
     // One copy of the transport per frame, taken with no lock held.
     transport_snapshot_t snap;
@@ -1882,7 +2001,7 @@ void ui_render(void) {
                 pattern_get_track_length(&g_seq.patterns[ui.select_pattern],
                                          ui.selected_track),
                 g_seq.transport.queued_pattern[ui.selected_track],
-                seq_get_track_mutes());
+                (uint8_t)(seq_get_track_mutes() >> panel_first_track()));
             break;
 
         case UI_TRACK_CONFIG:
@@ -1899,6 +2018,9 @@ void ui_render(void) {
                 ui.edit_step,
                 seq_active_pattern(ui.selected_track)->kit_steps[ui.selected_track][ui.edit_step],
                 ui.kit_cursor);
+            break;
+        case UI_MIDI_SONG:
+            render_midi_song();
             break;
     }
 
@@ -2001,6 +2123,9 @@ void ui_update(void) {
             break;
         case UI_KIT_STEP_EDIT:
             handle_kit_step_edit(e1, e2, e1b, e2b, steps);
+            break;
+        case UI_MIDI_SONG:
+            handle_midi_song(e1, e2b, steps);
             break;
     }
 

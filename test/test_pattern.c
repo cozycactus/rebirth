@@ -61,12 +61,12 @@ TEST(test_pattern_init_tracks) {
         ASSERT_EQ(p.tracks[t].type, TRACK_TYPE_SYNTH);
     }
     for (int t = 4; t < NUM_TRACKS; t++) {
-        ASSERT_EQ(p.tracks[t].type, TRACK_TYPE_DRUM);
+        ASSERT_EQ(p.tracks[t].type, t < KIT_TRACK_SLOTS ? TRACK_TYPE_DRUM : TRACK_TYPE_SYNTH);
     }
 
     /* MIDI channels match track index */
     for (int t = 0; t < NUM_TRACKS; t++) {
-        ASSERT_EQ(p.tracks[t].midi_channel, t);
+        ASSERT_EQ(p.tracks[t].midi_channel, t % 16);
     }
 
     /* Drum notes increment from 36 */
@@ -428,7 +428,7 @@ TEST(test_pattern_copy_track_leaves_everything_else) {
         ASSERT_TRUE(memcmp(&dst.tracks[t], &before.tracks[t], sizeof(dst.tracks[t])) == 0);
         if (t != 1) {
             ASSERT_EQ(dst.track_length[t], before.track_length[t]);
-            ASSERT_TRUE(memcmp(dst.kit_steps[t], before.kit_steps[t], sizeof(dst.kit_steps[t])) == 0);
+            if (t < KIT_TRACK_SLOTS) ASSERT_TRUE(memcmp(dst.kit_steps[t], before.kit_steps[t], sizeof(dst.kit_steps[t])) == 0);
         }
     }
     ASSERT_EQ(dst.length, before.length);

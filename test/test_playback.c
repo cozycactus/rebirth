@@ -104,6 +104,23 @@ static void set_length(uint8_t pattern, uint8_t track, uint8_t length) {
     sequencer_refresh_track_playback(track, pattern);
 }
 
+static void test_all_64_native_tracks(void) {
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        g_seq.patterns[0].tracks[t].type = TRACK_TYPE_SYNTH;
+        g_seq.patterns[0].tracks[t].output_mode = OUTPUT_MIDI_ONLY;
+        set_note(0, t, 0, 32 + t, 0);
+    }
+    transport_start();
+    tick();
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) CHECK(count_note_on(t % 16, 32 + t) == 1);
+    CHECK(!midi_output_overflowed());
+    seq_set_track_mute(63, true);
+    CHECK(seq_get_track_mutes() == TRACK_BIT(63));
+    transport_stop();
+    CHECK(transport_queue_pattern(31));
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) CHECK(g_seq.transport.current_pattern[t] == 31);
+}
+
 static void test_clock_rate_and_start_order(void) {
     set_note(0, 0, 0, 60, 0);
     transport_start();
@@ -721,9 +738,9 @@ static void test_moving_song_entry_keeps_playing_entry_anchor(void) {
 }
 
 static void test_staging_overflow_never_sends_partial_message(void) {
-    for (unsigned note = 0; note < 54; note++) midi_buf_note_on(0, note, 100);
+    for (unsigned note = 0; note <= MIDI_STEP_BUFFER_BYTES / 3; note++) midi_buf_note_on(0, note % 128, 100);
     midi_buf_flush();
-    CHECK(fake_midi_count(MIDI_NOTE_ON) == 53);
+    CHECK(fake_midi_count(MIDI_NOTE_ON) == MIDI_STEP_BUFFER_BYTES / 3);
     CHECK(message_boundary(fake_midi_length));
     CHECK(midi_output_overflowed());
 }
@@ -1237,7 +1254,7 @@ static void test_scene_queue_skips_tracks_already_there(void) {
     CHECK(g_seq.transport.current_pattern[1] == 9);
     CHECK(transport_queue_track_pattern(1, 4));
     CHECK(transport_queue_track_pattern(3, 2));
-    CHECK(transport_launch(UINT8_MAX, 9));
+    CHECK(transport_launch(ALL_TRACKS, 9));
     CHECK(g_seq.transport.queued_pattern[1] == NO_QUEUED_PATTERN);
     CHECK(g_seq.transport.queued_pattern[3] == 9);
     CHECK(g_seq.transport.queued_pattern[0] == 9);
@@ -1249,7 +1266,7 @@ static void test_empty_scene_silences_all_tracks(void) {
     transport_set_launch_quant(LAUNCH_QUANT_BAR);
     transport_start();
     run_through_step(3);
-    CHECK(transport_launch(UINT8_MAX, 5));
+    CHECK(transport_launch(ALL_TRACKS, 5));
     run_through_step(16);
     for (uint8_t track = 0; track < NUM_TRACKS; track++)
         CHECK(g_seq.transport.current_pattern[track] == 5);
@@ -1259,7 +1276,7 @@ static void test_empty_scene_silences_all_tracks(void) {
 }
 
 static void test_scene_selects_at_once_when_stopped(void) {
-    CHECK(transport_launch(UINT8_MAX, 4));
+    CHECK(transport_launch(ALL_TRACKS, 4));
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         CHECK(g_seq.transport.current_pattern[track] == 4);
         CHECK(g_seq.transport.queued_pattern[track] == NO_QUEUED_PATTERN);
@@ -1268,7 +1285,7 @@ static void test_scene_selects_at_once_when_stopped(void) {
 
 static void test_scene_rejected_in_song_mode(void) {
     transport_set_mode(PLAY_MODE_SONG);
-    CHECK(!transport_launch(UINT8_MAX, 4));
+    CHECK(!transport_launch(ALL_TRACKS, 4));
 }
 
 static void test_snapshot_reports_queues_and_mutes(void) {
@@ -1979,7 +1996,7 @@ typedef struct {
 static void play_restart(const restart_case_t *c) {
     fake_uart_run_until(0);                 // wire-time mode
     transport_set_bpm(c->bpm);
-    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+    for (uint8_t t = 0; t < PANEL_TRACKS; t++) {
         bool kit = t == 0 || t == 4;
         if (kit) make_kit(t, t == 0 ? 10 : 9);
         else g_seq.patterns[0].tracks[t].type = TRACK_TYPE_SYNTH;
@@ -2040,7 +2057,7 @@ static void test_restart_sweep_never_overflows(void) {
     for (unsigned n = 0; n < RESTART_SWEEP_CASES; n++) {
         restart_case_t c;
         c.bpm = (float)sweep_between(140, 300);
-        for (uint8_t t = 0; t < NUM_TRACKS; t++) c.gates[t] = (uint8_t)sweep_between(10, 100);
+        for (uint8_t t = 0; t < PANEL_TRACKS; t++) c.gates[t] = (uint8_t)sweep_between(10, 100);
         c.flam_pulses[0] = (uint8_t)sweep_between(KIT_FLAM_MIN, KIT_FLAM_MAX);
         c.flam_pulses[1] = (uint8_t)sweep_between(KIT_FLAM_MIN, KIT_FLAM_MAX);
         c.restart_pulse = sweep_between(24, 480);
@@ -2076,13 +2093,13 @@ static uint32_t play_load(const load_case_t *c) {
             g_seq.patterns[0].kit_steps[kit][step] = word;
         }
     }
-    for (uint8_t track = 2; track < NUM_TRACKS; track++) {
+    for (uint8_t track = 2; track < PANEL_TRACKS; track++) {
         g_seq.patterns[0].tracks[track].type = TRACK_TYPE_SYNTH;
         for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
             pattern_set_step(&g_seq.patterns[0], track, step, 60, 100, STEP_FLAG_ACTIVE);
         }
     }
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+    for (uint8_t track = 0; track < PANEL_TRACKS; track++) {
         set_gate(track, track < 2 ? c->kit_gate_pct : 100);
     }
     transport_start();
@@ -2491,6 +2508,7 @@ static void test_kit_config_clamps_and_refreshes(void) {
 int main(void) {
     unsigned tests = 0;
     seq_lock_init();
+    RUN(test_all_64_native_tracks);
     RUN(test_clock_rate_and_start_order);
     RUN(test_midi_in_irq_stays_enabled);
     RUN(test_midi_in_bytes_come_out_in_order);

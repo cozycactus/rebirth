@@ -119,6 +119,10 @@ add_executable(test_session
 target_include_directories(test_session PRIVATE ${REBIRTH_INC} ${CMAKE_SOURCE_DIR}/fakes)
 add_test(NAME session_tests COMMAND test_session)
 
+foreach(target test_song test_playback test_storage test_ui test_session)
+    target_sources(${target} PRIVATE ${REBIRTH_SRC}/midi_song.c)
+endforeach()
+
 add_executable(test_led_frame
     test_led_frame.c
     ${REBIRTH_SRC}/led_frame.c

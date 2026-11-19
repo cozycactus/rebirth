@@ -19,6 +19,7 @@
   class Device {
     constructor(core) {
       this.core = core;
+      this.dacVoltsPerCode = (core._sim_dac_full_scale_mv?.() ?? 2048) / 4096000;
       this.status = 0;          // running status of the MIDI byte stream
       this.data = [];
       this.boot(false);
@@ -103,6 +104,13 @@
     tempoLed() { return (this.core._sim_gpio_levels() >>> PIN.TEMPO_LED) & 1; }
     gates() { return (this.core._sim_gpio_levels() >>> PIN.GATES[0]) & 15; }
     dac(channel) { return this.core.HEAPU16[(this.core._sim_dac() >> 1) + channel]; }
+    dacVolts(code) { return code * this.dacVoltsPerCode; }
+    openMidiSong(bytes) {
+      const c = this.core;
+      if (!c._sim_midi_song_slot || bytes.length > c._sim_midi_song_capacity() || this.inspect().state !== 0) return false;
+      c.HEAPU8.set(bytes, c._sim_midi_song_slot());
+      return c._sim_midi_song_open() !== 0;
+    }
 
     // Everything that left the device since the last call, in the order the
     // firmware produced it (time stamps can be up to 640 us out of order):
@@ -177,7 +185,8 @@
     trackLength(location, track) { return this.core._sim_dbg_track_length(location, track); }
     trackConfig(track) {
       const v = this.core._sim_dbg_track_config(track);
-      return { type: v & 0xFF, channel: (v >>> 8) & 0xFF, gate: (v >>> 16) & 0xFF, output: v >>> 24 };
+      return { type: v & 0xFF, channel: (v >>> 8) & 0xFF, gate: (v >>> 16) & 0xFF,
+               output: (v >>> 24) & 3, cvChannel: (v >>> 26) & 3 };
     }
   }
 

@@ -63,13 +63,13 @@ TEST(test_song_append_patterns_per_track) {
     reset_song();
     uint8_t patterns[NUM_TRACKS];
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        patterns[track] = track;
+        patterns[track] = track % MAX_PATTERNS;
     }
 
     ASSERT_TRUE(song_append_patterns(patterns, 4));
     ASSERT_EQ(g_seq.song.length, 1);
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        ASSERT_EQ(g_seq.song.entries[0].pattern_index[track], track);
+        ASSERT_EQ(g_seq.song.entries[0].pattern_index[track], track % MAX_PATTERNS);
     }
     ASSERT_EQ(g_seq.song.entries[0].repeats, 4);
 }
@@ -120,14 +120,14 @@ TEST(test_song_insert_patterns_per_track) {
 
     uint8_t patterns[NUM_TRACKS];
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        patterns[track] = (uint8_t)(MAX_PATTERNS - 1 - track);
+        patterns[track] = (uint8_t)(MAX_PATTERNS - 1 - (track % MAX_PATTERNS));
     }
 
     ASSERT_TRUE(song_insert_patterns(1, patterns, 2));
     ASSERT_EQ(g_seq.song.length, 2);
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         ASSERT_EQ(g_seq.song.entries[1].pattern_index[track],
-                  MAX_PATTERNS - 1 - track);
+                  MAX_PATTERNS - 1 - (track % MAX_PATTERNS));
     }
 }
 

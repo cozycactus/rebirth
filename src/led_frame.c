@@ -1,6 +1,6 @@
 #include "led_frame.h"
 
-static const rgb_t TRACK_HUE[NUM_TRACKS] = {
+static const rgb_t TRACK_HUE[PANEL_TRACKS] = {
     {255, 0, 0},     // red
     {255, 80, 0},    // orange
     {255, 200, 0},   // yellow
@@ -36,7 +36,8 @@ static bool blink_fast(uint32_t pulse) { return (pulse / (PPQN / 2)) % 2 == 0; }
 static bool blink_slow(uint32_t pulse) { return (pulse / (PPQN * 2)) % 2 == 0; }
 
 static bool has_clip(const led_state_t *s, uint8_t track, uint8_t row) {
-    return (s->clip_mask >> (track * 8 + row)) & 1u;
+    if (track < s->first_track || track >= s->first_track + PANEL_TRACKS) return false;
+    return (s->clip_mask >> ((track % PANEL_TRACKS) * 8 + row)) & 1u;
 }
 
 static uint8_t location(const led_state_t *s, uint8_t row) {
@@ -54,7 +55,7 @@ static bool outside_bank(const led_state_t *s, uint8_t location_) {
 static rgb_t pad_light(const led_state_t *s, uint8_t track, uint8_t row) {
     uint8_t loc = location(s, row);
     bool clip = has_clip(s, track, row);
-    rgb_t hue = TRACK_HUE[track];
+    rgb_t hue = TRACK_HUE[track % PANEL_TRACKS];
 
     if (s->queued[track] == loc) {
         if (clip) return blink_fast(s->pulse) ? shade(hue, LED_LEVEL_FULL) : OFF;
@@ -74,7 +75,7 @@ static rgb_t scene_light(const led_state_t *s, uint8_t row) {
     uint8_t loc = location(s, row);
     uint8_t playing_row = 0;
     bool pending = false;
-    bool clip = false;
+    bool clip = (s->occupied_rows & (1u << row)) != 0;
     for (uint8_t t = 0; t < NUM_TRACKS; t++) {
         if (s->queued[t] == loc) pending = true;
         if (s->playing && s->current[t] == loc) playing_row++;
@@ -91,8 +92,8 @@ static rgb_t mute_light(const led_state_t *s, uint8_t track) {
     bool muted = (s->muted >> track) & 1u;
     bool focus = track == s->focus_track;
     rgb_t base;
-    if (focus) base = muted ? shade(WHITE, LED_LEVEL_DIM) : shade(TRACK_HUE[track], LED_LEVEL_FULL);
-    else       base = muted ? OFF : shade(TRACK_HUE[track], LED_LEVEL_HALF);
+    if (focus) base = muted ? shade(WHITE, LED_LEVEL_DIM) : shade(TRACK_HUE[track % PANEL_TRACKS], LED_LEVEL_FULL);
+    else       base = muted ? OFF : shade(TRACK_HUE[track % PANEL_TRACKS], LED_LEVEL_HALF);
 
     bool blink;
     bool on;
@@ -136,15 +137,16 @@ static rgb_t key_light(const led_state_t *s, uint8_t column, uint8_t row) {
     uint8_t note = pad_key_note(s->keys_base, column, row);
     if (note == 0xFF) return OFF;
     if (note == s->keys_note) return shade(WHITE, LED_LEVEL_FULL);
-    return shade(TRACK_HUE[s->keys_track], row % 2 == 1 ? LED_LEVEL_HALF : LED_LEVEL_DIM);
+    return shade(TRACK_HUE[s->keys_track % PANEL_TRACKS], row % 2 == 1 ? LED_LEVEL_HALF : LED_LEVEL_DIM);
 }
 
 void led_frame_build(const led_state_t *s, rgb_t out[LED_COUNT]) {
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+    for (uint8_t col = 0; col < PANEL_TRACKS; col++) {
+        uint8_t track = s->first_track + col;
         for (uint8_t row = 0; row < PATTERNS_PER_BANK; row++) {
-            out[LED_PAD(track, row)] = s->keys ? key_light(s, track, row) : pad_light(s, track, row);
+            out[LED_PAD(col, row)] = s->keys ? key_light(s, col, row) : pad_light(s, track, row);
         }
-        out[LED_MUTE(track)] = mute_light(s, track);
+        out[LED_MUTE(col)] = mute_light(s, track);
     }
     for (uint8_t row = 0; row < PATTERNS_PER_BANK; row++) {
         out[LED_SCENE(row)] = scene_light(s, row);

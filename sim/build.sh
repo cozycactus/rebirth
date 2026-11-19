@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the simulator.
 #   sim/build.sh native   - native core + smoke test (needs only a C compiler)
-#   sim/build.sh web      - WebAssembly core for sim/web (needs sim/emsdk), and
+#   sim/build.sh web      - WebAssembly cores for sim/web (needs sim/emsdk), and
 #                           sim/web/version.js, which names the commit it was built from
 #   sim/build.sh          - both
 # Neither output is kept in git: CI builds them for the public page.
@@ -53,6 +53,12 @@ web() {
         -sENVIRONMENT=web,node -sALLOW_MEMORY_GROWTH=0 -sINITIAL_MEMORY=33554432 \
         -o sim/web/core.js
     echo "built sim/web/core.js"
+    SH101_EXPORTS=$(grep -o 'sh101_[a-z0-9_]*(' sim/sh101/board.h | sort -u | sed 's/(//; s/^/_/' | paste -sd, -)
+    emcc -std=c11 -O2 sim/sh101/board.c \
+        -sEXPORTED_FUNCTIONS="$SH101_EXPORTS" -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32 \
+        -sMODULARIZE=1 -sEXPORT_NAME=SH101Core -sSINGLE_FILE=1 \
+        -sENVIRONMENT=web,node -o sim/web/sh101_cpu.js
+    echo "built sim/web/sh101_cpu.js"
     # What the page shows as its firmware: the commit, and whether the
     # firmware or the simulator had changes not yet committed.
     COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)

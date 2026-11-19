@@ -44,6 +44,7 @@ uint32_t sim_leds_skipped(void);                // frames refused (previous stil
 uint32_t sim_step_leds(void);                   // MCP23017 0x21 output latches driving LEDs
 uint32_t sim_gpio_levels(void);                 // bit per GPIO: gates 14-17, tempo LED 25
 const uint16_t *sim_dac(void);                  // 4 MCP4822 codes
+int sim_dac_full_scale_mv(void);                // nominal reference times configured gain
 
 // Timestamped output events since the last sim_events_clear().
 // Events are listed in the order the firmware produced them. A MIDI byte is
@@ -72,6 +73,9 @@ int sim_features(void);
 // ─── Flash image (last 128 KiB of the 2 MiB), for keeping a save ─
 uint8_t *sim_flash_store(void);
 int sim_flash_store_size(void);
+uint8_t *sim_midi_song_slot(void);
+int sim_midi_song_capacity(void);
+int sim_midi_song_open(void);                   // enter the hardware player's screen
 
 // ─── Inspection: for checks and the on-screen meters only. The scripted
 // artist must not read these; it sees the OLED and the lights. ──
@@ -83,7 +87,7 @@ int sim_dbg_queued(int track);
 uint32_t sim_dbg_step(int location, int track, int step);   // note | velocity<<8 | flags<<16
 uint32_t sim_dbg_kit_step(int location, int track, int step);
 int sim_dbg_track_length(int location, int track);
-uint32_t sim_dbg_track_config(int track);       // type | channel<<8 | gate%<<16 | output<<24
+uint32_t sim_dbg_track_config(int track);       // type | MIDI ch<<8 | gate%<<16 | output<<24 | CV pair<<26
 int sim_dbg_mutes(void);
 uint32_t sim_dbg_overruns(void);
 int sim_dbg_midi_overflow(void);

@@ -46,11 +46,11 @@ session_focus_t session_get_focus(void) {
     return focus;
 }
 
-static bool kit_in_mask(uint8_t kit_mask, uint8_t track) {
+static bool kit_in_mask(track_mask_t kit_mask, uint8_t track) {
     return (kit_mask >> track) & 1u;
 }
 
-void session_walk_stops(uint8_t *track, uint8_t *lane, int8_t detents, uint8_t kit_mask) {
+void session_walk_stops(uint8_t *track, uint8_t *lane, int8_t detents, track_mask_t kit_mask) {
     uint8_t t = *track < NUM_TRACKS ? *track : NUM_TRACKS - 1;
     uint8_t l = !kit_in_mask(kit_mask, t) ? 0 : (*lane < KIT_LANES ? *lane : KIT_LANES - 1);
     for (; detents > 0; detents--) {
@@ -98,7 +98,7 @@ void session_move_focus(int8_t detents) {
     for (uint8_t t = 0; t < NUM_TRACKS; t++) {
         edited[t] = t == focus_track ? focus_location : queued_or_current(&snap, t);
     }
-    uint8_t kit_mask = kit_cell_mask(g_seq.patterns, edited);
+    track_mask_t kit_mask = kit_cell_mask(g_seq.patterns, edited);
 
     uint8_t track = focus_track;
     uint8_t lane = session_get_focus().lane;
@@ -117,12 +117,12 @@ bool session_pad(uint8_t track, uint8_t row, bool move_focus) {
         focus_track = track;
         focus_location = target;
     }
-    return transport_launch((uint8_t)(1u << track), target);
+    return transport_launch(TRACK_BIT(track), target);
 }
 
 bool session_scene(uint8_t row) {
     if (row >= SLOTS_PER_BANK) return false;
-    return transport_launch(UINT8_MAX, location(row));
+    return transport_launch(ALL_TRACKS, location(row));
 }
 
 void session_mute(uint8_t track) {
