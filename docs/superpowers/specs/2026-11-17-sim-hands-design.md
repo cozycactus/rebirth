@@ -336,7 +336,8 @@ The preparation is never drawn at normal speed (x8, x16, or not at all), and
 its tempo sometimes leaves no assignment that avoids both a crossing and a
 late hand (the kit loop: TRACK, steps on both sides of the knob 66–100 ms
 later, TRACK again). There the check counts crossings and palm overlaps and
-bounds the peak speed at 8 m/s, but does not fail on a crossing.
+bounds the peak speed at 9 m/s (8 m/s until the merge of master's SH-101
+songs; see "As built"), but does not fail on a crossing.
 
 The poses of identical situations are cached. The check prints its running
 time; if the whole run exceeds two minutes in CI, the exact fitting (3, 4)

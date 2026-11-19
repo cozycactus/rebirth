@@ -23,7 +23,7 @@
 //      left of the right one while neither hand is away; in the preparation
 //      crossings and palm overlaps are counted, not failed;
 //   6. peak speed (10 000 steps) under 4 m/s per hand in the live set, under
-//      8 m/s in the preparation.
+//      9 m/s in the preparation (only ever drawn at x8 or x16).
 // (1) and (2) run on every show; (3)-(6) on song 0 and song 1 + formIndex in
 // every arrangement and score (32 shows), or on every show with HANDS_FULL=1;
 // the live set every 20 000 (in 4) on 4 of those, song 1 + formIndex in the
@@ -48,7 +48,7 @@ const GROUP_US = 100000;        // a group's downs are within this of its first
 const GROUPED = ['pad', 'step', 'mute'];
 const NEAR_TRACKS = 2;          // a MUTE pair this close is one hand
 const CONTACT_MM = 1.5, RIM_MM = 2, KNOB_R_MM = 10, GRIP_MM = 12, UNDER_MM = 0.5;
-const SPEED_STEP_US = 10000, LIVE_M_S = 4, PREP_M_S = 8;
+const SPEED_STEP_US = 10000, LIVE_M_S = 4, PREP_M_S = 9;
 const SIDES = ['left', 'right'], FINGERS = ['thumb', 'index', 'middle', 'ring', 'pinky'];
 const OUTER = ['pinky', 'ring', 'middle', 'index'];   // a group's fingers from the hand's outer side in
 const mm = x => x.toFixed(2);
