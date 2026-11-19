@@ -67,7 +67,8 @@ void sim_i2c_fault(int addr, int mode);
 void sim_chip_reset(int addr);                  // brown-out: registers back to power-on values
 
 // Bit mask of what the firmware this core was built from can do, read from its
-// source by sim/build.sh: 1 last note and clip copy, 2 MIDI input, 4 pad keyboard.
+// source by sim/build.sh: 1 last note and clip copy, 2 MIDI input, 4 pad keyboard,
+// 8 MUTE waits for the launch point.
 int sim_features(void);
 
 // ─── Flash image (last 128 KiB of the 2 MiB), for keeping a save ─

@@ -16,13 +16,15 @@ INCLUDES="-Iinclude -Itest/fakes -Isim/core"
 
 # What the firmware being built can do, for the page to pick a fitting score:
 # 1 new steps start at the last note and clips copy, 2 it reads its MIDI input,
-# 4 the pads are a keyboard while a step is held.
+# 4 the pads are a keyboard while a step is held, 8 MUTE waits for the launch
+# point.
 FEATURES=0
 grep -q 'last_note' src/ui.c && FEATURES=$((FEATURES | 1))
 [ -f src/midi_in.c ] && FEATURES=$((FEATURES | 2))
 grep -q 'pad_key_note' include/led_frame.h && FEATURES=$((FEATURES | 4))
+grep -q 'transport_toggle_mutes' include/sequencer.h && FEATURES=$((FEATURES | 8))
 INCLUDES="$INCLUDES -DSIM_FEATURES=$FEATURES"
-echo "firmware features: $FEATURES (1 last note and clip copy, 2 MIDI input, 4 pad keyboard)"
+echo "firmware features: $FEATURES (1 last note and clip copy, 2 MIDI input, 4 pad keyboard, 8 MUTE waits for the launch point)"
 mkdir -p sim/build
 
 # The Emscripten release the public page is built with (.github/workflows/ci.yml).

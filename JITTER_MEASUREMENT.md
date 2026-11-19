@@ -131,6 +131,7 @@ location):
 | `transport_set_bpm()`, `transport_set_launch_quant()` | playback, seq | one or two values |
 | `transport_queue_pattern()`, `transport_queue_track_pattern()`, `transport_launch()` | playback, seq | 8 tracks' queue and current-location slots (transport fields only) |
 | `transport_clear_queue()`, `transport_clear_track_queue()` | playback | 8 or 1 queue slots |
+| `transport_toggle_mutes()`, `transport_set_mutes()`, `transport_cancel_mutes()`, `transport_toggle_mutes_now()`, on a MUTE press or release and the selector's buttons 1-8 | playback, seq | a few bytes: the live mutes and the waiting and target masks, and the stored mute of each track's playing location; after the section a change to audible runs `seq_clear_stored_mutes()` |
 | `sequencer_snapshot()`, once per UI frame | playback, seq | 8 tracks' transport fields and the stored-mute byte of each playing location, in one section so a frame sees one transport state |
 | `sequencer_get_jitter_stats()`, `sequencer_reset_jitter_stats()` | playback | 12 values, or one flag |
 | `transport_continue()` | playback | returns at once while playing (its 8-track load runs only when stopped) |
@@ -138,7 +139,7 @@ location):
 | `seq_kit_tracks()` | seq | one short section per location (32): the kit mask of one location's track types |
 | `seq_set_track_config()` | seq | a KIT config runs `seq_kit_tracks()` first; then one location's config per section, 32 sections, then one refresh per location |
 | `seq_set_kit_config()` | seq | the track's kit settings (about 15 bytes) in one section; then one refresh per location |
-| `seq_toggle_track_mute()` | seq | the live mute bit; then one location's stored mute per section |
+| `seq_clear_stored_mutes()`, after a MUTE change to audible | seq | one location's stored mutes per section, 32 sections; then one refresh per location for each track that had one |
 | `seq_set_track_mute()`, `seq_get_track_mutes()`, `sequencer_clip_mask()`, `song_clear()`, `song_set_end_mode()`, `song_append*()` | seq | a few bytes |
 | `song_insert*()`, `song_remove()`, `song_move()` | seq | `memmove` of the entries after the edit point: up to 255 x 9 = 2,295 bytes (see below) |
 | UI (`ui.c`): step toggles, step editor, length -/+, track config read, focus, pattern select, Song editor reads | seq | one location's steps or config, one song entry, or a few bytes |

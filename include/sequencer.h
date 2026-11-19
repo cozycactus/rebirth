@@ -226,6 +226,12 @@ typedef struct {
     kit_config_t         kit_config[NUM_TRACKS];     // Kit settings per track
     volatile uint8_t     launch_quant;       // launch_quant_t; not saved
     volatile track_mask_t     track_mutes;        // Bitmask: bit N = track N muted for playback
+    // Bit N: a MUTE change of track N waits for the launch point; mute_target holds
+    // the live mute it writes there. Not saved; after sequencer_init(), which clears
+    // them before the timer runs, written and read only under the playback lock
+    // (64-bit: never read them without it).
+    volatile track_mask_t     mute_pending;
+    volatile track_mask_t     mute_target;
     // Spinlock index for mutex
     uint32_t             spinlock_num;
     bool                 spinlock_ready;
@@ -309,6 +315,28 @@ void transport_clear_track_queue(uint8_t track);
 // (selected at once while stopped). False for an invalid location or Song mode.
 bool transport_launch(track_mask_t track_mask, uint8_t pattern_index);
 
+// MUTE changes, Core 0; each takes the locks itself: call with none held. A change
+// gives a track a target live mute (1 = muted), decided and published in one critical
+// section. It applies at once while the transport is not playing or under the STEP
+// launch quantization, and otherwise waits for the next launch point (TRACK LOOP is
+// the bar in Song mode), where the timer applies it before that step plays. While a
+// change to audible waits, the live bit keeps a track muted by its stored mute
+// silent; after the section the stored mute of every location of the track is cleared.
+//
+// A MUTE press: each track in `mask` with a waiting change loses it; each other track
+// in `mask` gets a change to the opposite of its state (seq_get_track_mutes()'s rule).
+void transport_toggle_mutes(track_mask_t mask);
+// A group's release: each track in `mask` loses its waiting change, and each one whose
+// bit of `target` differs from its state now gets a change to that bit. A track already
+// in its target state gets none: nothing waits, and its stored mutes stay.
+void transport_set_mutes(track_mask_t mask, track_mask_t target);
+// Cancels the waiting changes in `mask`. Returns the tracks that had one; when `target`
+// is not NULL, *target gets their target bits.
+track_mask_t transport_cancel_mutes(track_mask_t mask, track_mask_t *target);
+// The selector: cancels the waiting changes in `mask` and toggles those tracks at
+// once, whatever the transport state and the quantization.
+void transport_toggle_mutes_now(track_mask_t mask);
+
 typedef struct {
     transport_state_t state;
     play_mode_t       mode;
@@ -318,6 +346,7 @@ typedef struct {
     uint8_t           track_step[NUM_TRACKS];
     track_mask_t           live_mutes;    // g_seq.track_mutes
     track_mask_t           stored_mutes;  // bit c: patterns[current[c]].tracks[c].muted
+    track_mask_t           mute_pending;  // g_seq.mute_pending
 } transport_snapshot_t;
 
 // Consistent copy of the transport; takes the locks itself.
@@ -342,15 +371,25 @@ void seq_set_kit_config(uint8_t track, const kit_config_t *config);
 // Bit t set when track t is a kit in any location. Takes seq_lock: call with none
 // held.
 track_mask_t seq_kit_tracks(void);
-// The MUTE button. A track that is muted (live, or stored at the location it
-// plays) becomes audible: the live bit and the stored mute of every location
-// are cleared and its prepared rows refreshed. An audible track gets the live
-// mute. Takes seq_lock: call with none held.
+// An immediate mute toggle, what the MUTE key did before its changes waited for
+// the launch point. Nothing in the firmware calls it now: a MUTE press goes
+// through transport_toggle_mutes() and the selector through
+// transport_toggle_mutes_now(); the host tests still use it. A track that is
+// muted (live, or stored at the location it plays) becomes audible: the live bit
+// and the stored mute of every location are cleared and its prepared rows
+// refreshed. An audible track gets the live mute. A waiting MUTE change is left
+// as it is. Takes seq_lock: call with none held.
 void seq_toggle_track_mute(uint8_t track);
 // The muted tracks, by the rule MUTE uses: bit c set when the live mute is set
 // or the location track c plays has its stored mute. Takes seq_lock: call with
 // none held.
 track_mask_t seq_get_track_mutes(void);
+// The same, for a caller that holds seq_lock.
+track_mask_t seq_track_mutes_locked(void);
+// Clears the stored mute of every location for the tracks in `mask`, one location
+// per lock section, then refreshes the prepared rows of each track that had one.
+// Takes seq_lock: call with none held.
+void seq_clear_stored_mutes(track_mask_t mask);
 
 // midi_out.c
 void midi_init(void);

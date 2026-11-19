@@ -576,6 +576,53 @@ static bool apply_track_queue_if_ready(uint8_t track) {
     return changed;
 }
 
+// The launch quantization's rule, one for queued pads and MUTE changes: BAR and BEAT
+// on a global step that is a multiple of 16 or 4, STEP on every step, TRACK LOOP when
+// the track has played the `track_len` steps of its row.
+static bool launch_point_due(uint8_t quant, uint32_t global_step, uint32_t track_steps,
+                             uint8_t track_len) {
+    switch (quant) {
+        case LAUNCH_QUANT_BAR:  return (global_step % 16u) == 0;
+        case LAUNCH_QUANT_BEAT: return (global_step % 4u) == 0;
+        case LAUNCH_QUANT_STEP: return true;
+        default:                return track_steps >= track_len;
+    }
+}
+
+// At a step boundary with a MUTE change waiting: writes the due targets into the live
+// mutes, before the pulse's live mutes and the song advance, so the rest of the pulse
+// treats them as a mute set just before it. Due is the queued pads' rule; Song mode
+// reads TRACK LOOP as BAR. Under TRACK LOOP the waiting track's row is loaded first and
+// its length decides, as for a queued pad. Returns the tracks whose row it loaded:
+// phase 1 does not load them again, so a row Core 0 publishes in between cannot give
+// the pad another length than the mute had.
+static track_mask_t apply_due_mutes(transport_t *t) {
+    track_mask_t pending = g_seq.mute_pending;
+    uint8_t quant = g_seq.launch_quant;
+    if (t->mode == PLAY_MODE_SONG && quant == LAUNCH_QUANT_TRACK_LOOP) quant = LAUNCH_QUANT_BAR;
+    uint32_t global_step_count = t->pulse_count / PULSES_PER_STEP;
+    track_mask_t due = 0;
+    track_mask_t loaded = 0;
+    for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
+        if (!(pending & TRACK_BIT(tr))) continue;
+        if (quant == LAUNCH_QUANT_TRACK_LOOP) {
+            load_prepared_track(tr);
+            loaded |= TRACK_BIT(tr);
+        }
+        uint8_t track_len = clamp_pattern_steps(prepared_playback.track[tr].length);
+        if (launch_point_due(quant, global_step_count, t->track_step_count[tr], track_len)) {
+            due |= TRACK_BIT(tr);
+        }
+    }
+    if (due) {
+        uint32_t lock_state = seq_lock();
+        g_seq.track_mutes = (g_seq.track_mutes & ~due) | (g_seq.mute_target & due);
+        seq_unlock(lock_state);
+        g_seq.mute_pending = pending & ~due;
+    }
+    return loaded;
+}
+
 static void clear_runtime_note_state(void) {
     pending_gate_on = 0;
     pending_gate_off = 0;
@@ -605,6 +652,8 @@ static void stop_playback_outputs(void) {
     midi_buf_flush();
     cv_gate_all_off();
     clear_runtime_note_state();
+    // Waiting MUTE changes end with the run; every caller holds the playback lock.
+    g_seq.mute_pending = 0;
     midi_send_stop();
 }
 
@@ -723,6 +772,12 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
 
     if ((t->pulse_count % (PPQN / MIDI_PPQN)) == 0) midi_send_clock();
 
+    // Pulse order 1a: due MUTE changes. Phase 1 keeps the rows loaded for them.
+    track_mask_t loaded_rows = 0;
+    if (g_seq.mute_pending && (t->pulse_count % PULSES_PER_STEP) == 0) {
+        loaded_rows = apply_due_mutes(t);
+    }
+
     // A mute cuts an already sounding note on the next internal pulse. A kit with
     // nothing sounding and no flam pending has nothing to release.
     uint32_t mute_lock = seq_lock();
@@ -789,21 +844,15 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
         pending_gate_off = 0;
 
         for (int tr = 0; tr < NUM_TRACKS; tr++) {
-            load_prepared_track((uint8_t)tr);
+            if (!(loaded_rows & TRACK_BIT(tr))) load_prepared_track((uint8_t)tr);
             prepared = &prepared_playback;
 
             uint8_t track_len = clamp_pattern_steps(prepared->track[tr].length);
             if (t->mode == PLAY_MODE_PATTERN &&
                 t->queued_pattern[tr] != NO_QUEUED_PATTERN) {
                 uint8_t quant = g_seq.launch_quant;
-                bool due;
-                switch (quant) {
-                    case LAUNCH_QUANT_BAR:  due = (global_step_count % 16u) == 0; break;
-                    case LAUNCH_QUANT_BEAT: due = (global_step_count % 4u) == 0; break;
-                    case LAUNCH_QUANT_STEP: due = true; break;
-                    default:                due = t->track_step_count[tr] >= track_len; break;
-                }
-                if (due) {
+                if (launch_point_due(quant, global_step_count, t->track_step_count[tr],
+                                     track_len)) {
                     if (apply_track_queue_if_ready((uint8_t)tr)) {
                         prepared = &prepared_playback;
                         track_len = clamp_pattern_steps(prepared->track[tr].length);
@@ -885,6 +934,8 @@ void sequencer_init(void) {
     jitter_expected_period_us = pulse_interval_us;
     jitter_reset_now();
     clear_runtime_note_state();
+    g_seq.mute_pending = 0;
+    g_seq.mute_target = 0;
     memset(playback_pattern, NO_QUEUED_PATTERN, sizeof(playback_pattern));
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         kit_config_defaults(&g_seq.kit_config[track]);
@@ -951,6 +1002,7 @@ void transport_start(void) {
         t->current_track_step[track] = 0;
         t->queued_pattern[track] = NO_QUEUED_PATTERN;
     }
+    g_seq.mute_pending = 0;                 // before an empty song's early return
 
     if (t->mode == PLAY_MODE_SONG) {
         t->song_position = 0;
@@ -1145,6 +1197,64 @@ bool transport_launch(track_mask_t track_mask, uint8_t pattern_index) {
     return true;
 }
 
+// ─── MUTE changes (called from Core 0) ─────────────────────────
+
+typedef enum { MUTES_TOGGLE, MUTES_SET, MUTES_NOW } mutes_op_t;
+
+// One decision under both locks, published at once, so the timer never applies a
+// boundary between the decision and the write. The stored mutes are cleared after.
+static void change_mutes(track_mask_t mask, track_mask_t target, mutes_op_t op) {
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t lock_state = seq_lock();
+    track_mask_t muted = seq_track_mutes_locked();
+    // Tracks in `mask` left out of `change` only lose a waiting change: under a toggle
+    // the ones that had one, under a set the ones already in their target state.
+    track_mask_t change = mask;
+    if (op == MUTES_TOGGLE) change &= ~g_seq.mute_pending;
+    if (op == MUTES_SET) change &= target ^ muted;
+    g_seq.mute_pending &= ~mask;
+    track_mask_t want = (op == MUTES_SET ? target : ~muted) & change;
+    track_mask_t unmute = change & ~want;
+    // A track muted only by its stored mute stays silent by its live bit until its
+    // change lands: the stored mutes are cleared below, with no lock held.
+    g_seq.track_mutes |= unmute & muted;
+    if (op == MUTES_NOW ||
+        g_seq.transport.state != TRANSPORT_PLAYING ||
+        g_seq.launch_quant == LAUNCH_QUANT_STEP) {
+        g_seq.track_mutes = (g_seq.track_mutes & ~change) | want;
+    } else {
+        g_seq.mute_target = (g_seq.mute_target & ~change) | want;
+        g_seq.mute_pending |= change;
+    }
+    seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
+    if (unmute) seq_clear_stored_mutes(unmute);
+}
+
+void transport_toggle_mutes(track_mask_t mask) {
+    change_mutes(mask, 0, MUTES_TOGGLE);
+}
+
+void transport_set_mutes(track_mask_t mask, track_mask_t target) {
+    change_mutes(mask, target, MUTES_SET);
+}
+
+void transport_toggle_mutes_now(track_mask_t mask) {
+    change_mutes(mask, 0, MUTES_NOW);
+}
+
+// Not a change_mutes() op: it changes no live bit and clears no stored mute.
+track_mask_t transport_cancel_mutes(track_mask_t mask, track_mask_t *target) {
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t lock_state = seq_lock();
+    track_mask_t cancelled = g_seq.mute_pending & mask;
+    if (target) *target = g_seq.mute_target & cancelled;
+    g_seq.mute_pending &= ~cancelled;
+    seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
+    return cancelled;
+}
+
 // Runs from RAM, as do the lock helpers it calls: it holds the playback lock
 // about 30 times a second, and a cache-cold run from XIP flash could stretch
 // that hold and delay the timer (MIDI Clock, gate edges).
@@ -1157,6 +1267,7 @@ void __not_in_flash_func(sequencer_snapshot)(transport_snapshot_t *out) {
     out->mode = t->mode;
     out->pulse_count = t->pulse_count;
     out->live_mutes = g_seq.track_mutes;
+    out->mute_pending = g_seq.mute_pending;
     out->stored_mutes = 0;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         out->current[track] = t->current_pattern[track];

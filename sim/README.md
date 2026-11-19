@@ -341,7 +341,7 @@ was written for):
 
 A clip on the device has at most 16 steps. The arrangements make longer
 phrases the way the device does: two clips of a track taken in turn, a clip of
-10 to 14 steps against the bar (an arp of 3 to 7), mutes and scenes. An
+10 to 14 steps against the bar (an arp of 3 to 7), MUTE and SCENE. An
 arrangement is a list of the artist's moves written with the helpers of
 `stage()`; it also records what the check should find: the rows and mutes at
 chosen bars and, for a change on the beat, at chosen beats; the clips that
@@ -361,6 +361,24 @@ the page offers only the variants that fit (`Device.features()`):
 - `pads` (with `fw2`): no keyboard; while a step is held the pads are a
   four-octave piano and the artist takes each pitch from one pad (the encoder
   only for a pitch outside the window).
+
+On a firmware where MUTE waits for the launch point, every variant is played
+with `quantMutes` (`QMUTE=1`: `sim/check.sh` sets it for every score, and the
+page passes it from `Device.features()`). Each MUTE press keeps its moment
+just ahead of the downbeat, and the captions say that it lands there. Where
+the two bars before a pair's downbeat are free, the pair is a mute group
+instead of two fingers: the first MUTE held from beat 2 of the bar before
+the last, the second pressed 650 ms later, the first let go 120 ms before the
+downbeat. The check adds the mutes alone 25 ms before and 40 ms after every
+MUTE's downbeat (an immediate MUTE fails the first, a late one the second),
+and for a group the mutes after the downbeat its hold crosses (unchanged)
+and both MUTE lights bright white while it is held, at two moments a
+sixteenth apart (one of them is an even sixteenth, where a change that only
+waits shows its normal light). With `QMUTE=1` the artist check also fails an
+arrangement none of whose shows played a group. `device_check.js` takes what
+a MUTE tap does from the core, not from `QMUTE`: on a firmware where MUTE
+waits it presses MUTE in the middle of a bar and expects no change until the
+next downbeat, so it passes with either score.
 
 The page has an on-screen keyboard, computer keys and Web MIDI for the same
 input. With a firmware that does not listen on its DIN input it says so.

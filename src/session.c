@@ -126,7 +126,7 @@ bool session_scene(uint8_t row) {
 }
 
 void session_mute(uint8_t track) {
-    if (track < NUM_TRACKS) seq_toggle_track_mute(track);
+    if (track < NUM_TRACKS) transport_toggle_mutes(TRACK_BIT(track));
 }
 
 uint8_t session_common_row(const transport_snapshot_t *snap) {
