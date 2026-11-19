@@ -34,7 +34,9 @@ typedef struct {
     uint8_t first_track;              // first logical track on the visible page
     uint8_t occupied_rows;            // across all track pages
     uint64_t clip_mask;               // sequencer_clip_mask(bank)
-    track_mask_t muted;                   // bit per track: live | stored mute
+    track_mask_t muted;               // bit per track: live | stored mute
+    track_mask_t mute_pending;        // bit per track: a mute change waits for the launch point
+    track_mask_t mute_group;          // bit per track: collected in a mute group
     uint8_t  focus_track;
     bool     playing;
     uint32_t pulse;                   // pulse_count while playing; a 120 BPM pulse clock when stopped

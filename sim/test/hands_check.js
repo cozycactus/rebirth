@@ -29,8 +29,11 @@
 // the live set every 20 000 (in 4) on 4 of those, song 1 + formIndex in the
 // formIndex-th score (four songs, forms and scores; an eighth of the samples,
 // to keep the default run short), or on every show with HANDS_FULL=1.
+// QMUTE=1 builds every score with quantMutes, as the page does when MUTE
+// waits for the launch point (sim/check.sh passes it from the core).
 //   node sim/test/hands_check.js
 //   HANDS_FULL=1 node sim/test/hands_check.js
+//   QMUTE=1 node sim/test/hands_check.js
 'use strict';
 const path = require('path');
 const web = path.join(__dirname, '..', 'web');
@@ -43,6 +46,7 @@ const { PANEL } = HandPlan, MM = PANEL.UNITS_PER_MM;
 
 const SCORES = [['base', {}], ['fw2', { fw2: true }], ['keys', { fw2: true, keys: true }], ['pads', { fw2: true, pads: true }]];
 const FULL = process.env.HANDS_FULL === '1';
+const QMUTE = process.env.QMUTE === '1';
 const RUN_GAP_US = 150000;      // an encoder's edges this far apart begin a new run
 const GROUP_US = 100000;        // a group's downs are within this of its first
 const GROUPED = ['pad', 'step', 'mute'];
@@ -408,7 +412,8 @@ function posed(show, plan, tab, stats, travelled) {
 // ─── Every show ──────────────────────────────────────────────────
 const started = Date.now();
 console.log('mode: ' + (FULL ? 'full (HANDS_FULL=1): every show posed' :
-  'sample: song 0 and song 1 + formIndex posed in every arrangement and score (HANDS_FULL=1 for all)'));
+  'sample: song 0 and song 1 + formIndex posed in every arrangement and score (HANDS_FULL=1 for all)') +
+  (QMUTE ? '; MUTE waits for the launch point (QMUTE=1)' : ''));
 const stats = { shows: 0, posed: 0, moments: 0, travel: 0, crossings: 0, overlaps: 0, live: 0, prep: 0 };
 const sums = { intervals: 0, runs: 0, copies: 0, groups: 0, nearPairs: 0, farPairs: 0, holds: 0, inner: 0, innerRuns: 0,
   nested: 0, farInHold: 0, secondCopy: 0, bigGroup: 0 };
@@ -417,7 +422,7 @@ Artist.SONGS.forEach((song, si) => {
     for (const [score, options] of SCORES) {
       where = { song: song.id, form: form.id, score };
       const before = failures.length;
-      const show = Artist.buildShow(undefined, Object.assign({ song: si, form: form.id }, options));
+      const show = Artist.buildShow(undefined, Object.assign({ song: si, form: form.id, quantMutes: QMUTE }, options));
       const plan = HandPlan.build(show.actions), tab = table(show.actions);
       assigned(plan, tab);
       sums.intervals += tab.intervals.length;

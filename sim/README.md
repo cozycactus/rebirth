@@ -11,7 +11,7 @@ The public page, https://cozycactus.github.io/rebirth/, always runs `master`
 ```bash
 sim/build.sh native        # native core + smoke test, needs only a C compiler
 sim/build.sh web           # WebAssembly cores and version.js, needs sim/emsdk (see the script)
-sim/check.sh               # every check for every score this firmware takes; `quick` for the device check only
+sim/check.sh               # every check for every score this firmware takes, then the clock check; `quick` skips the artist
 node sim/test/artist_check.js       # every song in every arrangement; SONG=3 FORM=sunrise plays one
 python3 -m http.server 8765 --bind 127.0.0.1 --directory sim/web   # then open http://localhost:8765
 ```
@@ -34,8 +34,11 @@ Hovering over a control of the panel or the page shows what it does.
 CI (`.github/workflows/ci.yml`, job Simulator) builds the simulator on every
 push and pull request with Emscripten 7.0.0 and runs `sim/check.sh`: the device
 check and the artist check (every song in every arrangement) for every score
-the firmware takes, plus the offline SH-101 audio checks. A firmware change
-that breaks the artist's gestures shows
+the firmware takes, plus the offline SH-101 audio checks, and, for a firmware
+that follows an external clock, the clock check (`sim/test/clock_check.js`:
+Clocks at 145 BPM on the DIN input, the shown tempo, Start, one Clock out per
+Clock in, Stop, Continue after an SPP, a lost clock in EXT and in AUTO). A
+firmware change that breaks the artist's gestures shows
 there, on its own pull request. On a push to
 `master` it also packages the page with `sim/publish.sh package`: the page,
 its scripts asked for with the commit (so a browser never mixes two builds),
@@ -59,10 +62,10 @@ write access on the site repository) and the repository variable
 | `src/rgb_leds.c` (PIO + DMA) | `sim/core/sim_rgb_leds.c`: same interface, same refusal of a frame within 3 ms of the last |
 | Five MCP23017: step buttons (0x20, steps 8/16 on 0x24), step LEDs (0x21), the key matrix (0x22 rows, 0x23 SCENE/MUTE columns) | Register models on a virtual I2C bus (`sim/core/hal.c`): IPOL, directions, pull-ups, output latches; a matrix row reads low through a closed key in a column driven low, and low too with its pull-up off (a chip that reset); chip reset, bus faults |
 | UART | A PL011 with its FIFO off: 320 us a byte, TX interrupt when the holding register empties |
-| Timer | One virtual microsecond clock; alarm 0 fires the real `sequencer_timer_isr` |
+| Timer | One virtual microsecond clock; alarm 0 fires the real `sequencer_timer_isr`; a forced alarm 1 interrupt (INTF bit 1, the external clock's doorbell) runs the real `sequencer_clock_in_isr` at once |
 | OLED | The 1024 bytes of each `ssd1309_flush()` |
 | Encoders, PLAY, gates, tempo LED | GPIO levels; an encoder detent is four quadrature edges |
-| MIDI IN | Bytes arrive on the UART's one-byte receiver, 320 us apart; a byte that finds the last one unread is lost, as when a flash erase keeps interrupts off |
+| MIDI IN | Bytes arrive on the UART's one-byte receiver, 320 us apart; a byte that finds the last one unread is lost, as when a flash erase keeps interrupts off. A byte arrives at its own time also while core 0 waits out a bus timeout |
 | MCP4822 | Decoded SPI words |
 | Flash | A 2 MiB array; erase and program take typical (not measured) times and stall both cores |
 
@@ -341,7 +344,7 @@ was written for):
 
 A clip on the device has at most 16 steps. The arrangements make longer
 phrases the way the device does: two clips of a track taken in turn, a clip of
-10 to 14 steps against the bar (an arp of 3 to 7), mutes and scenes. An
+10 to 14 steps against the bar (an arp of 3 to 7), MUTE and SCENE. An
 arrangement is a list of the artist's moves written with the helpers of
 `stage()`; it also records what the check should find: the rows and mutes at
 chosen bars and, for a change on the beat, at chosen beats; the clips that
@@ -361,6 +364,24 @@ the page offers only the variants that fit (`Device.features()`):
 - `pads` (with `fw2`): no keyboard; while a step is held the pads are a
   four-octave piano and the artist takes each pitch from one pad (the encoder
   only for a pitch outside the window).
+
+On a firmware where MUTE waits for the launch point, every variant is played
+with `quantMutes` (`QMUTE=1`: `sim/check.sh` sets it for every score, and the
+page passes it from `Device.features()`). Each MUTE press keeps its moment
+just ahead of the downbeat, and the captions say that it lands there. Where
+the two bars before a pair's downbeat are free, the pair is a mute group
+instead of two fingers: the first MUTE held from beat 2 of the bar before
+the last, the second pressed 650 ms later, the first let go 120 ms before the
+downbeat. The check adds the mutes alone 25 ms before and 40 ms after every
+MUTE's downbeat (an immediate MUTE fails the first, a late one the second),
+and for a group the mutes after the downbeat its hold crosses (unchanged)
+and both MUTE lights bright white while it is held, at two moments a
+sixteenth apart (one of them is an even sixteenth, where a change that only
+waits shows its normal light). With `QMUTE=1` the artist check also fails an
+arrangement none of whose shows played a group. `device_check.js` takes what
+a MUTE tap does from the core, not from `QMUTE`: on a firmware where MUTE
+waits it presses MUTE in the middle of a bar and expects no change until the
+next downbeat, so it passes with either score.
 
 The page has an on-screen keyboard, computer keys and Web MIDI for the same
 input. With a firmware that does not listen on its DIN input it says so.
@@ -422,7 +443,9 @@ four scores and poses 32 of those shows (every press on its control, the
 hand rules and the order of a hand's fingers across held keys, the grip
 turning with the knob, nothing of the hand's mesh through a control or the
 plate, the hands' speed), 4 of them also every 20 ms of the live set;
-`HANDS_FULL=1` poses every show. `sim/check.sh` runs both.
+`HANDS_FULL=1` poses every show, and `QMUTE=1` builds the scores with
+`quantMutes`, so a MUTE group is held as the page plays it. `sim/check.sh`
+runs both, passing `QMUTE` as for the artist check.
 
 The frame cost was measured on an Apple M1 (headless Chrome 157, WebGL
 through ANGLE on Metal), the page at 1500 × 1000 and a pixel ratio of 2, the

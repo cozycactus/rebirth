@@ -277,6 +277,17 @@ bool panel_input_next(panel_event_t *out) {
     return true;
 }
 
+bool panel_input_mute_down(uint8_t track) {
+    if (track >= 8) return false;
+    for (uint8_t r = 0; r < PANEL_ROWS; r++) {
+        for (uint8_t col = 0; col < PANEL_COLS; col++) {
+            const key_control_t *control = &key_map[r][col];
+            if (control->kind == PANEL_MUTE && control->track == track) return keys[r][col].accepted;
+        }
+    }
+    return false;
+}
+
 bool panel_input_pad_down(uint8_t track, uint8_t row) {
     if (track >= 8 || row >= 8) return false;
     for (uint8_t r = 0; r < PANEL_ROWS; r++) {
