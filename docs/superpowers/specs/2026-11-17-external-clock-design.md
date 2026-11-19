@@ -1,6 +1,6 @@
 # Following an External MIDI Clock — Design
 
-Date: 2026-11-17. Status: the panel place (step 14 in Pattern Select), the
+Date: 2026-11-17. Status: the panel place (step 14 in Pattern Select, moved to step 15 when master gave step 14 to the MIDI Song player), the
 power-up source (INT) and the AUTO behaviour on a lost clock (play on, lock
 again when the clock returns) were chosen by the project owner in
 conversation. The timing architecture was put to an independent poll of
@@ -41,8 +41,8 @@ that clock jitters or disappears.
 
 ## Panel
 
-- **Pattern Select, step 14** cycles CLOCK INT -> EXT -> AUTO. The OLED shows
-  `CLOCK EXT` for a second and `CLK EXT` beside the queue line; step 14's LED
+- **Pattern Select, step 15** cycles CLOCK INT -> EXT -> AUTO. The OLED shows
+  `CLOCK EXT` for a second and `CLK EXT` beside the queue line; step 15's LED
   is lit when the source is not INT. Pattern Select already holds the global
   functions (SAVE, LOAD, the jitter reset).
 - **Tempo line.** INT shows the tempo as today. With EXT or AUTO the tempo
@@ -174,6 +174,13 @@ Nothing changes in the launch rules or Song bar changes: they read
 stays where it is (every fourth pulse), so downstream gear sees one Clock per
 Clock received, re-timed by ReBirth, and only while it plays; Start, Continue
 and Stop go out when ReBirth's own transport changes.
+
+### MIDI Song mode
+
+The MIDI Song player that master added plays a file on its own absolute
+timeline, so the external clock takes no part in it: PLAY starts the song as
+before, the wire's Start, Continue, Stop and SPP are ignored, and neither a lost
+clock nor a change of source stops it.
 
 ### Changing the source while playing
 

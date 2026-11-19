@@ -31,8 +31,10 @@ typedef struct {
     uint8_t  bank;                    // shown bank
     uint8_t  current[NUM_TRACKS];     // locations 0..31
     uint8_t  queued[NUM_TRACKS];      // NO_QUEUED_PATTERN when none
+    uint8_t first_track;              // first logical track on the visible page
+    uint8_t occupied_rows;            // across all track pages
     uint64_t clip_mask;               // sequencer_clip_mask(bank)
-    uint8_t  muted;                   // bit per track: live | stored mute
+    track_mask_t muted;                   // bit per track: live | stored mute
     uint8_t  focus_track;
     bool     playing;
     uint32_t pulse;                   // pulse_count while playing; a 120 BPM pulse clock when stopped

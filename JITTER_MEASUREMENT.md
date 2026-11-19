@@ -36,7 +36,7 @@ J:<latency> P:<period> I:<isr>
 
 Press step button 13 in pattern select to reset the counters.
 
-With the clock source EXT or AUTO (step button 14) the footer shows the external
+With the clock source EXT or AUTO (step button 15) the footer shows the external
 clock instead:
 
 ```text

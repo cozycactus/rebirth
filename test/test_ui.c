@@ -2678,7 +2678,7 @@ static void test_mixed_type_track_uses_cell_type(void) {
 
 static bool kit_steps_untouched(void) {
     for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
-        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        for (uint8_t t = 0; t < KIT_TRACK_SLOTS; t++) {
             for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
                 if (g_seq.patterns[p].kit_steps[t][s]) return false;
             }
@@ -2934,7 +2934,7 @@ static void test_track_config_third_kit_refused(void) {
     CHECK(seq_kit_tracks() == ((1u << 1) | (1u << 4)));
     // A kit track itself still cycles through KIT.
     ui.notify_msg[0] = '\0';
-    for (unsigned i = 0; i < 3; i++) press_encoder(0, BTN_PRESS);
+    for (unsigned i = 0; i < NUM_TRACKS - 5; i++) press_encoder(0, BTN_PRESS);
     CHECK(ui.config_track == 1);
     turn_value(1);
     CHECK(type_everywhere(1, TRACK_TYPE_SYNTH));
@@ -4704,23 +4704,23 @@ static void clocks_in(unsigned count) {
     }
 }
 
-static void test_step_14_cycles_the_clock_source(void) {
+static void test_step_15_cycles_the_clock_source(void) {
     press_encoder(1, BTN_LONG_PRESS);
     CHECK(ui.mode == UI_PATTERN_SELECT);
     ui_update();
-    CHECK(!(led_mask & (1u << 13)));
-    press_step(13);
+    CHECK(!(led_mask & (1u << 14)));
+    press_step(14);
     CHECK(transport_get_clock_source() == CLOCK_SOURCE_EXT);
     CHECK(strcmp(ui.notify_msg, "CLOCK EXT") == 0);
-    CHECK(led_mask & (1u << 13));
-    release_step(13);
-    press_step(13);
+    CHECK(led_mask & (1u << 14));
+    release_step(14);
+    press_step(14);
     CHECK(transport_get_clock_source() == CLOCK_SOURCE_AUTO);
     CHECK(strcmp(ui.notify_msg, "CLOCK AUTO") == 0);
-    release_step(13);
-    press_step(13);
+    release_step(14);
+    press_step(14);
     CHECK(transport_get_clock_source() == CLOCK_SOURCE_INT);
-    CHECK(!(led_mask & (1u << 13)));
+    CHECK(!(led_mask & (1u << 14)));
     // Shown beside the queue line.
     transport_set_clock_source(CLOCK_SOURCE_AUTO);
     ui.notify_ticks = 0;
@@ -4817,7 +4817,7 @@ int main(int argc, char **argv) {
     RUN(test_selector_short_press_mutes_on_release);
     RUN(test_selector_leds_show_stored_mutes);
     RUN(test_flash_controls_are_blocked_during_playback);
-    RUN(test_step_14_cycles_the_clock_source);
+    RUN(test_step_15_cycles_the_clock_source);
     RUN(test_value_turns_set_the_tempo_only_on_the_internal_timer);
     RUN(test_session_tempo_line_names_the_source);
     RUN(test_pattern_view_tempo_ends_left_of_the_transport_symbol);

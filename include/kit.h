@@ -29,9 +29,9 @@ bool kit_cell_has_clip(const uint32_t steps[STEPS_PER_PATTERN], uint8_t length);
 bool kit_is_cell(const pattern_t *p, uint8_t track);
 // Bit t set when track t is a kit cell at location[t] of `patterns` (a location
 // >= MAX_PATTERNS counts as none).
-uint8_t kit_cell_mask(const pattern_t *patterns, const uint8_t location[NUM_TRACKS]);
+track_mask_t kit_cell_mask(const pattern_t *patterns, const uint8_t location[NUM_TRACKS]);
 // Bit t set when track t has type KIT in any of the `count` patterns.
-uint8_t kit_track_mask(const pattern_t *patterns, uint8_t count);
+track_mask_t kit_track_mask(const pattern_t *patterns, uint8_t count);
 // The glyph of a lane value: '.' off, 'o' note (AC on), 'O' accent, 'f' flam.
 char kit_value_glyph(uint8_t value);
 // One glyph per step: '.', 'o', 'O', 'f'; ' ' beyond length; NUL-terminated.

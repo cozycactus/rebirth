@@ -7,8 +7,8 @@ void pattern_init(pattern_t *p, uint8_t index) {
     memset(p->kit_steps, 0, sizeof(p->kit_steps));
 
     for (int t = 0; t < NUM_TRACKS; t++) {
-        p->tracks[t].type = (t < 4) ? TRACK_TYPE_SYNTH : TRACK_TYPE_DRUM;
-        p->tracks[t].midi_channel = t;
+        p->tracks[t].type = (t < 4 || t >= KIT_TRACK_SLOTS) ? TRACK_TYPE_SYNTH : TRACK_TYPE_DRUM;
+        p->tracks[t].midi_channel = t % 16;
         p->tracks[t].drum_note = 36 + t;   // C1, C#1, D1...
         p->tracks[t].output_mode = (t < NUM_CV_CHANNELS) ? OUTPUT_BOTH : OUTPUT_MIDI_ONLY;
         p->tracks[t].cv_channel = (t < NUM_CV_CHANNELS) ? t : 0;
@@ -36,7 +36,7 @@ void pattern_set_step(pattern_t *p, uint8_t track, uint8_t step,
 void pattern_clear_step(pattern_t *p, uint8_t track, uint8_t step) {
     if (track >= NUM_TRACKS || step >= STEPS_PER_PATTERN) return;
     memset(&p->steps[track][step], 0, sizeof(step_t));
-    p->kit_steps[track][step] = 0;
+    if (track < KIT_TRACK_SLOTS) p->kit_steps[track][step] = 0;
 }
 
 void pattern_toggle_step(pattern_t *p, uint8_t track, uint8_t step) {
@@ -65,13 +65,13 @@ void pattern_clear(pattern_t *p) {
 void pattern_clear_track(pattern_t *p, uint8_t track) {
     if (track >= NUM_TRACKS) return;
     memset(p->steps[track], 0, sizeof(p->steps[track]));
-    memset(p->kit_steps[track], 0, sizeof(p->kit_steps[track]));
+    if (track < KIT_TRACK_SLOTS) memset(p->kit_steps[track], 0, sizeof(p->kit_steps[track]));
 }
 
 void pattern_copy_track(pattern_t *dst, const pattern_t *src, uint8_t track) {
     if (track >= NUM_TRACKS || dst == src) return;
     memcpy(dst->steps[track], src->steps[track], sizeof(dst->steps[track]));
-    memcpy(dst->kit_steps[track], src->kit_steps[track], sizeof(dst->kit_steps[track]));
+    if (track < KIT_TRACK_SLOTS) memcpy(dst->kit_steps[track], src->kit_steps[track], sizeof(dst->kit_steps[track]));
     pattern_set_track_length(dst, track, pattern_get_track_length(src, track));
 }
 
@@ -108,14 +108,14 @@ static void shift_kit_steps(uint32_t *words, int8_t direction) {
 void pattern_shift(pattern_t *p, int8_t direction) {
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         shift_track_steps(p->steps[track], direction);
-        shift_kit_steps(p->kit_steps[track], direction);
+        if (track < KIT_TRACK_SLOTS) shift_kit_steps(p->kit_steps[track], direction);
     }
 }
 
 void pattern_shift_track(pattern_t *p, uint8_t track, int8_t direction) {
     if (track >= NUM_TRACKS) return;
     shift_track_steps(p->steps[track], direction);
-    shift_kit_steps(p->kit_steps[track], direction);
+    if (track < KIT_TRACK_SLOTS) shift_kit_steps(p->kit_steps[track], direction);
 }
 
 uint8_t pattern_get_track_length(const pattern_t *p, uint8_t track) {

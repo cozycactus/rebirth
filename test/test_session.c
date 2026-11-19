@@ -196,7 +196,7 @@ static void test_walk_stops_across_kit(void) {
     track = 0;
     lane = 0;
     session_walk_stops(&track, &lane, 100, kits);       // clamped at the last stop
-    CHECK(track == 7 && lane == 0);
+    CHECK(track == NUM_TRACKS - 1 && lane == 0);
     session_walk_stops(&track, &lane, -100, kits);      // and at the first
     CHECK(track == 0 && lane == 0);
 }

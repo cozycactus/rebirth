@@ -34,6 +34,7 @@ add_executable(rp2040_sequencer
     src/midi_out.c
     src/midi_in.c
     src/clock_in.c
+    src/midi_song.c
     src/cv_gate.c
     src/song.c
     src/session.c
@@ -60,6 +61,8 @@ if(NOT REBIRTH_CV_DAC_GAIN MATCHES "^[12]$")
     message(FATAL_ERROR "REBIRTH_CV_DAC_GAIN must be 1 or 2")
 endif()
 target_compile_definitions(rp2040_sequencer PRIVATE CV_DAC_GAIN=${REBIRTH_CV_DAC_GAIN})
+target_link_options(rp2040_sequencer PRIVATE "LINKER:-T,${CMAKE_CURRENT_SOURCE_DIR}/midi_song_flash.ld")
+set_property(TARGET rp2040_sequencer APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/midi_song_flash.ld")
 
 target_link_libraries(rp2040_sequencer
     pico_stdlib

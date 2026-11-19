@@ -1,11 +1,11 @@
 # ReBirth — RP2040 Pattern Sequencer
 
-8-track, 16-step hardware sequencer inspired by [ReBirth RB-338](https://en.wikipedia.org/wiki/ReBirth_RB-338).  
+64-track, 16-step hardware sequencer inspired by [ReBirth RB-338](https://en.wikipedia.org/wiki/ReBirth_RB-338).
 Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer using external synths and drum machines.
 
 ## Features
 
-- **8 tracks × 16 steps** — synth (melodic), drum (percussive) or kit per track
+- **64 tracks × 16 steps** — SYNTH and DRUM on T1–T64, KIT available on T1–T8. TRACK scrolls through eight-column pages. SCENE addresses all 64 tracks.
 - **Kit track** — one track plays a whole TR-909 style drum machine over DIN MIDI:
   12 lanes per step (accent plus 11 voices), three velocity levels and flams
 - **32 pattern locations** arranged like ReBirth: banks A-D, slots 1-8
@@ -27,6 +27,7 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **Pads as a keyboard** — while a step of a SYNTH clip is held, the 64 pads are a
   four-octave piano and a pad press sets the step's note, with no MIDI keyboard
 - **CV/Gate output** — 4 channels via MCP4822 DACs (1V/oct, 12-bit; default 0-2.048 V)
+- **MIDI Song playback** — import a timed MIDI arrangement with up to 64 source tracks and assign its output channels and CV/Gate pairs. [Import and playback](sim/README.md#midi-song)
 - **96 PPQN** internal timing, **24 PPQN** MIDI Clock, 20–300 BPM
 - **External clock** — follows a MIDI Clock on the DIN input (CLOCK INT / EXT /
   AUTO) with Start, Stop, Continue and Song Position Pointer; the OLED shows the
@@ -112,7 +113,8 @@ Unix builds also exercise concurrent Stop/Panic during a pending gate commit.
 ## Live Controls
 
 The Session view is home. The grid shows one bank (A-D) of 8 slots per track:
-column = track, row = slot. The **focus** is one cell (track, slot); the step
+column = track, row = slot. Turning TRACK past an eight-track boundary displays
+the next page. The OLED shows its track range. The **focus** is one cell (track, slot); the step
 buttons edit it.
 
 - **Pad:** launches that slot on the track at the next launch point and moves
@@ -240,10 +242,10 @@ buttons edit it.
   configuration without muting. Save/load (9/10) require stopped playback (and
   no start waiting for an external Clock); buttons, pads and PLAY held through
   a save or load do nothing afterwards.
-- **External clock.** In the selector, button 14 cycles the clock source:
+- **External clock.** In the selector, button 15 cycles the clock source:
   `CLOCK INT` (the device is the master, as at power-up), `CLOCK EXT` (it only
   follows a MIDI Clock on the DIN input) and `CLOCK AUTO` (it follows one when
-  it is there, else runs on its own); the selector shows `CLK EXT` and button 14
+  it is there, else runs on its own); the selector shows `CLK EXT` and button 15
   is lit when the source is not INT. It is not saved.
   - Each Clock received drives four of the 96 PPQN pulses: the first when it
     arrives, so every step starts on its Clock, the other three spaced by the
@@ -270,6 +272,8 @@ buttons edit it.
   - MIDI Clock out follows: one Clock out for each Clock in, while playing,
     with Start, Continue and Stop when the device's own transport changes. SPP
     is not passed on.
+  - A MIDI Song (selector button 14) keeps its own timing: the external clock
+    and the wire's transport do not apply to it.
 - A long press only counts on the screen where the button went down.
 - Pad and scene launches are unavailable in Song mode (`SONG MODE`); a pad
   still moves the focus. In the song editor, button 2 selects Song mode and
@@ -281,9 +285,10 @@ buttons edit it.
 - Step editor: encoder 1 short toggles accent, long toggles slide; encoder 2
   long toggles tie. Accent can combine with either connection type.
 
-New saves use version 6 with CRC32; version 4 and 5 saves still load after
-validation (they load with empty kits and default kit settings). Storage uses
-one flash region, so losing power during a save can lose that save.
+Projects use format 7 and a CRC32. Loading an eight-track project (versions
+4–6) restores T1–T8 and starts the higher tracks empty. Version 6 preserves
+its kit lanes and settings. The 64-track project occupies one flash slot,
+so losing power during a save can lose that save.
 
 ### Kit track
 
@@ -432,7 +437,7 @@ test/
 - [x] Jitter measurement — GPIO probe + on-device ISR timing stats
 - [x] USB MIDI removed by design
 - [x] Kit track: 909 over DIN MIDI, 12 lanes, velocity levels, flams (bench items
-      in [HARDWARE_STATUS.md](HARDWARE_STATUS.md)), save format v6
+      in [HARDWARE_STATUS.md](HARDWARE_STATUS.md)), save format v7
 - [x] Note entry from a MIDI keyboard: step + key, pass-through otherwise (host
       tests only; the input circuit is a bench item in [HARDWARE_STATUS.md](HARDWARE_STATUS.md))
 - [x] External MIDI clock: INT / EXT / AUTO, Start, Stop, Continue, SPP (host

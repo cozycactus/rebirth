@@ -46,16 +46,16 @@ RebirthCore().then(core => {
 
   settle(300);
 
-  // ─── The source from the panel: Pattern Select, step 14 ──────
+  // ─── The source from the panel: Pattern Select, step 15 ──────
   longValue();                                       // Session -> Pattern Select
-  tapStep(13);                                       // INT -> EXT
-  check(state().clockSource === 1, 'step 14 did not set the clock source to EXT: ' + state().clockSource);
-  check((device.stepLeds() >>> 13) & 1, 'step 14 is not lit with EXT');
+  tapStep(14);                                       // INT -> EXT
+  check(state().clockSource === 1, 'step 15 did not set the clock source to EXT: ' + state().clockSource);
+  check((device.stepLeds() >>> 14) & 1, 'step 15 is not lit with EXT');
   longValue();                                       // back to the Session view
   check(state().state === 0, 'the transport started by itself');
   // The power-up demo plays: a kick on every beat and a kit's closed hat on every step,
   // both on channel 10.
-  console.log('clock source EXT set from Pattern Select step 14');
+  console.log('clock source EXT set from Pattern Select step 15');
 
   // ─── Clocks while stopped: the tempo is measured, nothing plays ──
   let t = device.now() + 1000;
@@ -128,8 +128,8 @@ RebirthCore().then(core => {
 
   // ─── AUTO: plays on through a loss, then follows again ────────
   longValue();
-  tapStep(13);                                       // EXT -> AUTO
-  check(state().clockSource === 2, 'step 14 did not move on to AUTO');
+  tapStep(14);                                       // EXT -> AUTO
+  check(state().clockSource === 2, 'step 15 did not move on to AUTO');
   longValue();
   t = device.now() + 1000;
   send([0xFA], t);
