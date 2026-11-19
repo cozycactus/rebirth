@@ -434,6 +434,36 @@ with a first milestone that shows the hardest poses), and that "listen for
 crackle" is not a test an agent can run (now a measured stand-in with a pass
 rule, and the main-thread fallback built in).
 
+## As built (after the final reviews)
+
+The final whole-branch review and a three-model code review (Codex, Grok,
+DeepSeek) led to one fix wave. What it changed against the text above:
+
+- Time: the hands extrapolate with the clock the device ticks by (the audio
+  clock when the synths sound), and their draw time never goes back within a
+  show. Encoder edges are events too, so a pinch never turns ahead of the
+  drawn knob. A contact holds on [down, up): at the up itself, and before the
+  down, the fingertip hovers 0.3 mm above its control.
+- Loading: the scripts may load at any time, but the layer is built and
+  warmed only while the set is not live (the ring is shown until then). The
+  renderer refuses a software context (`failIfMajorPerformanceCaveat`); a lost
+  WebGL context brings the ring back until it is restored. The `down` and
+  `finger` classes are rebuilt from the controls the artist holds, never from
+  the plan. From disk (the 303s on the main thread) the hands are off by
+  default, as the measurement decided; the box turns them on.
+- Clearance and the check: every fingertip vertex is a clearance vertex; the
+  check tests the whole mesh against the controls' volumes, that a grip turns
+  with the knob (never more than 20.5°), that a group's fingers are on one hand
+  in order, that the panel geometry matches `app.js`, and samples the live set
+  every 20 ms on 4 of the 32 posed shows (every show with `HANDS_FULL=1`). The
+  default run takes about 70 s on an M1; `HANDS_FULL=1` 13–29 minutes.
+- Known limitation: a pinch's knob axis is the drawn centre at the plate, so
+  with the shifted lens the grip is drawn about 23 page units (12 px at the
+  page's normal size) above the drawn knob. Moving the axis onto the eye ray at
+  the grip's height put the approved grip's thumb 1.1–1.5 mm into the first
+  pad row, and no variant fixed both; the owner approved the frames with this
+  offset.
+
 ## Left to the builder
 
 Exact pose angles, lead times within the limits above, the cost weights of
