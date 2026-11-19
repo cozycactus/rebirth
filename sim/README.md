@@ -129,9 +129,11 @@ Files and optional TAL-BassLine-101 `.bassline` presets. Each file appears in
 Songs with its original tempo. **Полная MIDI-аранжировка** plays separate
 source tracks and allocates multiple virtual SH-101 voices for chords. Tracks
 named for percussion use the drum models. Exact name matches use the
-corresponding TAL preset's SH-101 controls. The raw presets, automation, and
-MIDI files stay on the computer. A local checkout can preload a file list
-from `sim/web/local-songs/twisted/catalog.json`, in the ignored local library.
+corresponding TAL preset's SH-101 controls. User imports stay in the browser.
+GitHub Pages includes the eight songs and presets in the authorized Twisted
+library. The URL parameter `?song=01%20Contains%20LSD` selects that song at
+load time. A local checkout can also preload an ignored local library from
+`sim/web/local-songs/twisted/catalog.json`. [Library credits](web/songs/twisted/CREDITS.md)
 The physical panel displays firmware LEDs. Use the imported track list or mixer
 to open the SH-101 controls for a part. In Session, TRACK moves through T1–T64
 in eight-column pages. Each column holds the eight clips of the current bank.
@@ -151,7 +153,10 @@ has 16 channels, so channel assignment determines which external instruments
 play those parts. Pitch bend and controllers remain in the MIDI stream.
 The CV/Gate route uses pitch and Gate.
 
-**Скачать MIDI Song UF2** writes a data-only RP2040 image for one song.
+Choose **Pico · RP2040** or **Pico 2 · RP2350** under **Плата для UF2**.
+**Скачать MIDI Song UF2** writes the selected song to the fixed flash slot at
+`0x100e0000`. Pico uses the RP2040 UF2 family. Pico 2 uses the absolute data address
+with the Raspberry Pi `absolute` family. The ReBirth firmware uses an unpartitioned flash layout.
 Install firmware with MIDI Song support first. Copy the song UF2 to the
 Pico's BOOTSEL drive. Hold VALUE to enter SELECT PATTERN and press step 14
 to open MIDI SONG. PLAY starts and stops. TRACK changes the page of eight

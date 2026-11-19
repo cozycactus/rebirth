@@ -378,12 +378,20 @@
           <label>Папка с MIDI и .bassline <input type="file" id="midi-folder" webkitdirectory multiple></label>
           <span class="sub" id="midi-import-status" role="status"></span>
         </div>
+        <p class="sub">MIDI и пресеты альбома <i>Twisted</i> подготовил Manos Ventouras (Band of Buggered).
+          <a href="https://payhip.com/b/ybfKg" target="_blank" rel="noopener">Исходный пакет</a></p>
         <div id="midi-song-settings" hidden>
           <div class="row">
             <label>Воспроизведение
               <select id="midi-song-mode">
                 <option value="full">Полная MIDI-аранжировка</option>
                 <option value="firmware">MIDI Song · выходы ReBirth</option>
+              </select>
+            </label>
+            <label>Плата для UF2
+              <select id="midi-song-board">
+                <option value="pico">Pico · RP2040</option>
+                <option value="pico2">Pico 2 · RP2350</option>
               </select>
             </label>
             <button class="btn" id="midi-song-export" type="button">Скачать MIDI Song UF2</button>

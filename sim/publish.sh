@@ -15,6 +15,7 @@ set -euo pipefail
 
 # The files of the page this script owns in the site's rebirth/ folder.
 PAGE_FILES="index.html app.js artist.js device.js rig.js acid.js dsp.js sh101.js sh101_cpu.js sh101_rom.js midi_songs.js core.js version.js"
+SONG_LIBRARY="songs/twisted"
 
 fail() { echo "publish: $*" >&2; exit 1; }
 
@@ -38,6 +39,8 @@ package() {
     # The page, its scripts asked for with the commit, so a browser holding
     # files of the last build in its cache does not mix them with these.
     for f in $PAGE_FILES; do cp "sim/web/$f" "$out/page/$f"; done
+    mkdir -p "$out/page/songs"
+    cp -R "sim/web/$SONG_LIBRARY" "$out/page/songs/"
     sed -i.bak -E "s#<script src=\"([a-z0-9_]+\\.js)\"></script>#<script src=\"\\1?v=$short\"></script>#" "$out/page/index.html"
     rm "$out/page/index.html.bak"
     local scripts=0
@@ -101,20 +104,25 @@ apply() {
     # The package holds exactly the page's files and source/, nothing else.
     local have want
     have=$(cd "$out/page" && ls | sort | tr '\n' ' ')
-    want=$(echo $PAGE_FILES | tr ' ' '\n' | sort | tr '\n' ' ')
+    want=$(echo $PAGE_FILES songs | tr ' ' '\n' | sort | tr '\n' ' ')
     [ "$have" = "$want" ] || fail "the package's page files are [$have], want [$want]"
     [ "$(cd "$out" && ls | sort | tr '\n' ' ')" = "page source " ] || fail "the package holds more than page/ and source/"
+    [ "$(cd "$out/page/songs" && ls)" = "twisted" ] && [ -f "$out/page/$SONG_LIBRARY/catalog.json" ] \
+        || fail "the package must contain the Twisted library"
     grep -q "^- Built from commit [0-9a-f]\{40\} " "$out/source/README.md" || fail "source/README.md names no commit"
 
     for f in $PAGE_FILES; do cp "$out/page/$f" "$site/rebirth/$f"; done
+    mkdir -p "$site/rebirth/songs"
+    rm -rf "$site/rebirth/$SONG_LIBRARY"
+    cp -R "$out/page/$SONG_LIBRARY" "$site/rebirth/songs/"
     rm -rf "$site/rebirth/source"
     cp -R "$out/source" "$site/rebirth/source"
 
     cd "$site"
-    git add -A -- $(for f in $PAGE_FILES; do echo "rebirth/$f"; done) rebirth/source
+    git add -A -- $(for f in $PAGE_FILES; do echo "rebirth/$f"; done) rebirth/source "rebirth/$SONG_LIBRARY"
     # Nothing else in the site may have changed.
     local other
-    other=$(git status --porcelain | grep -vE '^[MADR]  rebirth/(source/|('"${PAGE_FILES// /|}"')$)' || true)
+    other=$(git status --porcelain | grep -vE '^[MADR]  ("?rebirth/(source/|songs/twisted/)|rebirth/('"${PAGE_FILES// /|}"')$)' || true)
     [ -z "$other" ] || fail "other files changed in the site: $other"
     if git diff --cached --quiet; then echo "the site already has this build"; else git diff --cached --stat | tail -1; fi
 }

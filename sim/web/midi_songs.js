@@ -250,13 +250,19 @@
     return bytes;
   }
 
-  function uf2(imageBytes) {
+  function uf2(imageBytes, board = 'pico') {
+    // RP2350 uses an absolute UF2 to update ReBirth's fixed data slot.
+    let family;
+    if (board === 'pico') family = 0xe48bff56;
+    else if (board === 'pico2') family = 0xe48bff57;
+    else throw Error('Неизвестная плата для MIDI Song UF2.');
+    if (!imageBytes.length || imageBytes.length > flashBytes) throw Error('MIDI Song не помещается в слот.');
     const count = Math.ceil(imageBytes.length / 256);
     const bytes = new Uint8Array(count * 512);
     const view = new DataView(bytes.buffer);
     for (let i = 0; i < count; i++) {
       const at = i * 512;
-      [0x0a324655, 0x9e5d5157, 0x2000, flashAddress + i * 256, 256, i, count, 0xe48bff56]
+      [0x0a324655, 0x9e5d5157, 0x2000, flashAddress + i * 256, 256, i, count, family]
         .forEach((word, j) => view.setUint32(at + 4 * j, word, true));
       bytes.set(imageBytes.subarray(i * 256, (i + 1) * 256), at + 32);
       view.setUint32(at + 508, 0x0ab16f30, true);

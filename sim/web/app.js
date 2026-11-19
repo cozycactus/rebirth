@@ -875,19 +875,22 @@
       const song = selectedMidiSong();
       if (!song) return;
       try {
-        const url = URL.createObjectURL(new Blob([MidiSongs.uf2(firmwareMidiImage(song))]));
+        const board = $('midi-song-board').value;
+        const url = URL.createObjectURL(new Blob([MidiSongs.uf2(firmwareMidiImage(song), board)]));
         const link = document.createElement('a');
         link.href = url;
-        link.download = song.title + ' - ReBirth MIDI Song.uf2';
+        link.download = song.title + (board === 'pico2' ? ' - ReBirth Pico 2 MIDI Song.uf2' : ' - ReBirth MIDI Song.uf2');
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       } catch (error) { importStatus(error.message); }
     });
-    const local = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
-    if (local) {
-      const folder = './local-songs/twisted/';
-      fetch(folder + 'catalog.json').then(async response => {
-        if (!response.ok) return;
+    async function loadBundledLibrary() {
+      const local = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
+      const folders = local ? ['./local-songs/twisted/', './songs/twisted/'] : ['./songs/twisted/'];
+      for (const folder of folders) {
+        const response = await fetch(folder + 'catalog.json');
+        if (response.status === 404 && folder.startsWith('./local-songs/')) continue;
+        if (!response.ok) throw Error('Не удалось загрузить список песен Twisted.');
         const paths = await response.json();
         const files = await Promise.all(paths.map(async path => {
           const result = await fetch(folder + path.split('/').map(encodeURIComponent).join('/'));
@@ -895,7 +898,11 @@
           return new File([await result.blob()], path.split('/').pop());
         }));
         await loadFiles(files, true);
-      }).catch(error => importStatus(error.message));
+        return;
+      }
+    }
+    if (location.protocol === 'https:' || location.protocol === 'http:') {
+      loadBundledLibrary().catch(error => importStatus(error.message));
     }
   }
 

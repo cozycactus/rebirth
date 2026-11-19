@@ -45,10 +45,23 @@ function fixture() {
   assert.throws(() => MidiSongs.image(song, { 63: { cv: 0 } }), /монофоническую/);
   assert.throws(() => MidiSongs.image({ ...song, tracks: [...song.tracks, {}] }), /64 дорожки/);
   const image = MidiSongs.image(song, routes);
-  const uf2 = MidiSongs.uf2(image);
-  const header = new DataView(uf2.buffer);
-  assert.equal(header.getUint32(12, true), 0x100e0000);
-  assert.ok(header.getUint32(12, true) + uf2.length / 2 < 0x101e0000);
+  const blocks = Math.ceil(image.length / 256);
+  assert.deepEqual(MidiSongs.uf2(image), MidiSongs.uf2(image, 'pico'));
+  for (const [board, family] of [['pico', 0xe48bff56], ['pico2', 0xe48bff57]]) {
+    const uf2 = MidiSongs.uf2(image, board);
+    assert.equal(uf2.length, blocks * 512);
+    for (let i = 0; i < blocks; i++) {
+      const header = new DataView(uf2.buffer, i * 512, 512);
+      const fields = Array.from({ length: 8 }, (_, j) => header.getUint32(j * 4, true));
+      assert.deepEqual(fields, [0x0a324655, 0x9e5d5157, 0x2000, 0x100e0000 + i * 256, 256, i, blocks, family]);
+      assert.equal(header.getUint32(508, true), 0x0ab16f30);
+      const expected = new Uint8Array(256);
+      expected.set(image.subarray(i * 256, (i + 1) * 256));
+      assert.deepEqual(uf2.subarray(i * 512 + 32, i * 512 + 288), expected);
+    }
+  }
+  assert.throws(() => MidiSongs.uf2(image, 'other'), /плата/);
+  assert.throws(() => MidiSongs.uf2(new Uint8Array(1024 * 1024 + 1), 'pico2'), /слот/);
 
   const device = new Device(await Core());
   const bad = image.slice();
@@ -99,5 +112,5 @@ function fixture() {
   assert.equal(last.filter(e => e.status === 0x98 && e.d2 > 0).length, 2);
   assert.equal(last.filter(e => e.status === 0x88 && e.t < restart + 400000).length, 2, 'MUTE releases track 64 on page 8');
   assert.ok(!last.some(e => e.status === 0xe8), 'MUTE suppresses later messages on track 64');
-  console.log('PASS MIDI Song (64 tracks and page-8 mute, tempo map, pitch bend, CC, four CV/Gates, CRC, RP2040 UF2)');
+  console.log('PASS MIDI Song (64 tracks and page-8 mute, tempo map, pitch bend, CC, four CV/Gates, CRC, Pico and Pico 2 UF2)');
 })().catch(error => { console.error(error); process.exitCode = 1; });
