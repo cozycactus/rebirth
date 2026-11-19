@@ -2687,7 +2687,7 @@ static void test_mixed_type_track_uses_cell_type(void) {
 
 static bool kit_steps_untouched(void) {
     for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
-        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        for (uint8_t t = 0; t < KIT_TRACK_SLOTS; t++) {
             for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
                 if (g_seq.patterns[p].kit_steps[t][s]) return false;
             }
@@ -2943,7 +2943,7 @@ static void test_track_config_third_kit_refused(void) {
     CHECK(seq_kit_tracks() == ((1u << 1) | (1u << 4)));
     // A kit track itself still cycles through KIT.
     ui.notify_msg[0] = '\0';
-    for (unsigned i = 0; i < 3; i++) press_encoder(0, BTN_PRESS);
+    for (unsigned i = 0; i < NUM_TRACKS - 5; i++) press_encoder(0, BTN_PRESS);
     CHECK(ui.config_track == 1);
     turn_value(1);
     CHECK(type_everywhere(1, TRACK_TYPE_SYNTH));
@@ -4706,8 +4706,8 @@ static uint8_t white_mutes(void) {
     }
     ui_render();
     uint8_t mask = 0;
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if (white_full(shown[LED_MUTE(track)])) mask |= (uint8_t)(1u << track);
+    for (uint8_t key = 0; key < PANEL_TRACKS; key++) {
+        if (white_full(shown[LED_MUTE(key)])) mask |= (uint8_t)(1u << key);
     }
     return mask;
 }
@@ -4789,6 +4789,59 @@ static void test_mute_group_collects_after_half_a_second(void) {
     CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0x03);
     tick();                                 // both on the same pulse
     CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+}
+
+// The MUTE keys stand for the eight tracks of the page shown: with the focus on
+// track 41 key 1 is track 41, and its change waits and lands as on page 0.
+static void test_mute_key_follows_the_page(void) {
+    session_set_focus(41, 0);
+    play_under_bar();
+    mute_down(1);
+    mute_up(1);
+    CHECK(g_seq.mute_pending == TRACK_BIT(41) && g_seq.track_mutes == 0);
+    pulses(PULSES_PER_STEP);                // an odd sixteenth: the waiting flash
+    ui_render();
+    CHECK(white_full(shown[LED_MUTE(1)]) && !white_full(shown[LED_MUTE(0)]));
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == TRACK_BIT(41) && g_seq.mute_pending == 0);
+}
+
+// A group of tracks above 31: the masks are 64-bit all the way to the timer.
+static void test_mute_group_on_a_high_page(void) {
+    session_set_focus(40, 0);
+    play_under_bar();
+    mute_down(0);                           // track 40
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(3);                           // track 43 joins, 40's change is withdrawn
+    mute_up(3);
+    CHECK(g_seq.mute_pending == 0);
+    CHECK(ui.mute_group == (TRACK_BIT(40) | TRACK_BIT(43)));
+    ui_render();
+    CHECK(white_full(shown[LED_MUTE(0)]) && white_full(shown[LED_MUTE(3)]));
+    mute_up(0);
+    CHECK(g_seq.mute_pending == (TRACK_BIT(40) | TRACK_BIT(43)));
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == (TRACK_BIT(40) | TRACK_BIT(43)) && g_seq.mute_pending == 0);
+}
+
+// The held key keeps the track it stood for at its press when the page changes
+// under it; a key that joins stands for the track of the page shown at its press,
+// and the held key's release, by its key, applies them both.
+static void test_mute_held_key_keeps_its_track_across_pages(void) {
+    play_under_bar();
+    mute_down(0);                           // page 0: track 0
+    session_set_focus(9, 0);                // page 1 shown
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(2);                           // track 10 joins
+    mute_up(2);
+    CHECK(ui.mute_group == (TRACK_BIT(0) | TRACK_BIT(10)));
+    mute_up(0);
+    CHECK(g_seq.mute_pending == (TRACK_BIT(0) | TRACK_BIT(10)));
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == (TRACK_BIT(0) | TRACK_BIT(10)));
 }
 
 static void test_mute_press_and_release_in_one_pass(void) {
@@ -5546,6 +5599,9 @@ int main(int argc, char **argv) {
     RUN(test_mute_second_press_cancels);
     RUN(test_two_quick_mute_presses_are_two_presses);
     RUN(test_mute_group_collects_after_half_a_second);
+    RUN(test_mute_key_follows_the_page);
+    RUN(test_mute_group_on_a_high_page);
+    RUN(test_mute_held_key_keeps_its_track_across_pages);
     RUN(test_mute_press_and_release_in_one_pass);
     RUN(test_mute_hold_threshold);
     RUN(test_mute_group_target_fixed_at_join);

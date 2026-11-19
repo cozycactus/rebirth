@@ -2,27 +2,27 @@
 
 The whole device in a browser page: the firmware from `src/` runs unmodified
 on a virtual board, the panel is drawn from what the firmware drives, and a
-set of software synths plays what leaves the MIDI wire. A scripted Goa trance
-artist can program the device from power-up and play one of eleven songs on it.
+set of software synths plays its MIDI and CV/Gate outputs. A scripted Goa trance
+artist can program the device from power-up and play one of fifteen songs on it.
 
 The public page, https://cozycactus.github.io/rebirth/, always runs `master`
 (see "The public page" below). To run it locally:
 
 ```bash
 sim/build.sh native        # native core + smoke test, needs only a C compiler
-sim/build.sh web           # WebAssembly core and version.js, needs sim/emsdk (see the script)
+sim/build.sh web           # WebAssembly cores and version.js, needs sim/emsdk (see the script)
 sim/check.sh               # every check for every score this firmware takes; `quick` for the device check only
 node sim/test/artist_check.js       # every song in every arrangement; SONG=3 FORM=sunrise plays one
 python3 -m http.server 8765 --bind 127.0.0.1 --directory sim/web   # then open http://localhost:8765
 ```
 
-`sim/web/core.js` and `sim/web/version.js` are built, not kept in git: run
-`sim/build.sh web` first. The page then shows which commit its firmware is
-from. `sim/web/index.html` also opens straight from disk: the page uses
-classic scripts and the WebAssembly is embedded in `core.js`. From disk a
-browser will not load an AudioWorklet module, so the two 303s then run on the
-main thread (the same code, but it costs more and can crackle); served over
-HTTP they run in a worklet.
+Run `sim/build.sh web` to generate `sim/web/core.js`, `sim/web/sh101_cpu.js`
+and `sim/web/version.js`. The page shows which commit its firmware is from.
+`sim/web/index.html` also opens straight from disk. It uses classic scripts
+with the WebAssembly embedded in the respective core scripts. When an
+AudioWorklet cannot load, including when opening the page from disk, the
+303s and SH-101 use the same renderers on the main thread. Serving the page
+over localhost or HTTPS allows the worklets to run on the audio thread.
 
 The page links to the user manual, `manual-ru.pdf` beside it. On the public
 page it is there; in a checkout it is not, unless built: `tools/build_manual_pdf.py`
@@ -34,7 +34,8 @@ Hovering over a control of the panel or the page shows what it does.
 CI (`.github/workflows/ci.yml`, job Simulator) builds the simulator on every
 push and pull request with Emscripten 7.0.0 and runs `sim/check.sh`: the device
 check and the artist check (every song in every arrangement) for every score
-the firmware takes. A firmware change that breaks the artist's gestures shows
+the firmware takes, plus the offline SH-101 audio checks. A firmware change
+that breaks the artist's gestures shows
 there, on its own pull request. On a push to
 `master` it also packages the page with `sim/publish.sh package`: the page,
 its scripts asked for with the commit (so a browser never mixes two builds),
@@ -75,10 +76,9 @@ write access on the site repository) and the repository variable
   reported as a simulator error, not as a wait.
 - **The core 0 loop rate.** A pass every 1 ms is an assumption (`SIM_UI_PASS_US`).
 - **Electrical behaviour.** No bounce, no brown-out, no analogue CV settling.
-- **The sound of real gear.** The synths in `sim/web/rig.js` stand in for a
-  909, a bass, a lead and so on; they are not part of the device and are not
-  tuned by ear. The two 303s (ACID 1 with the saw, ACID 2 with the square) are
-  the model described below.
+- **The sound of real gear.** The synths in `sim/web/rig.js` play the
+  device's MIDI output. The 303s and the SH-101 voices use the circuit models
+  described below.
 
 ## The 303s
 
@@ -122,6 +122,189 @@ the delay and the reverb rings out. The sends and pans start where the mix
 had them fixed; the 909's reverb send reaches the snare, clap and crash only.
 The pad synth has no strip.
 
+## MIDI Song
+
+Open **Импорт MIDI и пресетов TAL** and select a folder with Standard MIDI
+Files and optional TAL-BassLine-101 `.bassline` presets. Each file appears in
+Songs with its original tempo. **Полная MIDI-аранжировка** plays separate
+source tracks and allocates multiple virtual SH-101 voices for chords. Tracks
+named for percussion use the drum models. Exact name matches use the
+corresponding TAL preset's SH-101 controls. User imports stay in the browser.
+GitHub Pages includes the eight songs and presets in the authorized Twisted
+library. The URL parameter `?song=01%20Contains%20LSD` selects that song at
+load time. A local checkout can also preload an ignored local library from
+`sim/web/local-songs/twisted/catalog.json`. [Library credits](web/songs/twisted/CREDITS.md)
+The physical panel displays firmware LEDs. Use the imported track list or mixer
+to open the SH-101 controls for a part. In Session, TRACK moves through T1–T64
+in eight-column pages. Each column holds the eight clips of the current bank.
+SCENE launches the chosen slot on all 64 tracks.
+FREQ, resonance and the other panel controls edit that part during playback.
+The part's gain can be adjusted independently of the mixer strip.
+Opening a synth from the mixer starts with all imported parts on that
+strip selected. The panel indicates when its selection has sounding notes.
+
+**MIDI Song · выходы ReBirth** runs the firmware player in the simulator.
+The routing table offers MIDI channel remapping and four direct CV/Gate
+pairs. Each pair takes one monophonic source track. The pitch offset puts
+the part inside notes 24–48 at the stock 1 V/oct and 2.048 V DAC setting.
+The original MIDI output channel is used for each track until remapped.
+Imported MIDI files can use the same channel on several tracks. DIN MIDI
+has 16 channels, so channel assignment determines which external instruments
+play those parts. Pitch bend and controllers remain in the MIDI stream.
+The CV/Gate route uses pitch and Gate.
+
+Choose **Pico · RP2040** or **Pico 2 · RP2350** under **Плата для UF2**.
+**Скачать MIDI Song UF2** writes the selected song to the fixed flash slot at
+`0x100e0000`. Pico uses the RP2040 UF2 family. Pico 2 uses the absolute data address
+with the Raspberry Pi `absolute` family. The ReBirth firmware uses an unpartitioned flash layout.
+Install firmware with MIDI Song support first. Copy the song UF2 to the
+Pico's BOOTSEL drive. Hold VALUE to enter SELECT PATTERN and press step 14
+to open MIDI SONG. PLAY starts and stops. TRACK changes the page of eight
+source tracks. Steps 1–8 mute, holding a step solos, and VALUE returns to
+SELECT PATTERN. The slot holds up to 1 MiB, 64 source tracks, and
+2,147,483,647 microseconds. The v7 clip save area precedes the MIDI slot. Eight-track v4–v6 saves remain at the end of flash.
+MUTE and SOLO address the tracks on the page selected with TRACK.
+
+The timed player preserves note and controller events at their original
+deadlines. The physical DIN output serializes simultaneous events at its
+wire rate. Hardware synth patches are set on the instruments themselves.
+
+## SH-101
+
+BASS (MIDI channel 3), LEAD (channel 6), ARP (channel 7), FX (channel 8) and
+PAD (channel 9) each have an independent SH-101 voice, patch and 80C49 board. Select a strip
+name in the mixer to open its panel. Several panels can stay open. Each
+strip has its own fader, pan, mute and sends. The score's cutoff ranges in Hz
+are mapped onto the BASS and LEAD FREQ sliders.
+
+The **Вход** switch selects the source of pitch and Gate for that voice.
+**MIDI** accepts the full MIDI note range. **CV/Gate 1–4** connect BASS,
+LEAD, ARP and FX respectively to the DAC and Gate pin events from the
+virtual ReBirth. **Клавиатура · ROM** connects the panel's
+keyboard, arpeggiator and sequencer to the same voice and mixer strip.
+Playing the virtual keys or pressing ROM buttons selects the internal input.
+On the original instrument, external CV/GATE plugs disconnect the internal
+CV and Gate. [Roland SH-101 Owner's Manual, p. 37](https://cdn.roland.com/assets/media/pdf/SH-101_OM.pdf)
+
+The panels follow the hardware layout with vertical synth faders, rotary
+TUNE, WAVE and RANGE controls, the switch row above the 32 keys and BENDER
+at the left. D30/D31 and the virtual CV/GATE and EXT CLK connections sit
+above each panel. [Photo of the original panel](https://commons.wikimedia.org/wiki/File:SH-101.jpg)
+
+A plain FX trigger sweeps pitch and cutoff down. An accent runs a noise and
+VCO riser for the number of bars shown on the FX panel, using MIDI Clock.
+The FX panel has its own source mixer, PWM, resonance, diode selector and
+volume. In the external input mode, it also lets you choose **ReBirth FX**
+and audition either sound.
+
+The four original songs Под током, После света, Сдвиг фазы and Ионный фронт
+program the CV/Gate assignments through TRACK CONFIG. BASS uses RANGE 16′.
+LEAD and ARP use 2′ with their clips pitched down to fit the DAC. FX uses
+RANGE 4′ and GATE with portamento. Its rise and fall are pitch contours
+with legato CV steps. PAD plays sustained MIDI channel 9 phrases from
+the browser score alongside the eight firmware tracks.
+
+The voice in `sim/web/sh101.js` uses the CEM3340 saw and PWM pulse, the
+4013's three sub modes and a noise source. The C59 ADSR uses exponential
+charge and discharge. GATE+TRIG uses last-note priority, while GATE and
+LFO use low-note priority. AUTO portamento follows overlapping MIDI notes.
+VCO MOD and MOD VCF take the selected LFO waveform. PWM taps the triangle
+directly. BASS starts with static PWM and a stronger sub; LEAD starts with
+LFO PWM. ARP starts with a short-decay pulse and saw patch. The **Строй A4**
+selector sets each voice's VCO reference. It starts at 440 Hz to match the
+rig. Select **442 Гц · Roland** and center **TUNE** for the service test.
+
+- **D30/D31** selects the diode pair per voice. All four start with Roland's
+  1S2473 and can be switched to Rev-A's 1N4148. The 1N4148
+  fit uses the 25 °C curve from 10 µA to 1 mA.
+  [Vishay 1N4148, Fig. 2](https://www.vishay.com/docs/81857/1n4148.pdf)
+- Roland's circuit drawing gives the mixer resistors, four 240 pF IR3109
+  integrators with 68 kΩ and 560 Ω local networks, and the TR26/TR27
+  resonance path through C52, R129, D30/D31 and R113. The diode pair is
+  solved inside the filter's trapezoidal step. The TR26 emitter path
+  adds signal ahead of the BA662A VCA via R132 at higher resonance.
+  [Roland SH-101 Service Notes, printed pp. 1, 2, 7](https://manuals.fdiskc.com/flat/Roland%20SH101%20Service%20Manual.pdf)
+- Roland documents four OTAs, four buffers and the shared exponential
+  control block. The model uses their nominal small-signal behavior.
+  ALFA's diagram of one AS3109 stage illustrates the analogous input and
+  buffer topology. Transistor parameters and buffer asymmetry of the
+  original chip, device tolerances and the panel tapers remain
+  approximations or outside this model. [Roland Juno-6 Service Notes, p. 6](https://www.synfo.nl/servicemanuals/Roland/JUNO-6_SERVICE_NOTES.pdf#page=6)
+  · [ALFA AS3109, Fig. 2](https://www.alfatriode.lv/eng/sc/AS3109.pdf#page=3)
+- The 1S2473 option uses a nominal fit to the ROHM forward curve at 25 °C.
+  The owner's manual supplies switch behavior. [ROHM 1S2473, Fig. 2](https://datasheet.octopart.com/1S2471-Rohm-datasheet-101927.pdf#page=2)
+  · [Roland SH-101 Owner's Manual, pp. 25–31](https://cdn.roland.com/assets/media/pdf/SH-101_OM.pdf)
+
+`node sim/test/sh101_check.js` checks the four-pole response against the
+analytical curve, the increasing resonance peak and pulse-edge ringing in
+Roland's drawings, bounded self-oscillation, divider pitch, note priority,
+cancellation of queued MIDI and the two FX sweeps. Calibrating the RES
+slider taper and oscillation amplitude requires measurements from a real
+SH-101. [Roland SH-101 Owner's Manual, p. 27](https://cdn.roland.com/assets/media/pdf/SH-101_OM.pdf#page=27)
+
+### Original 80C49 ROM
+
+The page automatically fetches the 2048-byte 80C49-6-7301 image at startup,
+verifies its SHA-256 and passes it to four separate WebAssembly instances
+of the MCS-48 decoder from `cozycactus/sh101_midi` at 6 MHz. Each board has
+its own CPU state, sequence RAM, clock and panel inputs.
+[Pinned ROM source](https://github.com/joebritt/SH101_Disassembled/blob/708cde01906312de7801204989628aa4610a4e45/80C49_SH101.bin)
+
+The 32-key matrix, panel buttons, HOLD pedal and LFO or manual EXT CLK feed
+the virtual U6. Its keyboard CV, oscillator RANGE, random DAC, Gate, portamento and
+clock-reset outputs drive the same SH-101 audio model. [MCS-48 decoder source](https://github.com/cozycactus/sh101_midi/blob/8142852/src/mcs48_core.h)
+
+Use **SH-101 · ARPEGGIO** to open the ARP channel and select its ROM input.
+Select **DOWN**, **U&D** or **UP**, then Shift-click a chord. With **HOLD** on,
+short taps also latch notes. **LFO/CLK RATE** sets the speed and its LED
+shows the internal clock. The spring-return **BENDER** has independent VCO
+and VCF sensitivities. Hold **LFO MOD** to send triangle modulation to both
+paths. The modulation amplitude is nominal. **POWER** restarts the ROM with
+that channel's sequence RAM retained in the open page.
+[Photo of the original panel](https://commons.wikimedia.org/wiki/File:SH-101.jpg)
+
+For a tied sequencer note, hold HOLD while entering the new note and
+select the GATE envelope mode for playback. KEY TRANSPOSE enters a rest
+while LOAD is active. Shift-click holds a virtual key or switch and a
+second click releases it.
+[Roland SH-101 Owner's Manual, pp. 33–38](https://cdn.roland.com/assets/media/pdf/SH-101_OM.pdf)
+
+To enter the service test, switch a voice's POWER off, hold LOAD and KEY
+TRANSPOSE with Shift-click, then turn POWER on. Release the two buttons and
+select a test output using the function buttons. The displayed KCV, RANGE
+and Gate follow the service table. Press HOLD to exit.
+[Roland SH-101 Service Notes, printed p. 2](https://manuals.fdiskc.com/flat/Roland%20SH101%20Service%20Manual.pdf#page=4)
+
+With the 442 Hz reference, **U&D** checks VCO TUNE and **UP** uses the
+alternate RANGE CV to produce the same pitch. The original-ROM regression
+also verifies the F3–F5 VCO interval and the F4–F5 VCF tracking check, with
+the filter set to 1 kHz at A4. [Roland SH-101 Service Notes, printed p. 4](https://manuals.fdiskc.com/flat/Roland%20SH101%20Service%20Manual.pdf#page=6)
+
+The Rev-A netlist has active-low Gate through Q9, P24 wired to the Q7/Q6
+reset circuit and separate sample-and-hold outputs from U10. U14 has
+four 240 pF integrators with 68 kΩ and 560 Ω feedback. The resonance path
+uses Q26/Q27 (2SC1815), C52 (10 µF), R129 (5.6 kΩ), R113 (15 kΩ), and
+the antiparallel 1N4148 pair. The DSP models Q26/Q27 by their nominal
+gain and follower behavior. [SH-101 schematic at tag Rev-A, 68f0691](https://github.com/cozycactus/sh-101/blob/Rev-A/sh-101.kicad_sch)
+
+If the download fails, the SH-101 panels offer a shared file picker. For local use,
+`?sh101=local` on a loopback server loads `sh101.rom` beside `index.html`.
+To extract the file from a sibling `sh101_midi` checkout and exercise the
+original ROM regression:
+
+```sh
+python3 - ../sh101_midi/src/sh101_rom.h sim/web/sh101.rom <<'PY'
+from pathlib import Path
+import re, sys
+
+array = Path(sys.argv[1]).read_text().split('{', 1)[1].split('}', 1)[0]
+image = bytes(int(hex_byte, 16) for hex_byte in re.findall(r'0x[0-9a-fA-F]{2}\b', array))
+assert len(image) == 2048
+Path(sys.argv[2]).write_bytes(image)
+PY
+SH101_ROM=sim/web/sh101.rom node sim/test/sh101_rom_check.js
+```
+
 ## The artist
 
 `sim/web/artist.js` is a score of finger movements: key and button levels,
@@ -133,14 +316,15 @@ program, plays the clips each section expects, and sends well-formed MIDI.
 Everything the artist does on the synths (filter sweeps, delay, reverb) is
 labelled as such on the page: the sequencer sends no CC.
 
-There are eleven songs (`Artist.SONGS`, `options.song`): the first set, and
-ten written for the page in the manner of Hallucinogen, Astral Projection,
-Total Eclipse and The Infinity Project (three, three, two and two). None
-copies a record. A song is a key, a tempo, the notes of its clips, three live
-edits and the synth settings. The ten new ones are written in scale degrees,
-one row of steps per clip; a song the set cannot play (an unknown key, a clip
-missing, a copy with other steps than its source, a live edit too far to turn
-between two beats) is refused when the file loads.
+The fifteen original songs (`Artist.SONGS`, `options.song`) include four
+written for the four SH-101 voices. «Под током» leads with octave bass,
+«После света» opens with LEAD, «Сдвиг фазы» layers a seven-step ARP over
+sixteen-step drums and «Ионный фронт» brings FX sweeps and a noise riser
+forward. All four use every mixer track. Each song defines the notes of
+its clips, three live edits and the synth settings. The scale-degree score
+is validated when the module loads.
+
+The web page accepts a song id in `?song=`, for example `?song=livewire`.
 
 Every song fills the same clip slots, so any song can be played in any of the
 four arrangements (`Artist.FORMS`, `options.form`; each song names the one it

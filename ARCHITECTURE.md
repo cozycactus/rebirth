@@ -39,10 +39,12 @@ establish physical jitter.
 
 ## Prepared Patterns
 
-All 32 locations have a prepared row for each of eight tracks. Core 0 builds
+All 32 locations have a prepared row for each of T1–T8. Core 0 builds
 these at initialization and after edits. A revision and row are published
-together under the shared lock. Playback copies a row only when its location or
-revision changes, at a step boundary. Song mode uses the same cache.
+together under the shared lock. T9–T64 store editable steps for all 32
+locations and one decoded playback row per track. At a change of location or
+revision, playback snapshots that track under the shared lock and decodes the
+snapshot after releasing it. Song mode uses the same rows.
 
 A row is tagged with its kind: the 16 events of a SYNTH or DRUM cell, or a
 kit row (below), in one union. The event cache occupies 29,696 bytes (256 rows
@@ -297,10 +299,13 @@ timing noise. See [JITTER_MEASUREMENT.md](JITTER_MEASUREMENT.md).
 
 ### MUTE hold and groups
 
-`ui.c` remembers one held MUTE key: its track (`ui.mute_held`, `MUTE_NONE` for
-none), the time the UI handled its press and the panel generation then, and the
-group (`ui.mute_group`) with each member's target (`ui.mute_group_target`, bit set
-= muted). A MUTE press with no key held is an ordinary press
+`ui.c` remembers one held MUTE key: the physical key (`ui.mute_held`, `MUTE_NONE`
+for none; its release and the sweep go by it) and the logical track it stood for
+on the page shown at its press (`ui.mute_held_track`), the time the UI handled its
+press and the panel generation then, and the group (`ui.mute_group`, a
+`track_mask_t` of logical tracks, so it can span pages) with each member's target
+(`ui.mute_group_target`, bit set = muted). In the MIDI Song player the MUTE keys
+go to the player before any of this, and opening it drops the hold. A MUTE press with no key held is an ordinary press
 (`transport_toggle_mutes()`) and becomes the held key. Another key pressed less
 than `PAD_COPY_HOLD_MS` (500 ms) after it, or when the panel generation is no
 longer the one of its press, is an ordinary press as well. A later one joins: a
@@ -335,31 +340,18 @@ lock at a step boundary where a change waits (Playback Rules).
 
 ## Storage
 
-The last 128 KiB of the Pico's 2 MiB flash holds patterns and song data.
-Save/load require stopped transport. Save drains MIDI before suspending XIP and
-programs the validity header last. Load validates indices, lengths and
-configuration before replacing RAM.
+The 2 MiB Pico flash reserves 192 KiB at offset `0xB0000` for project format
+7, 1 MiB at `0xE0000` for the timed MIDI Song and 128 KiB at `0x1E0000` for
+legacy eight-track projects. The linker keeps the firmware below these slots.
+Saving requires stopped transport. After MIDI drains and the other core parks,
+flash is programmed directly from SRAM. The three payloads (patterns, song,
+kit settings) are page-aligned. CRC32 covers their unpadded bytes, and the
+validity header is programmed last.
 
-Format version 6 lays out a header page, the patterns (`MAX_PATTERNS` x the
-current `pattern_t`, rounded to a page), the song (rounded to a page) and the
-kit settings (`kit_config[NUM_TRACKS]`, rounded to a page). Its CRC32 covers the
-three payloads at their unpadded lengths. Versions 4 and 5 are still loaded:
-their patterns are the legacy record, which is the start of today's
-`pattern_t` (a byte prefix, 459 bytes on the RP2040; `kit_steps` follows at
-offset 460, after one padding byte), so the song sits at the offset after the
-page-rounded legacy patterns and the checksum covers the legacy lengths. Each
-legacy record is copied into a zeroed `pattern_t`, so the kit steps are empty
-and every kit setting gets its default. Version 4 has no checksum and
-is accepted after validation. Every offset and length is taken from the version
-and the compiler's type sizes, never hard-coded. Validation also requires: type
-KIT in at most two tracks across all locations, kit step bits 24-31 zero, AC 0 or
-1, and kit settings in range. The patterns payload is 31,104 bytes and the save
-builds each payload in a static RAM copy buffer padded to whole pages, so
-`.data` + `.bss` is about 110.5 KiB (see [HARDWARE_STATUS.md](HARDWARE_STATUS.md)).
-The save and the load first wait for MIDI output to go idle, then copy the
-patterns one location per `seq_lock()` section (then the song and the kit
-settings in one more), so Core 0's interrupts are never off for the whole
-31 KB copy.
+When the format-7 header is absent, the loader checks the old slot for formats
+4, 5 and 6. It restores the original eight tracks, initializes the other 56
+and expands each song entry. Version 6 also restores kit steps and settings.
+Loading validates the whole project before changing RAM.
 
 This is one save region. Power loss during erase/program may lose the previous
 save; an incomplete new save is rejected. Preserving the old save across power

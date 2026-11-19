@@ -399,7 +399,7 @@ void hal_run_uart_irq(void) { irq_handlers[UART0_IRQ](); }
 // ─── Flash ──────────────────────────────────────────────────────
 
 #define FLASH_BYTES (2u * 1024u * 1024u)
-#define STORE_BYTES (128u * 1024u)
+#define STORE_BYTES (192u * 1024u)
 #define ERASE_SECTOR_US 40000u      // typical 4 KiB sector erase; not measured on this board
 #define PROGRAM_PAGE_US 400u        // typical 256 byte page program
 
@@ -429,7 +429,7 @@ void flash_range_program(uint32_t offset, const uint8_t *data, size_t count) {
     fake_flash_last_program_offset = offset;
     hal_set_now(sim_now_us + (uint64_t)((count + 255u) / 256u) * PROGRAM_PAGE_US);
 }
-uint8_t *sim_flash_store(void) { return fake_flash + (FLASH_BYTES - STORE_BYTES); }
+uint8_t *sim_flash_store(void) { return fake_flash + 0x000b0000u; }
 int sim_flash_store_size(void) { return (int)STORE_BYTES; }
 
 // ─── I2C bus with five chips ────────────────────────────────────

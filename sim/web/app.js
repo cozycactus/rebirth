@@ -1,7 +1,7 @@
 // The page: draws the panel from what the device drives (LED frames, the OLED
 // bytes, the step LED latches), turns mouse input into pin and key levels,
-// keeps device time in step with the audio clock, and feeds the MIDI wire to
-// the synths.
+// keeps device time in step with the audio clock, and patches the device's
+// MIDI and CV/Gate outputs to the synths.
 (function () {
   'use strict';
 
@@ -9,12 +9,15 @@
   const MAX_STEP_S = 0.05;        // most device time one tick may add; under the look-ahead
   const $ = id => document.getElementById(id);
   const deviceEl = $('device');
+  const requestedSong = new URLSearchParams(location.search).get('song');
 
   let device, hands, rig = null, ctx = null;
   let playhead = -LOOKAHEAD_US;   // device time that is audible now
   let speed = 1;
   let lastWall = 0, wallIsAudio = false;
   let show = null, phase = 'idle';  // idle | prep | live
+  let showPatch = [];
+  let importedSongs = [], midiRun = null, launchSerial = 0;
   const knobAngle = [0, 0];
   const anims = {};               // rig knob moves in progress, for the sliders
 
@@ -89,14 +92,14 @@
         const pad = box('pad', PAD_X(track), PAD_Y(row), 80, 80);
         (els.pad[track] = els.pad[track] || [])[row] = pad;
         bindHold(pad, down => device.pad(track, row, down));
-        pad.dataset.tip = 'Пэд: клип дорожки T' + (track + 1) + ' в ряду ' + (row + 1) + '.\n' +
+        pad.dataset.tip = 'Клип в столбце ' + (track + 1) + ', слот ' + (row + 1) + ' текущего банка.\n' +
           'На остановленном приборе клип выбирается сразу, во время игры встаёт в очередь до границы квантования (мигает). ' +
           'Ярко светится играющий клип, тускло — клип с шагами. Пустой пэд тоже запускается: дорожка замолкает.';
       }
       const scene = box('scene', 1040, PAD_Y(row) + 7, 65, 65);
       els.scene[row] = scene;
       bindHold(scene, down => device.scene(row, down));
-      scene.dataset.tip = 'SCENE ' + (row + 1) + ': запускает ряд ' + (row + 1) + ' на всех восьми дорожках сразу. ' +
+      scene.dataset.tip = 'SCENE ' + (row + 1) + ': запускает ряд ' + (row + 1) + ' на всех 64 дорожках сразу. ' +
         'Пока сцена ждёт в очереди, повторное нажатие отменяет все очереди.';
     }
     label('MUTE', 236, 1131);
@@ -107,12 +110,12 @@
       els.mute[track] = key;
       bindHold(key, down => device.mute(track, down));
       key.dataset.tip = quantMutes
-        ? 'MUTE T' + (track + 1) + ': выключает или возвращает дорожку на границе квантования запуска, как пэд; ' +
+        ? 'MUTE · столбец ' + (track + 1) + ': выключает или возвращает дорожку на границе квантования запуска, как пэд; ' +
           'на остановленном приборе и при NEXT STEP — сразу. Пока изменение ждёт, кнопка мигает белым; ' +
           'повторное нажатие его отменяет. Светится, пока дорожка слышна.\n' +
           'Удержать полсекунды и нажать другие MUTE: они собираются в группу (горят ровным белым) ' +
           'и меняются вместе после того, как отпущена первая.'
-        : 'MUTE T' + (track + 1) + ': выключает и возвращает дорожку сразу, без ожидания границы такта. Светится, пока дорожка слышна.';
+        : 'MUTE · столбец ' + (track + 1) + ': выключает и возвращает дорожку сразу, без ожидания границы такта. Светится, пока дорожка слышна.';
     }
     for (let i = 0; i < 16; i++) {
       els.stepLed[i] = box('stepled', STEP_X(i) + 19, 1173, 14, 14);
@@ -130,7 +133,7 @@
   // What the controls do, as docs/manual-ru.md describes the firmware.
   const ENC_TIP = [
     'TRACK. Колесо мыши или стрелки по бокам — поворот, клик — нажатие, держать полсекунды — удержание.\n' +
-      'Session: поворот — дорожка или линия KIT; нажать — экран Pattern; удержать — следующий банк A-D.\n' +
+      'Session: поворот — дорожка T1–T64 или линия KIT; на панели видны восемь соседних дорожек; нажать — экран Pattern; удержать — следующий банк A-D.\n' +
       'Pattern, с удержанными шагами: поворот — нота; нажать — акцент; удержать — слайд.\n' +
       'Обе ручки вместе — Panic.',
     'VALUE. Колесо мыши или стрелки по бокам — поворот, клик — нажатие, держать полсекунды — удержание.\n' +
@@ -151,6 +154,7 @@
       set(false);
     };
     el.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
       e.preventDefault();
       takeOver();
       if (el.classList.contains('latched')) { release(); return; }
@@ -317,6 +321,10 @@
       el.classList.toggle('down', a.down);
     },
     rig(id, value, ramp) { moveKnob(id, value, ramp, device.now()); },
+    padMidi(m) {
+      if (sounding()) rig.midi(m.status, m.d1, m.d2, audioTime(m.t));
+      if (m.d2) flashStrip(Artist.PAD_CHANNEL, m.t);
+    },
   };
 
   // ─── Synths ───────────────────────────────────────────────────
@@ -326,12 +334,21 @@
   const STRIPS = [
     { name: 'KICK', id: 'kick' }, { name: '909', id: 'drums' }, { name: 'BASS', id: 'bass' },
     { name: 'ACID 1', id: 'acid1' }, { name: 'ACID 2', id: 'acid2' }, { name: 'LEAD', id: 'lead' },
-    { name: 'ARP', id: 'arp' }, { name: 'FX', id: 'fx' }, { name: 'MASTER', level: 'master.volume' },
+    { name: 'ARP', id: 'arp' }, { name: 'FX', id: 'fx' }, { name: 'PAD', id: 'pad' },
+    { name: 'MASTER', level: 'master.volume' },
   ];
+  const CV_ROLES = Artist.CV_TRACKS.map(track => STRIPS[track].id);
+  const SH101_CHANNEL = { bass: 3, lead: 6, arp: 7, fx: 8, pad: 9 };
+  const CV_PATCH = {
+    bass: { range: 0 },
+    lead: { range: 3 },
+    arp: { range: 3 },
+    fx: { range: 2, trigger: 1, portaMode: 1, portaTime: 0.18, keyFollow: 0.85,
+      cutoff: 0.5, envMod: 0.36, vca: 0, attack: 0.07, sustain: 0.73, release: 0.28 },
+  };
+  const sh101Panels = {};
   for (const s of STRIPS) if (s.id) s.level = s.id + '.level';
-  const stripOf = (channel, note) => channel === 9 ? (note === 35 || note === 36 ? 0 : 1) : channel >= 2 && channel <= 7 ? channel : undefined;
-  // The other synths' knobs that stay as plain sliders.
-  const KNOBS = ['bass.cutoff', 'lead.cutoff'];
+  const stripOf = (channel, note) => channel === 9 ? (note === 35 || note === 36 ? 0 : 1) : channel >= 2 && channel <= 8 ? channel : undefined;
   const KNOB_TIP = {
     tune: 'Tune: подстройка высоты генератора, в середине — без сдвига.',
     cutoff: 'Cut off freq: частота среза фильтра. Артист открывает и прикрывает её по ходу сета.',
@@ -349,7 +366,7 @@
     level: 'Уровень в общем миксе.',
   };
   const NOT_DEVICE = '\nЭто ручка синтезатора, не прибора: прибор CC не шлёт.';
-  const lampHot = new Array(8).fill(0);
+  const lampHot = new Array(STRIPS.length - 1).fill(0);
   const sliders = {};             // rig knob id -> something with a `value`: a range input or a drawn knob
   const meters = [];              // what drawStatus keeps moving: () => void
 
@@ -359,6 +376,7 @@
   const sounding = () => rig && ctx && ctx.state === 'running' && speed === 1;
 
   function moveKnob(id, value, ramp, deviceUs) {
+    if (rig) value = Rig.scoreValue(id, value);
     const slider = sliders[id];
     const from = slider ? +slider.value : value;
     if (sounding() && ramp > 0) {
@@ -371,6 +389,14 @@
     }
   }
   const userSet = (id, value) => { delete anims[id]; rig.setParam(id, value); };
+  function setVoiceControl(role, name, value) {
+    const parts = sh101Panels[role]?.targets ?? [];
+    if (!parts.length) { userSet(role + '.' + name, value); return; }
+    for (const part of parts) {
+      (part.controls ||= {})[name] = value;
+      midiRun?.player?.control(part.track, name, value);
+    }
+  }
 
   // A knob drawn as the x0xb0x VCF Bench page draws its knobs: ticks, a gold
   // arc for the setting, a pointer. Drag up and down (Shift for fine), arrow
@@ -559,7 +585,11 @@
       const p = rig && rig.params.find(x => x.id === strip.level), master = i === STRIPS.length - 1;
       const el = document.createElement('div');
       el.className = 'strip' + (master ? ' master' : '');
-      el.innerHTML = `<span class="lamp">${strip.name}</span><div class="mknobs"></div><div class="well"><input class="fader" type="range" aria-label="${strip.name}">` +
+      const synthPanel = window.SH101 && p && $('sh101-' + strip.id + '-panel');
+      const lampMarkup = synthPanel
+        ? `<a class="lamp" href="#${synthPanel.id}" aria-label="${strip.name} · SH-101">${strip.name}</a>`
+        : `<span class="lamp">${strip.name}</span>`;
+      el.innerHTML = lampMarkup + `<div class="mknobs"></div><div class="well"><input class="fader" type="range" aria-label="${strip.name}">` +
         (master ? '<div class="vu"><i></i></div>' : '') + `</div><span class="val"></span>` +
         (master ? '' : `<button type="button" aria-pressed="false" aria-label="Mute ${strip.name}">M</button>`);
       box.appendChild(el);
@@ -567,6 +597,13 @@
       if (!master) lamp.dataset.i = i;
       lamp.dataset.tip = master ? 'Общий выход всех синтезаторов.'
         : 'Вспыхивает, когда прибор шлёт ноту этому инструменту.' + (strip.name.startsWith('ACID') ? ' Это модель x0xb0x (схема TB-303) из x0xb0x VCF Bench.' : '');
+      if (synthPanel) {
+        lamp.dataset.tip = 'Открыть панель SH-101 канала ' + strip.name + '. ' + lamp.dataset.tip;
+        lamp.addEventListener('click', () => {
+          if (fullMidiSong()) sh101Panels[strip.id]?.choosePart(-2);
+          synthPanel.open = true;
+        });
+      }
       if (!p) { fader.disabled = true; return; }
       // Sends to the Effects board, then pan, as on a console.
       const knobs = el.querySelector('.mknobs');
@@ -621,40 +658,703 @@
     });
   }
 
+  function buildSH101Fields(role, voiceControls, performance, accessories, clock) {
+    const makeControl = (def) => {
+      const id = role + '.' + def.id;
+      const label = document.createElement('label');
+      const title = document.createElement('span');
+      title.textContent = def.face || def.label;
+      label.appendChild(title);
+      label.dataset.tip = def.tip || def.label;
+      const input = document.createElement(def.options ? 'select' : 'input');
+      input.id = 'sh101-' + role + '-' + def.id;
+      input.setAttribute('aria-label', def.label);
+      const order = def.order || def.options?.map((_, index) => index);
+      if (order) for (const index of order) input.add(new Option(def.options[index], index));
+      else {
+        input.type = 'range';
+        input.min = 0;
+        input.max = 1;
+        input.step = 0.005;
+      }
+      input.value = rig.getParam(id);
+      if (def.accessory) {
+        label.appendChild(input);
+        accessories.prepend(label);
+        input.addEventListener('input', () => setVoiceControl(role, def.id, +input.value));
+        sliders[id] = input;
+        return null;
+      }
+      const actuator = document.createElement('span');
+      const setting = document.createElement('span');
+      const max = window.SH101.max(def);
+      actuator.className = 'sh101-actuator';
+      setting.className = 'sh101-setting';
+      setting.setAttribute('aria-hidden', 'true');
+      label.className = 'sh101-control ' + (def.dial ? 'sh101-dial' : def.options ? 'sh101-switch' : 'sh101-fader');
+      if (def.horizontal) label.classList.add('sh101-horizontal');
+      actuator.appendChild(input);
+      if (def.dial || def.options) actuator.appendChild(document.createElement('i'));
+      label.append(actuator, setting);
+      const reflect = () => {
+        const value = +input.value;
+        if (def.dial) actuator.style.setProperty('--angle', (value / max * 270 - 135) + 'deg');
+        if (def.options) {
+          actuator.style.setProperty('--travel', order.indexOf(value) / max);
+          setting.textContent = (def.marks || def.options)[value];
+        }
+      };
+      reflect();
+      input.addEventListener('input', () => { reflect(); setVoiceControl(role, def.id, +input.value); });
+      sliders[id] = { get value() { return input.value; }, set value(value) { input.value = value; reflect(); } };
+      return label;
+    };
+    for (const [group, entries] of window.SH101.groups) {
+      const bank = document.createElement('section');
+      const heading = document.createElement('h4');
+      const controls = document.createElement('div');
+      bank.className = 'sh101-bank';
+      controls.className = 'sh101-bank-controls';
+      heading.textContent = group === 'TUNE' ? '' : group;
+      if (group === 'TUNE') heading.setAttribute('aria-hidden', 'true');
+      for (const def of entries) {
+        const label = makeControl(def);
+        if (label) controls.appendChild(label);
+      }
+      bank.append(heading, controls);
+      if (group === 'MODULATOR') bank.appendChild(clock);
+      if (group === 'CONTROLLERS' || group === 'BENDER') performance.insertBefore(bank, performance.lastElementChild);
+      else voiceControls.appendChild(bank);
+    }
+  }
+
+  function bindSH101Audition(role, play) {
+    const audition = $('sh101-' + role + '-audition'), status = $('sh101-' + role + '-status');
+    const strip = STRIPS.findIndex(s => s.id === role);
+    audition.addEventListener('click', async () => {
+      try {
+        await startAudio();
+        if (ctx.state === 'running') {
+          play(ctx.currentTime + 0.01);
+          lampHot[strip] = performance.now() + 100;
+          status.textContent = '';
+          return;
+        }
+      } catch { /* Surface a rejected audio resume in the same status. */ }
+      status.textContent = 'Браузер не запустил звук.';
+    });
+    return audition;
+  }
+
+  function buildSH101() {
+    if (!window.SH101) return;
+    for (const [role, voice] of Object.entries(rig.sh101)) sh101Panels[role] = buildSH101Panel(role, voice);
+    $('sh101').hidden = false;
+    const openArpeggio = () => {
+      $('sh101-arp-panel').open = true;
+      sh101Panels.arp.selectInput('rom');
+    };
+    $('sh101-arp-link').addEventListener('click', openArpeggio);
+    const openLinkedPanel = () => {
+      // Keep links to the earlier arpeggio panel working.
+      if (location.hash === '#sh101-rom') openArpeggio();
+      const target = $(location.hash === '#sh101-rom' ? 'sh101-arp-panel' : location.hash.slice(1));
+      if (target?.matches('#sh101 > details')) {
+        target.open = true;
+        target.scrollIntoView();
+      }
+    };
+    window.addEventListener('hashchange', openLinkedPanel);
+    openLinkedPanel();
+    loadSH101ROM(Object.values(sh101Panels));
+  }
+
+  const importStatus = message => { $('midi-import-status').textContent = message; };
+  function selectedMidiSong() {
+    const value = $('show-song').value;
+    return value.startsWith('midi:') ? importedSongs[Number(value.slice(5))] : null;
+  }
+
+  function fullMidiSong() {
+    if (midiRun) return midiRun.player ? midiRun.song : null;
+    if (phase === 'prep' || phase === 'live') return null;
+    return $('midi-song-mode').value === 'full' ? selectedMidiSong() : null;
+  }
+
+  function refreshMidiParts() {
+    const song = fullMidiSong();
+    for (const [role, panel] of Object.entries(sh101Panels)) {
+      panel.showParts(song?.tracks.filter(part => part.role === role && part.notes && !part.drum) ?? []);
+    }
+  }
+
+  function openMidiPart(part) {
+    if (!part || !part.events.length) return;
+    $('caption').textContent = 'MIDI ' + (part.track + 1) + ' · ' + part.name;
+    if (part.drum || !part.notes) return;
+    const panel = sh101Panels[part.role];
+    if (!panel) return;
+    panel.choosePart(part.track);
+    const details = $('sh101-' + part.role + '-panel');
+    details.open = true;
+    details.scrollIntoView({block: 'start'});
+  }
+
+  function showMidiTracks(song) {
+    $('midi-song-settings').hidden = !song;
+    for (const id of ['show-form', 'show-prep', 'prep-speed', 'show-variant']) $(id).disabled = !!song;
+    const list = $('midi-song-tracks');
+    list.replaceChildren();
+    refreshMidiParts();
+    if (!song) return;
+    for (const part of song.tracks.filter(p => p.notes || p.events.length)) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const route = document.createElement('select');
+      route.setAttribute('aria-label', 'Выход дорожки ' + part.track + ' ' + part.name);
+      route.add(new Option('MIDI из файла', ''));
+      for (let i = 0; i < 16; i++) route.add(new Option('MIDI ' + (i + 1), 'm' + i));
+      for (let i = 0; i < 4; i++) {
+        const option = new Option('CV/Gate ' + (i + 1), 'c' + i);
+        option.disabled = part.poly !== 1;
+        route.add(option);
+      }
+      route.add(new Option('Пропустить', 'mute'));
+      const transposition = document.createElement('input');
+      transposition.type = 'number';
+      transposition.min = -127;
+      transposition.max = 127;
+      transposition.value = part.route?.transpose ?? 0;
+      transposition.title = 'Сдвиг высоты CV в полутонах';
+      transposition.setAttribute('aria-label', 'Сдвиг высоты CV дорожки ' + part.track);
+      const routeValue = part.route;
+      if (routeValue?.mute) route.value = 'mute';
+      else if (routeValue?.cv !== undefined) route.value = 'c' + routeValue.cv;
+      else if (routeValue?.midi !== undefined) route.value = 'm' + routeValue.midi;
+      const update = () => {
+        const value = route.value, n = Number(value.slice(1));
+        transposition.hidden = !value.startsWith('c');
+        part.route = value === 'mute' ? { mute: true }
+          : value.startsWith('c') ? { cv: n, transpose: Number(transposition.value) || 0 }
+          : value.startsWith('m') ? { midi: n } : undefined;
+      };
+      route.addEventListener('change', update);
+      transposition.addEventListener('input', update);
+      update();
+      const name = document.createElement('button');
+      name.type = 'button';
+      name.className = 'btn';
+      name.disabled = !part.notes || !!part.drum || part.role === 'gate';
+      name.textContent = (part.track + 1) + ' · ' + part.name + (part.patch ? ' · TAL ' + part.patch.name : '');
+      name.addEventListener('click', () => openMidiPart(part));
+      row.append(route, transposition, name);
+      list.appendChild(row);
+    }
+  }
+
+  function firmwareMidiImage(song) {
+    return MidiSongs.image(song, Object.fromEntries(song.tracks.filter(p => p.route).map(p => [p.track, p.route])));
+  }
+
+  async function initMidiLibrary() {
+    const select = $('show-song');
+    const group = document.createElement('optgroup');
+    group.label = 'Импортированные MIDI';
+    select.appendChild(group);
+    async function loadFiles(files, fromLocal = false) {
+      try {
+        const result = await MidiSongs.load(files);
+        importedSongs = result.songs;
+        group.replaceChildren();
+        importedSongs.forEach((song, i) => group.appendChild(new Option(song.title + ' · ' +
+          Math.round(song.bpm) + ' BPM · ' + song.tracks.length + ' дор.', 'midi:' + i)));
+        const index = importedSongs.findIndex(song => song.id === requestedSong);
+        if (index >= 0 || !fromLocal) select.value = 'midi:' + Math.max(0, index);
+        select.dispatchEvent(new Event('change'));
+        const count = importedSongs.flatMap(song => song.tracks).filter(part => part.patch).length;
+        importStatus('Загружено песен: ' + importedSongs.length + ' · привязано пресетов TAL: ' + count +
+          (result.unmatched.length ? ' · без совпадения: ' + result.unmatched.map(p => p.file).join(', ') : ''));
+      } catch (error) { importStatus(error.message); }
+    }
+    const input = $('midi-folder');
+    $('midi-song-mode').addEventListener('change', refreshMidiParts);
+    input.addEventListener('change', () => { if (input.files.length) loadFiles(input.files); });
+    $('midi-song-export').addEventListener('click', () => {
+      const song = selectedMidiSong();
+      if (!song) return;
+      try {
+        const board = $('midi-song-board').value;
+        const url = URL.createObjectURL(new Blob([MidiSongs.uf2(firmwareMidiImage(song), board)]));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = song.title + (board === 'pico2' ? ' - ReBirth Pico 2 MIDI Song.uf2' : ' - ReBirth MIDI Song.uf2');
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) { importStatus(error.message); }
+    });
+    async function loadBundledLibrary() {
+      const local = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
+      const folders = local ? ['./local-songs/twisted/', './songs/twisted/'] : ['./songs/twisted/'];
+      for (const folder of folders) {
+        const response = await fetch(folder + 'catalog.json');
+        if (response.status === 404 && folder.startsWith('./local-songs/')) continue;
+        if (!response.ok) throw Error('Не удалось загрузить список песен Twisted.');
+        const paths = await response.json();
+        const files = await Promise.all(paths.map(async path => {
+          const result = await fetch(folder + path.split('/').map(encodeURIComponent).join('/'));
+          if (!result.ok) throw Error('Файл не найден: ' + path);
+          return new File([await result.blob()], path.split('/').pop());
+        }));
+        await loadFiles(files, true);
+        return;
+      }
+    }
+    if (location.protocol === 'https:' || location.protocol === 'http:') {
+      try {
+        await loadBundledLibrary();
+      } catch (error) { importStatus(error.message); }
+    }
+  }
+
+  function buildSH101Panel(role, voice) {
+    const api = window.SH101ROM, fx = role === 'fx';
+    const details = $('sh101-' + role + '-panel'), fields = $('sh101-' + role);
+    const status = $('sh101-' + role + '-status');
+    const fragment = $('sh101-rom-controls').content.cloneNode(true);
+    const control = name => details.querySelector(`[data-rom="${name}"]`);
+    details.querySelector('.sh101-transport').prepend(fragment.querySelector('[data-rom="input-label"]'));
+    fields.before(fragment.querySelector('[data-rom="accessories"]'), fragment.querySelector('[data-rom="arp-hint"]'));
+    fields.after(fragment.querySelector('[data-rom="hint"]'));
+    fields.appendChild(fragment);
+    const input = control('input');
+    const cvPair = CV_ROLES.indexOf(role), romOption = input.querySelector('[value="rom"]');
+    input.options[0].textContent = 'MIDI · CH ' + SH101_CHANNEL[role];
+    if (cvPair >= 0) input.add(new Option('CV/Gate ' + (cvPair + 1), 'cv'), romOption);
+    const inputBadge = details.querySelector('summary .sub');
+    const partPicker = document.createElement('label');
+    const partSelect = document.createElement('select');
+    const partActivity = document.createElement('span');
+    partActivity.className = 'sub';
+    partPicker.hidden = true;
+    partPicker.append('MIDI-партия ', partSelect, partActivity);
+    details.querySelector('.sh101-transport').appendChild(partPicker);
+    const trackLevel = document.createElement('label');
+    const gain = document.createElement('input'), levelReadout = document.createElement('span');
+    gain.type = 'range';
+    gain.min = -18;
+    gain.max = 24;
+    gain.step = 1;
+    gain.setAttribute('aria-label', 'Уровень MIDI-партии, дБ');
+    trackLevel.hidden = true;
+    trackLevel.append('Уровень партии ', gain, levelReadout);
+    details.querySelector('.sh101-transport').appendChild(trackLevel);
+    let parts = [], selectedPart = null, groupSelected = false;
+    const targets = () => groupSelected ? parts : selectedPart ? [selectedPart] : [];
+    function showPartActivity() {
+      if (partPicker.hidden || !details.open) return;
+      const active = targets().filter(part => midiRun?.active?.[part.track]).length;
+      const text = !targets().length ? '' : active ? ' · звучит ' + active : ' · ждёт ноты';
+      if (partActivity.textContent !== text) partActivity.textContent = text;
+    }
+    function showPartLevel() {
+      if (!selectedPart) return;
+      gain.value = selectedPart.levelDb ?? 0;
+      levelReadout.textContent = ' ' + gain.value + ' дБ';
+    }
+    function choosePart(track) {
+      groupSelected = track === -2 && !!parts.length;
+      selectedPart = parts.find(part => part.track === track) ?? null;
+      partSelect.value = groupSelected ? '-2' : selectedPart ? String(selectedPart.track) : '-1';
+      trackLevel.hidden = !selectedPart;
+      const representative = selectedPart ?? (groupSelected ? parts.find(p => midiRun?.active?.[p.track]) ?? parts[0] : null);
+      const patch = representative && { ...window.SH101.defaults(role), ...representative.patch?.settings, ...representative.controls };
+      for (const def of window.SH101.controls) {
+        const id = role + '.' + def.id;
+        if (sliders[id]) sliders[id].value = patch?.[def.id] ?? rig.getParam(id);
+      }
+      showPartLevel();
+      showPartActivity();
+      syncControls();
+    }
+    function showParts(next) {
+      if (next.length === parts.length && next.every((part, i) => part === parts[i])) { showPartLevel(); return; }
+      parts = next;
+      partPicker.hidden = !parts.length;
+      partSelect.replaceChildren(new Option('Весь канал ' + role.toUpperCase(), '-2'), new Option('Панель · MIDI/ROM', '-1'));
+      for (const part of parts) partSelect.add(new Option((part.track + 1) + ' · ' + part.name, part.track));
+      choosePart(-2);
+    }
+    partSelect.addEventListener('change', () => choosePart(Number(partSelect.value)));
+    gain.addEventListener('input', () => {
+      if (!selectedPart) return;
+      selectedPart.levelDb = Number(gain.value);
+      levelReadout.textContent = ' ' + gain.value + ' дБ';
+      midiRun?.player?.level(selectedPart.track, selectedPart.levelDb);
+    });
+    const source = control('clock-source'), pulse = control('clock'), readout = control('readout');
+    const arpHint = control('arp-hint'), arpExt = control('arp-ext');
+    const power = control('power'), rateLED = control('lfo-led'), rateLabel = control('lfo-hz');
+    const bender = control('bender'), lfoMod = control('bend-lfo');
+    const fxMode = $('show-fx');
+    const note = { bass: 36, lead: 60, arp: 72, fx: 36, pad: 60 }[role];
+    const audition = bindSH101Audition(role, t => {
+      if (!voice.external) return;
+      if (fx) rig.fx.on(note, 100, t);
+      else voice.send({ type: 'audition', note, t });
+    });
+    const leds = {}, releases = [];
+    let board, player, available = false, wantedInput = 'midi', serviceMode = false;
+    const button = (parent, label, cls = 'btn') => {
+      const el = document.createElement('button');
+      el.type = 'button';
+      el.className = cls;
+      el.textContent = label;
+      parent.appendChild(el);
+      return el;
+    };
+    const resume = () => startAudio()?.catch(() => { status.textContent = 'Браузер не запустил звук.'; });
+    const bind = (el, change, latchable = false, keyboard = true) => {
+      let pressedAt = 0, timer, latched = false, fromKeyboard = false;
+      const set = (down) => { el.classList.toggle('rom-down', down); change(down); };
+      const press = () => {
+        clearTimeout(timer);
+        pressedAt = performance.now();
+        if (voice.powered && keyboard && !voice.useROM) selectInput('rom');
+        set(true);
+        if (voice.powered) resume();
+      };
+      const release = () => {
+        if (latched) return;
+        clearTimeout(timer);
+        // Even a quick tap must survive a complete keyboard scan.
+        timer = setTimeout(() => set(false), Math.max(0, 24 - (performance.now() - pressedAt)));
+      };
+      releases.push(() => {
+        latched = fromKeyboard = false;
+        clearTimeout(timer);
+        if (el.classList.contains('rom-down')) set(false);
+      });
+      el.addEventListener('pointerdown', e => {
+        if (e.button !== 0) return;
+        if (latched) { latched = false; release(); return; }
+        latched = latchable && e.shiftKey;
+        el.setPointerCapture(e.pointerId);
+        press();
+      });
+      el.addEventListener('lostpointercapture', release);
+      el.addEventListener('pointerup', release);
+      el.addEventListener('pointercancel', release);
+      el.addEventListener('keydown', e => {
+        if (e.key !== ' ' && e.key !== 'Enter') return;
+        e.preventDefault();
+        if (e.repeat) return;
+        if (latched) { latched = false; release(); return; }
+        fromKeyboard = true;
+        press();
+      });
+      const releaseKeyboard = () => {
+        if (!fromKeyboard) return;
+        fromKeyboard = false;
+        release();
+      };
+      el.addEventListener('keyup', e => { if (e.key === ' ' || e.key === 'Enter') releaseKeyboard(); });
+      el.addEventListener('blur', releaseKeyboard);
+      el.addEventListener('click', e => { if (e.detail === 0) { press(); release(); } });
+    };
+    const put = (word, mask, down) => down ? word | mask : word & ~mask;
+    const keys = control('keys');
+    for (const [parent, buttons] of [
+      [control('sequencer'), { load: 'LOAD', play: 'PLAY' }],
+      [control('arpeggio'), { down: 'DOWN', upDown: 'U&D', up: 'UP' }],
+      [control('keyboard-functions'), { hold: 'HOLD', transpose: 'KEY TRANSPOSE' }],
+    ]) {
+      for (const [id, label] of Object.entries(buttons)) {
+        const el = leds[id] = button(parent, label);
+        el.setAttribute('aria-pressed', 'false');
+        bind(el, down => {
+          board.buttons = put(board.buttons, api.BUTTON[id], down);
+          if (id === 'hold' && down) serviceMode = false;
+        }, id === 'load' || id === 'hold' || id === 'transpose');
+      }
+    }
+    const pedal = button(control('accessories'), 'Педаль HOLD');
+    pedal.dataset.tip = 'Педаль на входе HOLD. Shift + клик удерживает педаль.';
+    bind(pedal, down => { board.pedal = down; }, true);
+    let white = 0;
+    for (let i = 0; i < 32; i++) {
+      const note = i + 53, name = NOTE[note % 12] + (Math.floor(note / 12) - 1);
+      const accidental = name.includes('#');
+      const el = button(keys, name, 'rom-key' + (accidental ? ' accidental' : ''));
+      if (accidental) {
+        el.style.left = (100 * white / 19) + '%';
+        el.style.width = (64 / 19) + '%';
+      } else white++;
+      bind(el, down => { board.keys = put(board.keys, 1 << i, down); }, true);
+    }
+    bind(pulse, down => { board.clockHigh = down; });
+    bind(lfoMod, down => { setVoiceControl(role, 'bendLfoPressed', Number(down)); }, false, false);
+    const centerBender = () => {
+      if (Number(bender.value) === 0.5) return;
+      bender.value = 0.5;
+      setVoiceControl(role, 'bender', 0.5);
+    };
+    bender.addEventListener('input', () => { resume(); setVoiceControl(role, 'bender', +bender.value); });
+    bender.addEventListener('pointerdown', e => { if (e.button === 0) bender.setPointerCapture(e.pointerId); });
+    for (const event of ['pointerup', 'pointercancel', 'lostpointercapture', 'blur']) {
+      bender.addEventListener(event, centerBender);
+    }
+    bender.addEventListener('keyup', centerBender);
+    source.addEventListener('change', () => {
+      board.external = source.value === 'external';
+      pulse.disabled = !voice.powered || !board.external;
+      arpExt.hidden = !board.external;
+    });
+    const releaseAll = () => {
+      for (const release of releases) release();
+      centerBender();
+    };
+    window.addEventListener('blur', releaseAll);
+    details.addEventListener('toggle', () => { if (!details.open) releaseAll(); });
+    buildSH101Fields(role, control('voice-controls'), control('performance-controls'),
+      control('accessories'), control('clock-indicator'));
+    rateLabel.htmlFor.value = 'sh101-' + role + '-lfoRate';
+
+    const inputs = [...Object.values(leds), ...keys.children, pedal, source];
+    function syncControls() {
+      const { powered, useROM } = voice;
+      input.disabled = !available;
+      romOption.disabled = !board;
+      input.value = voice.input;
+      inputBadge.textContent = groupSelected ? 'Все MIDI-партии' : selectedPart?.name ?? input.selectedOptions[0].textContent;
+      power.setAttribute('aria-pressed', String(powered));
+      power.textContent = powered ? 'ON' : 'OFF';
+      for (const el of inputs) {
+        const serviceSwitch = el === leds.load || el === leds.transpose;
+        el.disabled = !board || !available || (!powered && !serviceSwitch);
+      }
+      pulse.disabled = !powered || !available || !board?.external;
+      bender.disabled = lfoMod.disabled = !powered || !available;
+      audition.hidden = groupSelected || !!selectedPart || voice.input !== 'midi';
+      readout.hidden = !useROM;
+      audition.disabled = !powered || !available;
+      if (fx) $('sh101-fx-sequencer').hidden = groupSelected || !!selectedPart || voice.input !== 'midi';
+    }
+
+    function selectInput(value) {
+      wantedInput = value;
+      if (value === 'rom' && targets().length) choosePart(-1);
+      if (!available || (value === 'rom' && !board) || voice.input === value) return;
+      if (fx) rig.fx.kill(ctx.currentTime);
+      if (value !== 'rom') releaseAll();
+      voice.setInput(value);
+      if (board) player = new api.Player(board, voice.send);
+      if (value === 'cv') syncCV(cvPair);
+      syncControls();
+      update();
+    }
+    input.addEventListener('change', () => selectInput(input.value));
+
+    power.addEventListener('click', () => {
+      if (fx) rig.fx.kill(ctx.currentTime);
+      voice.setPower(!voice.powered);
+      syncControls();
+      if (voice.powered) {
+        if (board) {
+          // The 80C49 reads LOAD and KEY TRANSPOSE during its service-mode boot.
+          const held = board.buttons;
+          const service = api.BUTTON.load | api.BUTTON.transpose;
+          board.powerOn();
+          board.buttons = held;
+          player = new api.Player(board, voice.send);
+          serviceMode = (held & service) === service;
+          if (serviceMode) { selectInput('rom'); resume(); }
+        }
+        if (voice.input === 'cv') syncCV(cvPair);
+        update();
+      } else {
+        releaseAll();
+        arpHint.hidden = true;
+        for (const el of Object.values(leds)) el.setAttribute('aria-pressed', 'false');
+        rateLED.dataset.on = 'false';
+        readout.textContent = 'KCV — · RANGE — · Gate 0';
+      }
+    });
+
+    function update() {
+      if (!board || !voice.powered) return;
+      board.range = rig.getParam(role + '.range');
+      board.octave = rig.getParam(role + '.transpose');
+      board.trigger = rig.getParam(role + '.trigger');
+      board.rate = window.SH101.lfoFrequency(rig.getParam(role + '.lfoRate'));
+      const audible = voice.useROM && ctx.state === 'running';
+      const s = player.tick(performance.now() / 1000, audible ? ctx.currentTime : null);
+      if (!details.open) return;
+      const showArpHint = !serviceMode && voice.useROM && (s.mode === 'up' || s.mode === 'down' || s.mode === 'upDown');
+      if (arpHint.hidden === showArpHint) arpHint.hidden = !showArpHint;
+      const lfoOn = String(board.phase < 0.5);
+      if (rateLED.dataset.on !== lfoOn) rateLED.dataset.on = lfoOn;
+      const hz = board.rate.toFixed(1) + ' Гц';
+      if (rateLabel.textContent !== hz) rateLabel.textContent = hz;
+      for (const [id, el] of Object.entries(leds)) {
+        const on = String(s.mode === id || (id === 'hold' && s.hold) || (id === 'transpose' && s.transpose));
+        if (el.getAttribute('aria-pressed') !== on) el.setAttribute('aria-pressed', on);
+      }
+      const value = 'KCV ' + (s.pitch / 12).toFixed(2) + ' В · RANGE ' + (s.range / 12).toFixed(2) + ' В · Gate ' + Number(s.gate);
+      if (readout.textContent !== value) readout.textContent = value;
+    }
+
+    if (fx) {
+      const riser = $('sh101-fx-riser-bars');
+      const id = 'fx.riserBars', duration = rig.params.find(p => p.id === id);
+      for (let bars = duration.min; bars <= duration.max; bars++) riser.add(new Option(bars, bars));
+      riser.value = duration.value;
+      riser.addEventListener('input', () => userSet(id, +riser.value));
+      sliders[id] = riser;
+      fxMode.addEventListener('change', () => { rig.fx.setSH101(fxMode.value === 'sh101'); syncControls(); });
+    }
+    const ready = mode => {
+      available = mode !== 'none';
+      if (fx) {
+        fxMode.disabled = !available;
+        if (!available) fxMode.value = 'original';
+        rig.fx.setSH101(available && fxMode.value === 'sh101');
+      } else if (!available) status.textContent = 'SH-101 недоступен в этом браузере.';
+      syncControls();
+      selectInput(wantedInput);
+    };
+    voice.ready.then(ready, () => ready('none'));
+    return {
+      selectInput, update, showParts, choosePart, showPartActivity,
+      get input() { return wantedInput; }, get targets() { return targets(); },
+      attach(next) {
+        board = next;
+        player = new api.Player(board, voice.send);
+        syncControls();
+        selectInput(wantedInput);
+      },
+    };
+  }
+
+  function loadSH101ROM(panels) {
+    const api = window.SH101ROM, createCore = window.SH101Core, status = $('rom-status');
+    if (!api || !createCore) { status.textContent = 'Эмулятор ROM 80C49 недоступен.'; return; }
+    const file = $('rom-file'), fileLabel = $('rom-file-label');
+
+    async function load(readImage) {
+      if (file.disabled) return;
+      file.disabled = true;
+      status.textContent = 'Загружается ROM 80C49-6-7301…';
+      try {
+        const image = await readImage();
+        const boards = await api.Board.loadAll(createCore, image, panels.length);
+        panels.forEach((panel, i) => panel.attach(boards[i]));
+        status.textContent = 'ROM 80C49-6-7301 загружен в ' + boards.length + ' SH-101';
+        fileLabel.hidden = file.hidden = true;
+        setInterval(() => { for (const panel of panels) panel.update(); }, 10);
+      } catch (error) {
+        status.textContent = error.message;
+        fileLabel.hidden = file.hidden = false;
+        file.disabled = false;
+        file.value = '';
+      }
+    }
+
+    file.addEventListener('change', () => { if (file.files.length) load(() => file.files[0].arrayBuffer()); });
+    const loopback = ['127.0.0.1', 'localhost', '[::1]'].includes(location.hostname);
+    const local = loopback && new URLSearchParams(location.search).get('sh101') === 'local';
+    // Use the upstream dump at a fixed revision. The emulator checks its SHA-256.
+    const romURL = local ? './sh101.rom'
+      : 'https://raw.githubusercontent.com/joebritt/SH101_Disassembled/708cde01906312de7801204989628aa4610a4e45/80C49_SH101.bin';
+    load(async () => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 6000);
+      try {
+        const response = await fetch(romURL, { signal: controller.signal });
+        if (response.ok) return await response.arrayBuffer();
+      } catch {
+        // Network errors and timeouts both allow the user to pick the ROM.
+      } finally {
+        clearTimeout(timer);
+      }
+      throw new Error('Не удалось загрузить ROM автоматически. Выбери локальный образ.');
+    });
+  }
+
   function buildRigPanel() {
     buildMixer();
     if (!rig) {
-      $('knobs').textContent = 'Синтезаторы не загрузились (rig.js).';
+      $('synth-status').textContent = 'Синтезаторы не загрузились.';
       return;
     }
     buildEffects();
     buildAcid('acid1', 2, 'ACID 1', 4);
     buildAcid('acid2', 3, 'ACID 2', 5);
-    const byId = {};
-    for (const p of rig.params) byId[p.id] = p;
-    for (const id of KNOBS) {
-      const p = byId[id];
-      if (!p) continue;
-      const wrap = document.createElement('label');
-      wrap.textContent = (p.group ? p.group + ' · ' : '') + (p.label || id);
-      wrap.dataset.tip = (id.endsWith('.delay') ? 'Сколько сигнала инструмента уходит в общую задержку.' : KNOB_TIP[id.split('.')[1]]) + NOT_DEVICE;
-      const input = document.createElement('input');
-      input.type = 'range'; input.min = p.min; input.max = p.max; input.step = (p.max - p.min) / 200; input.value = p.value;
-      input.addEventListener('input', () => userSet(id, +input.value));
-      wrap.appendChild(input);
-      $('knobs').appendChild(wrap);
-      sliders[id] = input;
-    }
+    buildSH101();
   }
   function startAudio() {
-    if (!ctx) return;
-    ctx.resume();
+    return ctx?.resume();
+  }
+
+  // The device runs slightly ahead of audio. Apply each change on the audio
+  // clock using its pin/SPI timestamp, including changes while Gate stays high.
+  const cvCodes = new Uint16Array(CV_ROLES.length);
+  let gateMask = 0;
+  function syncCV(pair, t = ctx?.currentTime) {
+    const role = CV_ROLES[pair];
+    rig?.sh101[role]?.cvGate(device.dacVolts(cvCodes[pair]), !!(gateMask & (1 << pair)), t);
+  }
+  function onCV(e) {
+    if (e.type === 'dac') {
+      cvCodes[e.channel] = e.code;
+      if (sounding()) syncCV(e.channel, audioTime(e.t));
+      return;
+    }
+    const changed = gateMask ^ e.mask;
+    gateMask = e.mask;
+    for (let pair = 0; pair < CV_ROLES.length; pair++) {
+      const bit = 1 << pair;
+      if (!(changed & bit)) continue;
+      if (sounding()) syncCV(pair, audioTime(e.t));
+      if ((gateMask & bit) && rig?.sh101[CV_ROLES[pair]]?.input === 'cv') {
+        flashStrip(Artist.CV_TRACKS[pair], e.t);
+      }
+    }
+  }
+
+  function patchShow(song, importedPairs = []) {
+    for (const { panel, input, priorInput, controls } of showPatch) {
+      if (panel.input === input) panel.selectInput(priorInput);
+      for (const { id, value, prior } of controls) {
+        if (rig.getParam(id) === value) moveKnob(id, prior);
+      }
+    }
+    showPatch = [];
+    for (const [role, panel] of Object.entries(sh101Panels)) {
+      if (!song?.cv && !importedPairs.includes(CV_ROLES.indexOf(role))) continue;
+      const input = role === 'pad' ? 'midi' : 'cv';
+      const controls = Object.entries(song?.cv ? CV_PATCH[role] || {} : {}).map(([name, value]) => {
+        const id = role + '.' + name;
+        return { id, value, prior: rig.getParam(id) };
+      });
+      showPatch.push({ panel, input, priorInput: panel.input, controls });
+      for (const { id, value } of controls) moveKnob(id, value);
+      panel.selectInput(input);
+    }
+  }
+
+  function bootDevice() {
+    device.boot(false);
+    gateMask = device.gates();
+    for (let pair = 0; pair < cvCodes.length; pair++) cvCodes[pair] = device.dac(pair);
   }
 
   // ─── MIDI wire → synths, monitor ──────────────────────────────
   const midiLines = [];
   let lastClock = 0, clockPeriod = 0, tempoSent = 0;
   const NOTE = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+  function flashStrip(strip, t) {
+    lampHot[strip] = performance.now() + (t - playhead) / 1000 + 90;
+  }
   function onMidi(m) {
     if (midiLines.length > 3) midiLines.splice(0, midiLines.length - 3);
     if (m.status === 0xF8) {
@@ -666,7 +1366,7 @@
       return;
     }
     if (m.status === 0xFA) { lastClock = 0; clockPeriod = 0; }
-    if (m.status === 0xFC && rig && sounding()) rig.allOff(audioTime(m.t));
+    if (m.status === 0xFC && sounding()) rig.allOff(audioTime(m.t), false);
     if (m.status >= 0xF0) {
       midiLines.push((m.t / 1e6).toFixed(3) + '  ' + ({ 0xFA: 'Start', 0xFC: 'Stop', 0xFB: 'Continue' }[m.status] || m.status.toString(16)));
       return;
@@ -675,7 +1375,7 @@
     if (sounding()) rig.midi(m.status, m.d1, m.d2, audioTime(m.t));
     if (kind === 0x90 && m.d2 > 0) {
       const inst = stripOf(channel, m.d1);
-      if (inst !== undefined) lampHot[inst] = performance.now() + (m.t - playhead) / 1000 + 90;
+      if (inst !== undefined) flashStrip(inst, m.t);
       midiLines.push((m.t / 1e6).toFixed(3) + '  ch' + String(channel + 1).padStart(2) + '  ' +
         (NOTE[m.d1 % 12] + (Math.floor(m.d1 / 12) - 1)).padEnd(4) + ' vel ' + m.d2);
     }
@@ -794,6 +1494,8 @@
       option.textContent = '«' + song.title + '» — ' + song.style + ', ' + song.key + ', ' + song.bpm + ' BPM';
       songs.appendChild(option);
     });
+    const songIndex = Artist.SONGS.findIndex(song => song.id === requestedSong);
+    if (songIndex >= 0) songs.value = String(songIndex);
     const forms = $('show-form');
     const own = document.createElement('option');
     own.value = '';
@@ -805,6 +1507,9 @@
       forms.appendChild(option);
     }
     const ownForm = () => {
+      const midiSong = selectedMidiSong();
+      showMidiTracks(midiSong);
+      if (midiSong) { $('midi-library').open = true; return; }
       const form = Artist.FORMS.find(f => f.id === Artist.SONGS[+songs.value].form);
       own.textContent = 'как задумано для песни: «' + form.title + '»';
     };
@@ -860,7 +1565,10 @@
     // In slices, so the device's event buffer is emptied as it fills.
     while (device.now() < target) {
       hands.advance(Math.min(target, device.now() + 250000));
-      for (const e of device.drain()) if (e.type === 'midi') onMidi(e);
+      for (const e of device.drain()) {
+        if (e.type === 'midi') onMidi(e);
+        else onCV(e);
+      }
     }
   }
   function tick() {
@@ -870,6 +1578,26 @@
     // the music slows for a moment instead of playing a bunch of notes at once.
     const dt = Math.min(Math.max(w - lastWall, 0), MAX_STEP_S);
     lastWall = w;
+    if (midiRun?.player) {
+      const { player, song, start } = midiRun;
+      const now = ctx.currentTime;
+      const until = (now + 0.075 - start) * 1e6;
+      while (midiRun.tempo < song.tempos.length && song.tempos[midiRun.tempo].time <= until) {
+        const segment = song.tempos[midiRun.tempo++];
+        rig.setTempo(60000000 / segment.us, Math.max(now, start + segment.time / 1e6));
+      }
+      while (midiRun.cursor < song.events.length && song.events[midiRun.cursor].t <= until) {
+        const e = song.events[midiRun.cursor++];
+        player.midi(e, Math.max(now, start + e.t / 1e6));
+        const on = MidiSongs.noteOn(e);
+        if (on) midiRun.active[e.track]++;
+        else if (MidiSongs.noteOff(e) && midiRun.active[e.track]) midiRun.active[e.track]--;
+        const role = song.tracks[e.track].role;
+        const strip = STRIPS.findIndex(s => s.id === role);
+        if (on && strip >= 0) lampHot[strip] = performance.now() + 100;
+      }
+      if (now >= start + song.duration / 1e6 + 1) endShow('MIDI Song сыграна.');
+    }
     if (phase === 'prep') {
       const target = speed === Infinity ? show.prepEnd : Math.min(show.prepEnd, device.now() + dt * 1e6 * speed);
       runTo(target);
@@ -892,10 +1620,14 @@
     if (rig && ctx && ctx.state === 'running') rig.allOff(ctx.currentTime);
   }
   function startShow() {
+    // A song is media playback, which iOS can play in silent mode.
+    if (ctx && navigator.audioSession) navigator.audioSession.type = 'playback';
+    const imported = selectedMidiSong();
+    if (imported) { startMidiSong(imported); return; }
     startAudio();
     hands.clear();
     releaseAll();
-    device.boot(false);
+    bootDevice();
     silence();      // a note the old device state left sounding gets no Note Off any more
     $('log').innerHTML = '';
     lastLed.fill('');
@@ -903,36 +1635,89 @@
     show = Artist.buildShow(undefined, { song: +$('show-song').value, form: $('show-form').value || undefined,
                                          fw2: variant !== 'base', keys: variant === 'keys', pads: variant === 'pads',
                                          quantMutes: device.features().quantMutes });
+    patchShow(show.song);
     Artist.schedule(show, device, hands, io);
     phase = 'prep';
+    refreshMidiParts();
     speed = $('show-prep').checked ? +$('prep-speed').value : Infinity;
     playhead = 0;
     lastWall = wall();
     $('show-start').disabled = true;
     $('show-stop').disabled = false;
   }
+
+  async function startMidiSong(song) {
+    const request = ++launchSerial;
+    const firmware = $('midi-song-mode').value === 'firmware';
+    $('show-start').disabled = true;
+    $('show-stop').disabled = false;
+    try {
+      await startAudio();
+      if (request !== launchSerial) return;
+      hands.clear();
+      releaseAll();
+      bootDevice();
+      silence();
+      patchShow();
+      show = null;
+      playhead = device.now() - LOOKAHEAD_US;
+      speed = 1;
+      lastWall = wall();
+      $('log').replaceChildren();
+      if (firmware) {
+        if (!device.openMidiSong(firmwareMidiImage(song))) throw Error('Прошивка отклонила образ MIDI Song.');
+        midiRun = { song, firmware, start: device.now() };
+        phase = 'midi-firmware';
+        refreshMidiParts();
+        // PLAY, just as on the loaded hardware.
+        device.play(true);
+        device.play(false, device.now() + 80000);
+        patchShow(null, song.tracks.flatMap(p => p.route?.cv === undefined ? [] : [p.route.cv]));
+      } else {
+        if (!rig) throw Error('Нет звукового движка.');
+        phase = 'midi-loading';
+        const player = await rig.midiParts(song);
+        if (request !== launchSerial) { player.stop(ctx.currentTime); return; }
+        midiRun = {
+          song, player, cursor: 0, tempo: 0, active: new Uint16Array(song.tracks.length),
+          start: ctx.currentTime + 0.1,
+        };
+        phase = 'midi-full';
+        refreshMidiParts();
+      }
+    } catch (error) {
+      if (request === launchSerial) endShow(error.message);
+    }
+  }
   function endShow(message) {
+    launchSerial++;
+    midiRun?.player?.stop(ctx.currentTime);
+    midiRun = null;
     hands.clear();
     releaseAll();
+    if (show?.song?.padNotes) rig?.sh101.pad.kill(ctx.currentTime);
     phase = 'idle';
+    refreshMidiParts();
     speed = 1;
     playhead = device.now() - LOOKAHEAD_US;
     $('show-start').disabled = false;
     $('show-stop').disabled = true;
+    if (ctx && navigator.audioSession) navigator.audioSession.type = 'auto';
     if (message) say('info', message);
   }
   // A hand on the panel during the show takes it away from the artist.
   function takeOver() {
-    if (phase !== 'idle') endShow('Артист остановлен: управление у вас.');
+    if (phase === 'prep' || phase === 'live') endShow('Артист остановлен: управление у вас.');
   }
   function reboot() {
     if (phase !== 'idle') endShow();
     hands.clear();
     releaseAll();
-    device.boot(false);
+    bootDevice();
     lastLed.fill('');
     playhead = device.now() - LOOKAHEAD_US;
     silence();
+    patchShow();
     say('info', 'Прибор выключен и включён: память как после включения питания.');
   }
 
@@ -950,9 +1735,21 @@
     $('d-locks').textContent = info.lockErrors;
     const gates = device.gates();
     $('d-gates').textContent = [0, 1, 2, 3].map(i => (gates >> i) & 1 ? '█' : '·').join(' ');
-    $('d-cv').textContent = [0, 1, 2, 3].map(i => (device.dac(i) * 2.048 / 4096).toFixed(2)).join(' ');
+    $('d-cv').textContent = CV_ROLES.map((_, i) => device.dacVolts(device.dac(i)).toFixed(2)).join(' ');
     $('midi').textContent = midiLines.join('\n');
+    if (fullMidiSong()) {
+      for (const panel of Object.values(sh101Panels)) panel.showPartActivity();
+    }
     if (info.fatal) $('phase').textContent = 'Ошибка симулятора: ' + info.fatal;
+    else if (phase === 'midi-loading') $('phase').textContent = 'Подготовка MIDI-дорожек…';
+    else if (midiRun) {
+      const { song, firmware, start } = midiRun;
+      const microseconds = firmware ? Math.max(0, device.now() - start) : Math.max(0, (ctx.currentTime - start) * 1e6);
+      if (firmware && microseconds > 150000 && info.state === 0) { endShow('MIDI Song остановлена.'); return; }
+      $('phase').textContent = (firmware ? 'MIDI Song · ReBirth · ' : 'Полный MIDI · ') + song.title + ' · ' +
+        (microseconds / 1e6).toFixed(0) + ' / ' + (song.duration / 1e6).toFixed(0) + ' с';
+      $('progress').firstElementChild.style.width = Math.min(100, 100 * microseconds / song.duration) + '%';
+    }
     else if (phase === 'prep') {
       $('phase').textContent = 'Подготовка: артист набирает клипы на остановленном приборе (' +
         Math.round(device.now() / 1e6) + ' из ' + Math.round(show.prepEnd / 1e6) + ' с времени прибора)';
@@ -1039,6 +1836,9 @@
     try {
       ctx = new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'interactive' });
       if (window.Rig) rig = new window.Rig(ctx);
+      ctx.addEventListener('statechange', () => {
+        if (sounding()) CV_ROLES.forEach((_, pair) => syncCV(pair));
+      });
     } catch (error) {
       console.error(error);
     }
@@ -1047,7 +1847,24 @@
     initTips();
     showBuild();
 
-    $('show-start').addEventListener('click', startShow);
+    const play = $('show-start');
+    const enablePlay = () => {
+      play.textContent = '▶ Сыграть гоа-сет';
+      play.disabled = false;
+    };
+    play.addEventListener('click', startShow);
+    const libraryReady = initMidiLibrary();
+    if (requestedSong && !Artist.SONGS.some(song => song.id === requestedSong)) {
+      play.textContent = 'Загрузка MIDI…';
+      libraryReady.then(() => {
+        if (selectedMidiSong()?.id !== requestedSong) {
+          const status = $('midi-import-status');
+          $('midi-library').open = true;
+          importStatus('Песня по ссылке недоступна. ' + status.textContent);
+        }
+        enablePlay();
+      });
+    } else enablePlay();
     $('show-stop').addEventListener('click', () => {
       endShow('Артист остановлен.');
       // The button also takes the artist's finger to PLAY, so the music stops.
@@ -1062,8 +1879,8 @@
       if (ctx.state === 'running') { if (rig) rig.allOff(ctx.currentTime); ctx.suspend(); } else ctx.resume();
     });
     $('fault-keys').addEventListener('click', () => {
-      device.chipReset(0x22);
-      say('warn', 'Расширитель строк клавиатуры U801 (MCP23017) сброшен. Прошивка найдёт это в начале следующего скана и настроит его заново; повисшие строки не должны стать нажатиями.');
+      device.chipReset(0x34);
+      say('warn', 'Сканер пэдов TCA8418 сброшен. Прошивка заметит это при проверке раз в секунду и настроит его заново.');
     });
     $('fault-steps').addEventListener('click', () => {
       device.chipReset(0x20);

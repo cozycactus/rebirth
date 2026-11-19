@@ -183,9 +183,9 @@ void seq_set_track_mute(uint8_t track, bool muted) {
     if (track >= NUM_TRACKS) return;
     uint32_t lock_state = seq_lock();
     if (muted)
-        g_seq.track_mutes |= (1u << track);
+        g_seq.track_mutes |= TRACK_BIT(track);
     else
-        g_seq.track_mutes &= ~(1u << track);
+        g_seq.track_mutes &= ~TRACK_BIT(track);
     seq_unlock(lock_state);
 }
 
@@ -196,8 +196,8 @@ static void refresh_track_rows(uint8_t track) {
     }
 }
 
-uint8_t seq_kit_tracks(void) {
-    uint8_t mask = 0;
+track_mask_t seq_kit_tracks(void) {
+    track_mask_t mask = 0;
     // One location per lock section, as below.
     for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
         uint32_t lock_state = seq_lock();
@@ -210,11 +210,12 @@ uint8_t seq_kit_tracks(void) {
 bool seq_set_track_config(uint8_t track, const track_config_t *config) {
     if (track >= NUM_TRACKS || !config) return false;
     if (config->type == TRACK_TYPE_KIT) {
+        if (track >= KIT_TRACK_SLOTS) return false;
         // At most MAX_KIT_TRACKS kits play at once, in Song mode and mixed launches too.
-        uint8_t kits = seq_kit_tracks();
-        if (!(kits & (1u << track))) {
+        track_mask_t kits = seq_kit_tracks();
+        if (!(kits & TRACK_BIT(track))) {
             uint8_t count = 0;
-            for (; kits; kits &= (uint8_t)(kits - 1u)) count++;
+            for (; kits; kits &= (kits - 1u)) count++;
             if (count >= MAX_KIT_TRACKS) return false;
         }
     }
@@ -242,31 +243,31 @@ void seq_set_kit_config(uint8_t track, const kit_config_t *config) {
     refresh_track_rows(track);
 }
 
-void seq_clear_stored_mutes(uint8_t mask) {
-    uint8_t cleared = 0;
+void seq_clear_stored_mutes(track_mask_t mask) {
+    track_mask_t cleared = 0;
     // Stored mutes reach Core 1 only through the prepared rows refreshed below,
     // so they are cleared one location per lock section.
     for (uint8_t p = 0; p < MAX_PATTERNS; p++) {
         uint32_t lock_state = seq_lock();
         for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-            if (!(mask & (1u << track)) || !g_seq.patterns[p].tracks[track].muted) continue;
+            if (!(mask & TRACK_BIT(track)) || !g_seq.patterns[p].tracks[track].muted) continue;
             g_seq.patterns[p].tracks[track].muted = false;
-            cleared |= (uint8_t)(1u << track);
+            cleared |= TRACK_BIT(track);
         }
         seq_unlock(lock_state);
     }
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        if (cleared & (1u << track)) refresh_track_rows(track);
+        if (cleared & TRACK_BIT(track)) refresh_track_rows(track);
     }
 }
 
 void seq_toggle_track_mute(uint8_t track) {
     if (track >= NUM_TRACKS) return;
-    uint8_t bit = (uint8_t)(1u << track);
+    track_mask_t bit = TRACK_BIT(track);
     uint32_t lock_state = seq_lock();
     bool unmute = (seq_track_mutes_locked() & bit) != 0;
     if (unmute) {
-        g_seq.track_mutes &= (uint8_t)~bit;
+        g_seq.track_mutes &= ~bit;
     } else {
         g_seq.track_mutes |= bit;
     }
@@ -274,20 +275,20 @@ void seq_toggle_track_mute(uint8_t track) {
     if (unmute) seq_clear_stored_mutes(bit);
 }
 
-uint8_t seq_track_mutes_locked(void) {
-    uint8_t mutes = g_seq.track_mutes;
+track_mask_t seq_track_mutes_locked(void) {
+    track_mask_t mutes = g_seq.track_mutes;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         uint8_t playing = g_seq.transport.current_pattern[track];
         if (playing < MAX_PATTERNS && g_seq.patterns[playing].tracks[track].muted) {
-            mutes |= (uint8_t)(1u << track);
+            mutes |= TRACK_BIT(track);
         }
     }
     return mutes;
 }
 
-uint8_t seq_get_track_mutes(void) {
+track_mask_t seq_get_track_mutes(void) {
     uint32_t lock_state = seq_lock();
-    uint8_t mutes = seq_track_mutes_locked();
+    track_mask_t mutes = seq_track_mutes_locked();
     seq_unlock(lock_state);
     return mutes;
 }

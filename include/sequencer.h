@@ -6,7 +6,11 @@
 
 // ─── Configuration ──────────────────────────────────────────────
 
-#define NUM_TRACKS          8
+#define PANEL_TRACKS        8
+#define NUM_TRACKS          64
+typedef uint64_t track_mask_t;
+#define TRACK_BIT(track) (UINT64_C(1) << (track))
+#define ALL_TRACKS UINT64_MAX
 #define STEPS_PER_PATTERN   16
 #define PATTERN_BANKS       4
 #define PATTERNS_PER_BANK   8
@@ -43,6 +47,8 @@
 #define MIDI_CONTINUE       0xFB
 // The UART TX queue (a power of two; one byte stays unused, so it holds one less).
 #define MIDI_TX_QUEUE_SIZE  1024
+// One slide per track and both kits hitting all their voices on one step.
+#define MIDI_STEP_BUFFER_BYTES (6 * NUM_TRACKS + 3 * MAX_KIT_TRACKS * KIT_VOICES)
 
 // Jitter measurement
 #define JITTER_PROBE_PIN    7       // High while sequencer timer ISR runs
@@ -76,6 +82,7 @@ typedef enum {
 #define KIT_LANE_SD     2
 #define KIT_LANE_CH     8
 #define KIT_LANE_OH     9
+#define KIT_TRACK_SLOTS 8
 #define MAX_KIT_TRACKS  2
 #define KIT_FLAM_MIN    1
 #define KIT_FLAM_MAX    12
@@ -107,6 +114,17 @@ typedef enum {
     OUTPUT_BOTH,
 } output_mode_t;
 
+// SYNTH uses the NOTE row's space for CV/Gate. DRUM keeps its NOTE row.
+typedef enum {
+    TRACK_PARAM_TYPE,
+    TRACK_PARAM_CHANNEL,
+    TRACK_PARAM_OUTPUT,
+    TRACK_PARAM_GATE,
+    TRACK_PARAM_NOTE,
+    TRACK_PARAM_DRUM_CV,
+    TRACK_PARAM_SYNTH_CV = TRACK_PARAM_NOTE,
+} track_param_t;
+
 typedef struct {
     track_type_t type;
     uint8_t      midi_channel;      // 0–15
@@ -124,7 +142,7 @@ typedef struct {
     uint8_t        track_length[NUM_TRACKS]; // Per-track/section step count: 1-16
     uint8_t        swing;           // 0–99, percentage of swing
     char           name[9];         // 8 chars + null
-    uint32_t       kit_steps[NUM_TRACKS][STEPS_PER_PATTERN]; // Kit step words
+    uint32_t       kit_steps[KIT_TRACK_SLOTS][STEPS_PER_PATTERN]; // Kit step words
 } pattern_t;
 
 // Song mode
@@ -155,6 +173,7 @@ typedef enum {
 typedef enum {
     PLAY_MODE_PATTERN,      // Loop single pattern
     PLAY_MODE_SONG,         // Play song chain
+    PLAY_MODE_MIDI_SONG,    // Play the timed event stream from flash
 } play_mode_t;
 
 typedef enum {
@@ -206,12 +225,13 @@ typedef struct {
     uint8_t              active_pattern[NUM_TRACKS]; // Edited pattern per track/section
     kit_config_t         kit_config[NUM_TRACKS];     // Kit settings per track
     volatile uint8_t     launch_quant;       // launch_quant_t; not saved
-    volatile uint8_t     track_mutes;        // Bitmask: bit N = track N muted for playback
+    volatile track_mask_t     track_mutes;        // Bitmask: bit N = track N muted for playback
     // Bit N: a MUTE change of track N waits for the launch point; mute_target holds
     // the live mute it writes there. Not saved; after sequencer_init(), which clears
-    // them before the timer runs, written only under the playback lock.
-    volatile uint8_t     mute_pending;
-    volatile uint8_t     mute_target;
+    // them before the timer runs, written and read only under the playback lock
+    // (64-bit: never read them without it).
+    volatile track_mask_t     mute_pending;
+    volatile track_mask_t     mute_target;
     // Spinlock index for mutex
     uint32_t             spinlock_num;
     bool                 spinlock_ready;
@@ -293,7 +313,7 @@ void transport_clear_track_queue(uint8_t track);
 // the location, their queues are cancelled. Otherwise each one already on it
 // loses any queue and keeps playing, and each other one is queued to it
 // (selected at once while stopped). False for an invalid location or Song mode.
-bool transport_launch(uint8_t track_mask, uint8_t pattern_index);
+bool transport_launch(track_mask_t track_mask, uint8_t pattern_index);
 
 // MUTE changes, Core 0; each takes the locks itself: call with none held. A change
 // gives a track a target live mute (1 = muted), decided and published in one critical
@@ -305,17 +325,17 @@ bool transport_launch(uint8_t track_mask, uint8_t pattern_index);
 //
 // A MUTE press: each track in `mask` with a waiting change loses it; each other track
 // in `mask` gets a change to the opposite of its state (seq_get_track_mutes()'s rule).
-void transport_toggle_mutes(uint8_t mask);
+void transport_toggle_mutes(track_mask_t mask);
 // A group's release: each track in `mask` loses its waiting change, and each one whose
 // bit of `target` differs from its state now gets a change to that bit. A track already
 // in its target state gets none: nothing waits, and its stored mutes stay.
-void transport_set_mutes(uint8_t mask, uint8_t target);
+void transport_set_mutes(track_mask_t mask, track_mask_t target);
 // Cancels the waiting changes in `mask`. Returns the tracks that had one; when `target`
 // is not NULL, *target gets their target bits.
-uint8_t transport_cancel_mutes(uint8_t mask, uint8_t *target);
+track_mask_t transport_cancel_mutes(track_mask_t mask, track_mask_t *target);
 // The selector: cancels the waiting changes in `mask` and toggles those tracks at
 // once, whatever the transport state and the quantization.
-void transport_toggle_mutes_now(uint8_t mask);
+void transport_toggle_mutes_now(track_mask_t mask);
 
 typedef struct {
     transport_state_t state;
@@ -324,9 +344,9 @@ typedef struct {
     uint8_t           current[NUM_TRACKS];
     uint8_t           queued[NUM_TRACKS];
     uint8_t           track_step[NUM_TRACKS];
-    uint8_t           live_mutes;    // g_seq.track_mutes
-    uint8_t           stored_mutes;  // bit c: patterns[current[c]].tracks[c].muted
-    uint8_t           mute_pending;  // g_seq.mute_pending
+    track_mask_t           live_mutes;    // g_seq.track_mutes
+    track_mask_t           stored_mutes;  // bit c: patterns[current[c]].tracks[c].muted
+    track_mask_t           mute_pending;  // g_seq.mute_pending
 } transport_snapshot_t;
 
 // Consistent copy of the transport; takes the locks itself.
@@ -334,6 +354,7 @@ void sequencer_snapshot(transport_snapshot_t *out);
 
 // Bit (track * 8 + slot): location bank * 8 + slot has an active step within
 // the track's length (stored mutes ignored). Takes seq_lock: call with none held.
+uint64_t sequencer_page_clips(uint8_t bank, uint8_t page);
 uint64_t sequencer_clip_mask(uint8_t bank);
 
 // Track mutes (bitmask, instant)
@@ -349,7 +370,7 @@ bool seq_set_track_config(uint8_t track, const track_config_t *config);
 void seq_set_kit_config(uint8_t track, const kit_config_t *config);
 // Bit t set when track t is a kit in any location. Takes seq_lock: call with none
 // held.
-uint8_t seq_kit_tracks(void);
+track_mask_t seq_kit_tracks(void);
 // An immediate mute toggle, what the MUTE key did before its changes waited for
 // the launch point. Nothing in the firmware calls it now: a MUTE press goes
 // through transport_toggle_mutes() and the selector through
@@ -362,13 +383,13 @@ void seq_toggle_track_mute(uint8_t track);
 // The muted tracks, by the rule MUTE uses: bit c set when the live mute is set
 // or the location track c plays has its stored mute. Takes seq_lock: call with
 // none held.
-uint8_t seq_get_track_mutes(void);
+track_mask_t seq_get_track_mutes(void);
 // The same, for a caller that holds seq_lock.
-uint8_t seq_track_mutes_locked(void);
+track_mask_t seq_track_mutes_locked(void);
 // Clears the stored mute of every location for the tracks in `mask`, one location
 // per lock section, then refreshes the prepared rows of each track that had one.
 // Takes seq_lock: call with none held.
-void seq_clear_stored_mutes(uint8_t mask);
+void seq_clear_stored_mutes(track_mask_t mask);
 
 // midi_out.c
 void midi_init(void);
