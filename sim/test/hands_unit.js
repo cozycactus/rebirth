@@ -120,7 +120,7 @@ section('geometry', () => {
   assert.strictEqual(new Set(keys).size, keys.length, 'keys differ');
   assert.strictEqual(PANEL.control({ op: 'encsw', enc: 1, down: true }).key,
     PANEL.control({ op: 'edge', enc: 1, dir: 1 }).key, 'encsw and edge of encoder 1 share a key');
-  for (const op of ['key', 'rig', 'say']) assert.strictEqual(PANEL.control({ op }), null, op + ' has no control');
+  for (const op of ['key', 'rig', 'say', 'pad-midi']) assert.strictEqual(PANEL.control({ op }), null, op + ' has no control');
   assert.throws(() => PANEL.control({ op: 'pad', track: 8, row: 0 }), /track/, 'pad track 8');
   assert.throws(() => PANEL.control({ op: 'wave' }), /wave/, 'unknown op');
 
@@ -1009,6 +1009,20 @@ section('plan', () => {
     assert.deepStrictEqual([at(frames, 1200000), at(frames, 1300000)].map(k => k && k.kind), ['still', 'still'],
       'key: the editing hand is still at the key down and up');
     assert.deepStrictEqual(frames.filter(k => k.t > 1200000 && k.t < 1300000), [], 'key: nothing else during the key');
+  }
+
+  // A PAD phrase note (pad-midi: MIDI the score sends straight to the
+  // synth) while a step is held: no touch, no key, the plan as without it.
+  {
+    const list = [];
+    press(list, 'step', { index: 3 }, 1000000, 1500000);
+    const without = plan(sorted(list.slice()));
+    list.push({ op: 'pad-midi', t: 1200000, status: 0x98, d1: 49, d2: 92 },
+      { op: 'pad-midi', t: 1300000, status: 0x88, d1: 49, d2: 0 });
+    const p = plan(sorted(list));
+    assert.strictEqual(p.touches.length, 1, 'pad-midi: no touch');
+    assert.deepStrictEqual(p.keys, [], 'pad-midi: no key');
+    assert.deepStrictEqual(p.hands, without.hands, 'pad-midi: the hands as without it');
   }
 
   // Keyframe shapes of the 176 shows that the rig could not fit before its

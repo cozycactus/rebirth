@@ -29,7 +29,8 @@
   // The control an action of show.actions touches: its kind, the key that
   // pairs a down with its up (an encoder's press and its turns share one),
   // its centre on the page and its top above the plate. Null for actions
-  // that touch no control.
+  // that touch no control (pad-midi: the score's PAD phrases, MIDI sent
+  // straight to the synth, played by no hand).
   function control(a) {
     switch (a.op) {
       case 'pad': {
@@ -54,7 +55,7 @@
         const e = whole(a.enc, 2, 'encoder');
         return at('knob', 'knob:' + e, KNOB_U[e], KNOB_V);
       }
-      case 'key': case 'rig': case 'say': return null;
+      case 'key': case 'rig': case 'say': case 'pad-midi': return null;
     }
     throw new Error('HandPlan: no control for op ' + a.op);
   }

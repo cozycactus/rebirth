@@ -1,5 +1,5 @@
 // The hands' whole-show check, without a browser: every song in every
-// arrangement in all four scores (base, fw2, keys, pads: 176 shows), planned
+// arrangement in all four scores (base, fw2, keys, pads: 240 shows), planned
 // by handplan.js and posed by handrig.js's driver, against a table of
 // touches built here from show.actions alone (never from the plan's own
 // touches or turns):
