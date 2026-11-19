@@ -1427,6 +1427,65 @@ static void test_pad_down_waits_for_its_press_to_be_queued(void) {
     CHECK(take(e, 40) == 1 && is_key(&e[0], 4, 6, true));
 }
 
+// ---- Held MUTE keys (mute groups) -----------------------------------------------
+
+// fake_matrix_key[row][MUTE_COL] is the MUTE key of track row.
+static void test_mute_down_follows_the_accepted_press(void) {
+    start();
+    panel_event_t e[4];
+    CHECK(!panel_input_mute_down(5));
+    fake_matrix_key[5][MUTE_COL] = true;
+    until_sample_of(MUTE_COL);
+    CHECK(!panel_input_mute_down(5));           // seen once: still in its debounce time
+    until_sample_of(MUTE_COL);
+    CHECK(panel_input_mute_down(5));            // the sample that queued its press
+    CHECK(!panel_input_mute_down(2));           // another track's MUTE is not down
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 5, MUTE_COL, true));
+    fake_matrix_key[5][MUTE_COL] = false;
+    until_sample_of(MUTE_COL);
+    CHECK(panel_input_mute_down(5));
+    until_sample_of(MUTE_COL);
+    CHECK(!panel_input_mute_down(5));
+    CHECK(take(e, 4) == 1 && is_key(&e[0], 5, MUTE_COL, false));
+}
+
+// A pad, a SCENE key and PLAY are not MUTE keys.
+static void test_mute_down_is_only_mutes(void) {
+    start();
+    panel_event_t e[8];
+    fake_matrix_key[2][3] = true;
+    fake_matrix_key[2][SCENE_COL] = true;
+    fake_gpio_level[PLAY_BUTTON_PIN] = false;
+    scans(3);
+    CHECK(take(e, 8) == 3);
+    for (int track = 0; track < 8; track++) CHECK(!panel_input_mute_down((uint8_t)track));
+}
+
+static void test_mute_down_refuses_arguments_out_of_range(void) {
+    start();
+    fake_matrix_key[0][MUTE_COL] = true;
+    fake_matrix_key[7][MUTE_COL] = true;
+    scans(3);
+    CHECK(panel_input_mute_down(0));
+    CHECK(panel_input_mute_down(7));
+    CHECK(!panel_input_mute_down(8));
+    CHECK(!panel_input_mute_down(255));
+}
+
+// A MUTE key held through a stall is taken as held but not reported down.
+static void test_mute_down_is_false_after_a_resync(void) {
+    start();
+    panel_event_t e[4];
+    fake_matrix_key[3][MUTE_COL] = true;
+    scans(3);
+    CHECK(panel_input_mute_down(3));
+    panel_input_resync();
+    CHECK(!panel_input_mute_down(3));
+    scans(5);
+    CHECK(!panel_input_mute_down(3));
+    CHECK(take(e, 4) == 1);
+}
+
 // A lost scanner keeps a reported pad down, as it keeps every reported state,
 // but the generation tells the UI not to trust a hold from before.
 static void test_pad_down_survives_a_lost_scanner_under_a_new_generation(void) {
@@ -1587,6 +1646,10 @@ int main(void) {
     RUN(test_pad_down_is_false_after_a_resync);
     RUN(test_pad_down_waits_for_its_press_to_be_queued);
     RUN(test_pad_down_survives_a_lost_scanner_under_a_new_generation);
+    RUN(test_mute_down_follows_the_accepted_press);
+    RUN(test_mute_down_is_only_mutes);
+    RUN(test_mute_down_refuses_arguments_out_of_range);
+    RUN(test_mute_down_is_false_after_a_resync);
     RUN(test_generation_changes_when_key_state_may_be_lost);
     RUN(test_generation_changes_at_every_fault);
     RUN(test_generation_is_steady_through_ordinary_polls);

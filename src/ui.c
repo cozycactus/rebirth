@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 #include "sequencer.h"
 #include "midi_in.h"
 #include "kit.h"
@@ -31,9 +32,11 @@
 #define THRU_OFF_QUEUE_MAX ((MIDI_TX_QUEUE_SIZE - 1u) * 3u / 4u)
 #define THRU_NONE 0xFF
 
-// A pad held this long is a clip copy source for the next pad of its track.
+// A pad held this long is a clip copy source for the next pad of its track; a
+// MUTE key held this long collects the MUTE keys pressed next into a group.
 #define PAD_COPY_HOLD_MS 500
 #define PAD_ROWS 8
+#define MUTE_NONE 0xFF          // no MUTE key is the held key
 
 // ─── UI Modes ──────────────────────────────────────────────────
 
@@ -123,6 +126,18 @@ typedef struct {
     // editor: that hold is a modifier, so its long press does not toggle.
     uint16_t key_wrote;
 
+    // The held MUTE key (MUTE_NONE when none): the physical key pressed while no
+    // key was held, the logical track it stood for then, the time the UI handled
+    // its press and the panel layer's generation then. Keys pressed after the
+    // hold time join the group (logical tracks, each with its target: bit set =
+    // muted), applied when the held key is released.
+    uint8_t  mute_held;
+    uint8_t  mute_held_track;
+    uint32_t mute_held_ms;
+    uint32_t mute_held_generation;
+    track_mask_t mute_group;
+    track_mask_t mute_group_target;
+
     // The pitch last entered on each track: a new SYNTH step starts there.
     // UI RAM only; not saved, not cleared by Stop, Panic or load.
     uint8_t last_note[NUM_TRACKS];
@@ -133,6 +148,13 @@ typedef struct {
     uint8_t  thru_channel[128];     // channel a passed-through note sounds on, THRU_NONE = off
     bool     thru_release_pending[128]; // its Note Off was refused: tried again every pass
     uint8_t  thru_pending_count;
+
+    // The tempo the screens show this frame (update_shown_tempo): the prefix (NULL
+    // with INT), the value, and the external tempo's shown tenth, which moves only
+    // when the measurement leaves it by more than 0.07 BPM (0 = none shown).
+    const char *tempo_prefix;
+    float    tempo_bpm;
+    uint16_t ext_tenths;
 
     // Flash notification: shown for ~1 second, then cleared
     char     notify_msg[17];    // up to 16 chars
@@ -191,6 +213,15 @@ static void drop_step_gestures(void) {
 static void drop_pad_holds(void) {
     memset(ui.pad_seen, 0, sizeof(ui.pad_seen));
     memset(ui.pad_key, 0, sizeof(ui.pad_key));
+}
+
+// Forgets the held MUTE key and its group, changing nothing in the transport:
+// a change withdrawn into the group is gone with it. Wherever pad holds are
+// dropped, and when the panel layer may have lost the hold.
+static void drop_mute_hold(void) {
+    ui.mute_held = MUTE_NONE;
+    ui.mute_group = 0;
+    ui.mute_group_target = 0;
 }
 
 // Toggles one step. A SYNTH step that is switched on with no stored note
@@ -434,8 +465,9 @@ static void show_notify(const char *msg) {
     ui.notify_ticks = 30;
 }
 
+// PLAY. A start that waits for the external clock is cancelled like a stop.
 static void toggle_transport(void) {
-    if (g_seq.transport.state == TRANSPORT_PLAYING) {
+    if (transport_running()) {
         transport_stop();
     } else if (g_seq.transport.state == TRANSPORT_PAUSED) {
         transport_continue();
@@ -471,6 +503,7 @@ static bool handle_panic_combo(button_event_t e1b, button_event_t e2b) {
         // Panel keys held through the panic must not fire afterwards.
         panel_input_resync();
         drop_pad_holds();
+        drop_mute_hold();
         ui.pad_keys_on = false;     // the screen goes to Session: no keyboard is shown
         ui.panic_latched = true;
         drop_step_gestures();
@@ -622,12 +655,94 @@ static void handle_pad_press(uint8_t track, uint8_t row, const step_buttons_t *s
     if (!session_pad(track, row, ui.mode == UI_SESSION)) show_notify("SONG MODE");
 }
 
+// A press of MUTE key `key`, which stands for the logical track of the page shown
+// now. With no held key it is an ordinary press (session_mute) and becomes the
+// held key. While a key is held, another key pressed less than
+// PAD_COPY_HOLD_MS after it, or after the panel layer's generation changed, is
+// an ordinary press too; a later one joins the group instead of acting. The
+// join does not ask whether the held key is still reported down: every MUTE
+// key is sampled in one column, so a member's press and the held key's release
+// can come in one pass, and the panel layer already reports the key up while
+// its release waits behind the press. Each transport call takes the locks
+// itself, and what transport_cancel_mutes() returns decides, as the timer can
+// land a change between two calls.
+static void handle_mute_press(uint8_t key) {
+    uint8_t track = (uint8_t)(panel_first_track() + key);
+    track_mask_t bit = TRACK_BIT(track);
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    // A press of the held key itself means its release was lost.
+    if (ui.mute_held == key) drop_mute_hold();
+    if (ui.mute_held == MUTE_NONE) {
+        session_mute(track);
+        ui.mute_held = key;
+        ui.mute_held_track = track;
+        ui.mute_held_ms = now;
+        ui.mute_held_generation = panel_input_generation();
+        return;
+    }
+    if ((uint32_t)(now - ui.mute_held_ms) < PAD_COPY_HOLD_MS ||
+        ui.mute_held_generation != panel_input_generation()) {
+        session_mute(track);
+        return;
+    }
+    if (ui.mute_group & bit) {                      // a member pressed again leaves
+        ui.mute_group &= ~bit;
+        return;
+    }
+    if (transport_cancel_mutes(bit, NULL)) return;  // a waiting change is cancelled only
+    if (!ui.mute_group) {
+        // The held key comes in with the target of its change if that change
+        // still waits; one that landed, acted at once or was cancelled (Stop)
+        // stays out. This is tried whenever the group is empty, so again after
+        // every member has left, not only for the first key to join. That is
+        // the same thing: the first try withdraws the held key's change or
+        // finds none, and while the key is held it cannot get a new waiting
+        // change (its own press ends the hold, the selector acts at once), so
+        // a later try finds nothing to withdraw.
+        track_mask_t held_bit = TRACK_BIT(ui.mute_held_track);
+        track_mask_t target = 0;
+        if (transport_cancel_mutes(held_bit, &target) & held_bit) {
+            ui.mute_group |= held_bit;
+            ui.mute_group_target = (ui.mute_group_target & ~held_bit) | (target & held_bit);
+        }
+    }
+    bool muted = (seq_get_track_mutes() & bit) != 0;
+    ui.mute_group |= bit;
+    ui.mute_group_target = (ui.mute_group_target & ~bit) | (muted ? 0 : bit);
+}
+
+// A MUTE release. Only the held key's counts: it sets the group to its
+// targets, at once or at the next launch point, unless the group is empty or
+// the panel layer's generation changed since its press. Then no key is held.
+static void handle_mute_release(uint8_t key) {
+    if (ui.mute_held != key) return;
+    if (ui.mute_group && ui.mute_held_generation == panel_input_generation()) {
+        transport_set_mutes(ui.mute_group, ui.mute_group_target);
+    }
+    drop_mute_hold();
+}
+
 // Pads, SCENE, MUTE and PLAY. Called with no lock held: every session_* and
 // transport call below takes the locks itself. A pad release only ends the
-// hold the UI tracks for copying; SCENE, MUTE and PLAY act on press.
+// hold the UI tracks for copying, a MUTE release only the MUTE hold; SCENE and
+// PLAY act on press.
 static void handle_panel_events(const step_buttons_t *steps) {
     panel_event_t ev;
     while (panel_input_next(&ev)) {
+        if (ev.kind == PANEL_MUTE) {
+            if (ev.track >= PANEL_TRACKS) continue;
+            // The MIDI Song player has MUTE keys of its own, on press.
+            if (ui.mode == UI_MIDI_SONG) {
+                if (ev.down) transport_midi_song_toggle(ui.midi_page * 8 + ev.track, false);
+                continue;
+            }
+            if (ev.down) {
+                handle_mute_press(ev.track);
+            } else {
+                handle_mute_release(ev.track);
+            }
+            continue;
+        }
         // The pad tables are 8 by 8: a pad outside them is not one.
         if (ev.kind == PANEL_PAD && (ev.track >= PANEL_TRACKS || ev.row >= PAD_ROWS)) continue;
         if (ev.kind == PANEL_PAD && !ev.down && ev.track < PANEL_TRACKS) {
@@ -641,7 +756,6 @@ static void handle_panel_events(const step_buttons_t *steps) {
         if (!ev.down) continue;
         if (ui.mode == UI_MIDI_SONG) {
             if (ev.kind == PANEL_PLAY) toggle_transport();
-            if (ev.kind == PANEL_MUTE) transport_midi_song_toggle(ui.midi_page * 8 + ev.track, false);
             continue;
         }
         switch (ev.kind) {
@@ -651,8 +765,7 @@ static void handle_panel_events(const step_buttons_t *steps) {
             case PANEL_SCENE:
                 if (!session_scene(ev.row)) show_notify("SONG MODE");
                 break;
-            case PANEL_MUTE:
-                session_mute(panel_first_track() + ev.track);
+            case PANEL_MUTE:        // handled above
                 break;
             case PANEL_PLAY:
                 toggle_transport();
@@ -680,6 +793,18 @@ static void release_lost_pad_keys(uint32_t generation_before_poll) {
                 release_pad_key(track, row);
             }
         }
+    }
+}
+
+// The same for the held MUTE key, on the same terms: one the panel layer no
+// longer reports down, or whose hold it may have lost, is dropped with its
+// group. Run after the pass's events.
+static void drop_lost_mute_hold(uint32_t generation_before_poll) {
+    if (ui.mute_held == MUTE_NONE) return;
+    if (generation_before_poll != panel_input_generation() ||
+        !panel_input_mute_down(ui.mute_held) ||
+        ui.mute_held_generation != panel_input_generation()) {
+        drop_mute_hold();
     }
 }
 
@@ -749,6 +874,17 @@ static void open_editor_on_long_press(uint16_t long_presses, ui_mode_t from) {
     }
 }
 
+// A VALUE turn on the tempo: 0.1 BPM a click, only while the internal timer is the
+// source (INT, or AUTO with no external clock); otherwise it says so.
+static void tempo_turn(int8_t amount) {
+    if (amount == 0) return;
+    if (!transport_tempo_is_internal()) {
+        show_notify("TEMPO EXT");
+        return;
+    }
+    transport_set_bpm(g_seq.transport.bpm + (float)amount * 0.1f);
+}
+
 static void handle_session_view(encoder_turn_t e1, encoder_turn_t e2,
                                 button_event_t e1b, button_event_t e2b,
                                 step_buttons_t *steps) {
@@ -758,10 +894,7 @@ static void handle_session_view(encoder_turn_t e1, encoder_turn_t e2,
     }
 
     // VALUE rotate: tempo.
-    if (e2.amount != 0) {
-        float new_bpm = g_seq.transport.bpm + (float)e2.amount * 0.1f;
-        transport_set_bpm(new_bpm);
-    }
+    tempo_turn(e2.amount);
 
     session_focus_t focus = session_get_focus();
 
@@ -841,10 +974,7 @@ static void navigate_pattern_view(encoder_turn_t e1, encoder_turn_t e2,
                                   button_event_t e1b, button_event_t e2b) {
     if (e1.detents != 0) walk_pattern_view(e1.detents);
 
-    if (e2.amount != 0) {
-        float new_bpm = g_seq.transport.bpm + (float)e2.amount * 0.1f;
-        transport_set_bpm(new_bpm);
-    }
+    tempo_turn(e2.amount);
 
     session_focus_t cell = pattern_view_cell();
     if (e1b == BTN_PRESS) {
@@ -1260,15 +1390,15 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
     }
 
     // In the selector only, defer short presses until release so opening
-    // track configuration never changes the audible mute state.
+    // track configuration never changes the audible mute state. Buttons 1-8
+    // act at once in every mode: the track leaves the mute group, then its
+    // waiting change is cancelled and it toggles, in one engine call.
     uint16_t short_releases = take_short_releases(&ui.select_short_pending, steps,
                                                   0xFFu, NULL);
     if (short_releases) {
-        for (int t = 0; t < PANEL_TRACKS; t++) {
-            if (short_releases & (1u << t)) {
-                seq_toggle_track_mute(panel_first_track() + t);
-            }
-        }
+        track_mask_t tracks = (track_mask_t)(short_releases & 0xFFu) << panel_first_track();
+        ui.mute_group &= ~tracks;
+        transport_toggle_mutes_now(tracks);
     }
 
     // Step button long press on 1–8: enter track config
@@ -1286,7 +1416,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
 
     // Step button 9 (index 8): save to flash
     if (steps->pressed & (1u << 8)) {
-        if (g_seq.transport.state != TRANSPORT_STOPPED) {
+        if (transport_running()) {
             show_notify("STOP TO SAVE");
         } else {
             thru_release_all();     // the stall would leave a held key sounding
@@ -1296,12 +1426,13 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
             midi_in_gap();          // interrupts were off: bytes may be lost
             drop_step_gestures();   // steps held through the stall do nothing
             drop_pad_holds();
+            drop_mute_hold();
         }
     }
 
     // Step button 10 (index 9): load from flash
     if (steps->pressed & (1u << 9)) {
-        if (g_seq.transport.state != TRANSPORT_STOPPED) {
+        if (transport_running()) {
             show_notify("STOP TO LOAD");
         } else {
             thru_release_all();
@@ -1317,6 +1448,7 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
             midi_in_gap();
             drop_step_gestures();
             drop_pad_holds();       // also when nothing was loaded
+            drop_mute_hold();
         }
     }
 
@@ -1360,6 +1492,17 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
     if (steps->pressed & (1u << 13)) {
         if (g_seq.transport.state != TRANSPORT_STOPPED) show_notify("STOP FIRST");
         else if (!ui_open_midi_song()) show_notify("NO MIDI SONG");
+    }
+
+    // Step button 15 (index 14): the clock source, INT -> EXT -> AUTO (not saved)
+    if (steps->pressed & (1u << 14)) {
+        static const char *const names[CLOCK_SOURCE_COUNT] = {
+            "CLOCK INT", "CLOCK EXT", "CLOCK AUTO",
+        };
+        clock_source_t source = (clock_source_t)((transport_get_clock_source() + 1u) %
+                                                 CLOCK_SOURCE_COUNT);
+        transport_set_clock_source(source);
+        show_notify(names[source]);
     }
 }
 
@@ -1436,6 +1579,8 @@ static uint16_t build_pattern_select_mask(void) {
     mask |= (1u << 11);
     // Button 13 resets jitter stats.
     mask |= (1u << 12);
+    // Button 15 is lit while the clock source is not INT.
+    if (transport_get_clock_source() != CLOCK_SOURCE_INT) mask |= (1u << 14);
     return mask;
 }
 
@@ -1827,7 +1972,7 @@ static void update_panel_lights(const transport_snapshot_t *snap) {
         rgb_leds_show(frame);
         return;
     }
-    led_state_t state;
+    led_state_t state = {0};
     state.bank = session_bank();
     state.first_track = panel_first_track();
     state.clip_mask = sequencer_page_clips(state.bank, state.first_track / PANEL_TRACKS);
@@ -1840,6 +1985,8 @@ static void update_panel_lights(const transport_snapshot_t *snap) {
     memcpy(state.current, snap->current, sizeof(state.current));
     memcpy(state.queued, snap->queued, sizeof(state.queued));
     state.muted = snap->live_mutes | snap->stored_mutes;
+    state.mute_pending = snap->mute_pending;
+    state.mute_group = ui.mute_group;
     state.focus_track = session_get_focus().track;
     state.playing = snap->state == TRANSPORT_PLAYING;
     if (state.playing) {
@@ -1888,7 +2035,7 @@ static void render_session_view(const transport_snapshot_t *snap) {
     }
     display_draw_session_view(session_bank(), session_common_row(snap), snap->mode,
                               focus.track, focus.location, length,
-                              g_seq.transport.bpm, transport_get_launch_quant(),
+                              ui.tempo_bpm, transport_get_launch_quant(),
                               bar_step, lane, lane ? strip : NULL, playhead);
 }
 
@@ -1915,7 +2062,7 @@ static void render_pattern_view(const transport_snapshot_t *snap) {
         // A SYNTH roll prints the tempo in its own info column.
         if (pat->tracks[track].type == TRACK_TYPE_SYNTH) return;
     }
-    display_draw_bpm(g_seq.transport.bpm);
+    display_draw_bpm(ui.tempo_prefix, ui.tempo_bpm);
 }
 
 // A kit track's config lists its kit settings; the others keep their list.
@@ -1932,8 +2079,49 @@ static void render_track_config(void) {
 
 // ─── UI Render (dispatches to display functions) ───────────────
 
+// The tempo the screens show, from the frame's snapshot. INT as always. With EXT and
+// AUTO the source comes first: "EXT" and the measured tempo while the external clock
+// is followed or (stopped) present, "EXT --.-" in EXT without one, "INT" and the
+// internal tempo when AUTO runs on its own timer. The prefix blinks while a start
+// waits for the first Clock.
+static void update_shown_tempo(const transport_snapshot_t *snap) {
+    if (snap->clock_source == CLOCK_SOURCE_INT) {
+        ui.tempo_prefix = NULL;
+        ui.tempo_bpm = snap->bpm;
+        ui.ext_tenths = 0;
+        display_set_tempo(NULL, 0.0f);      // the screens read transport.bpm
+        return;
+    }
+    bool clock = snap->ext_following || snap->ext_present;
+    bool external = snap->clock_source == CLOCK_SOURCE_EXT || snap->ext_following ||
+                    (snap->state != TRANSPORT_PLAYING && snap->ext_present);
+    float bpm = snap->bpm;
+    if (external) {
+        bpm = 0.0f;
+        if (clock && snap->ext_shown_x16) {
+            float measured = 40000000.0f / (float)snap->ext_shown_x16;  // 60e6 / (24 x interval)
+            if (measured > 999.9f) measured = 999.9f;
+            if (ui.ext_tenths == 0 || fabsf(measured * 10.0f - (float)ui.ext_tenths) > 0.7f) {
+                ui.ext_tenths = (uint16_t)(measured * 10.0f + 0.5f);
+            }
+            bpm = (float)ui.ext_tenths / 10.0f;
+        } else {
+            ui.ext_tenths = 0;
+        }
+    } else {
+        ui.ext_tenths = 0;
+    }
+    const char *prefix = external ? "EXT" : "INT";
+    uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+    if (snap->ext_armed && (now_ms / 250u) % 2u) prefix = "   ";
+    ui.tempo_prefix = prefix;
+    ui.tempo_bpm = bpm;
+    display_set_tempo(prefix, bpm);
+}
+
 bool ui_open_midi_song(void) {
     if (!transport_open_midi_song()) return false;
+    drop_mute_hold();       // its MUTE keys are the player's from here
     ui.midi_page = 0;
     ui.select_short_pending = 0;
     ui.mode = UI_MIDI_SONG;
@@ -1985,6 +2173,7 @@ void ui_render(void) {
     transport_snapshot_t snap;
     sequencer_snapshot(&snap);
     update_panel_lights(&snap);
+    update_shown_tempo(&snap);
 
     switch (ui.mode) {
         case UI_SESSION:
@@ -2055,6 +2244,7 @@ void ui_init(void) {
     ui.mode = UI_SESSION;
     ui.step_edit_return = UI_SESSION;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) ui.last_note[track] = 60;
+    drop_mute_hold();       // 0 would be MUTE 1 held
     thru_forget();
     // Bytes that arrived since midi_init() are dropped: if the ring overflowed
     // meanwhile, a Note On could be in it without its Note Off.
@@ -2103,6 +2293,7 @@ void ui_update(void) {
     update_pad_keys(steps);
     handle_panel_events(steps);
     release_lost_pad_keys(panel_generation);
+    drop_lost_mute_hold(panel_generation);
 
     // A long press counts only for a step pressed on the screen it fires on.
     ui_mode_t screen = ui.mode;

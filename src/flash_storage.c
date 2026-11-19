@@ -262,9 +262,10 @@ bool flash_storage_is_valid(void) {
 #endif
 }
 
-bool flash_storage_save(void) {
-    // Storage and transport commands are issued by Core 0. Core 1 can stop
-    // playback, but cannot start it while this synchronous operation runs.
+// Storage and transport commands are issued by Core 0. Core 1 can stop playback;
+// sequencer_storage_begin() keeps the external clock from starting it while a
+// save or load runs, and refuses unless stopped and not armed.
+static bool save_stopped(void) {
     if (g_seq.transport.state != TRANSPORT_STOPPED) return false;
 #ifndef MOCK_HARDWARE
     if (!payload_valid(g_seq.patterns, &g_seq.song, g_seq.kit_config)) return false;
@@ -308,7 +309,7 @@ bool flash_storage_save(void) {
 #endif
 }
 
-flash_load_t flash_storage_load(void) {
+static flash_load_t load_stopped(void) {
     if (g_seq.transport.state != TRANSPORT_STOPPED) return FLASH_LOAD_FAILED;
 #ifndef MOCK_HARDWARE
     const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
@@ -363,4 +364,18 @@ flash_load_t flash_storage_load(void) {
 #else
     return FLASH_LOAD_FAILED;
 #endif
+}
+
+bool flash_storage_save(void) {
+    if (!sequencer_storage_begin()) return false;
+    bool saved = save_stopped();
+    sequencer_storage_end();
+    return saved;
+}
+
+flash_load_t flash_storage_load(void) {
+    if (!sequencer_storage_begin()) return FLASH_LOAD_FAILED;
+    flash_load_t loaded = load_stopped();
+    sequencer_storage_end();
+    return loaded;
 }
