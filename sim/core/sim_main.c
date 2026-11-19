@@ -60,16 +60,21 @@ void sim_run_until(double t_us) {
     uint64_t target = t_us <= 0 ? 0 : (uint64_t)t_us;
     while (!sim_dbg_fatal()) {
         uint64_t alarm = hal_alarm_due();
+        uint64_t bell = hal_doorbell_due();
         uint64_t uart = hal_uart_irq_due();
         uint64_t input = hal_input_due();
         uint64_t pass = next_pass_us > sim_now_us ? next_pass_us : sim_now_us;
-        uint64_t next = alarm < uart ? alarm : uart;
+        uint64_t next = alarm;
+        if (bell < next) next = bell;
+        if (uart < next) next = uart;
         if (pass < next) next = pass;
         if (input < next) next = input;
         if (next > target) break;
         hal_set_now(next);          // applies the inputs due by then
         if (next == alarm) {
             hal_run_alarm();
+        } else if (next == bell) {
+            hal_run_doorbell();
         } else if (next == uart) {
             hal_run_uart_irq();
         } else if (next == pass) {
@@ -117,6 +122,22 @@ uint32_t sim_dbg_track_config(int track) {
            ((uint32_t)c->cv_channel << 26);
 }
 int sim_dbg_mutes(void) { return seq_get_track_mutes(); }
+int sim_dbg_clock_source(void) { return g_seq.clock_source; }
+int sim_dbg_clock_state(void) {
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    return (snap.ext_following ? 1 : 0) | (snap.ext_armed ? 2 : 0) | (snap.ext_present ? 4 : 0);
+}
+int sim_dbg_ext_tenths(void) {
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    return snap.ext_shown_x16 ? (int)(400000000.0 / snap.ext_shown_x16 + 0.5) : 0;
+}
+uint32_t sim_dbg_ext_losses(void) {
+    sequencer_jitter_stats_t stats;
+    sequencer_get_jitter_stats(&stats);
+    return stats.ext_losses;
+}
 uint32_t sim_dbg_overruns(void) {
     sequencer_jitter_stats_t stats;
     sequencer_get_jitter_stats(&stats);

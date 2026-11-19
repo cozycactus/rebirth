@@ -639,6 +639,10 @@
       this.keys = this.fw2 && !!(options && options.keys);
       // pads: while a step is held the pads are a four-octave keyboard.
       this.pads = this.fw2 && !!(options && options.pads);
+      // quantMutes: a MUTE press waits for the launch point, as a pad does, and
+      // a MUTE held half a second collects the MUTE keys pressed meanwhile into
+      // a group that changes after its release.
+      this.quantMutes = !!(options && options.quantMutes);
       // song: an index into SONGS or a song's id.
       const pick = options && options.song;
       this.song = SONGS.find(x => x.id === pick) || SONGS[pick | 0] || SONGS[0];
@@ -996,7 +1000,8 @@
     s.say('device', 'Исходная расстановка для аранжировки «' + s.form.title + '»: ' +
       start.rows.map((row, track) => TRACK_NAME[track] + ' — ряд ' + row).join(', ') + ' (ряд 8 пуст)');
     for (let track = 0; track < 8; track++) s.tap(PAD(track, start.rows[track]), 70, 110);
-    s.say('device', 'MUTE на дорожках ' + start.muted.map(track => TRACK_NAME[track]).join(', ') + ': ' + start.text);
+    s.say('device', 'MUTE на дорожках ' + start.muted.map(track => TRACK_NAME[track]).join(', ') +
+      (s.quantMutes ? ' (прибор стоит, поэтому MUTE срабатывает сразу)' : '') + ': ' + start.text);
     for (const track of start.muted) s.tap(MUTE(track), 70, 110);
     s.wait(600);
   }
@@ -1020,9 +1025,10 @@
     let muted = form.start.muted.reduce((bits, track) => bits | (1 << track), 0);
     const st = { s, song, snd };
 
-    // Moves the cursor to a moment in the set.
+    // A moment in the set, and the cursor moved there.
+    st.time = (bar, beat, offsetMs) => t0 + Math.round(((bar - 1) * 16 + (beat - 1) * 4) * STEP_US + (offsetMs || 0) * 1000);
     st.at = (bar, beat, offsetMs) => {
-      const t = t0 + Math.round(((bar - 1) * 16 + (beat - 1) * 4) * STEP_US + (offsetMs || 0) * 1000);
+      const t = st.time(bar, beat, offsetMs);
       if (t < s.t) throw new Error('artist: ' + form.id + ': bar ' + bar + ' beat ' + beat + ' is in the past by ' + (s.t - t) / 1000 + ' ms');
       s.t = t;
     };
@@ -1030,8 +1036,29 @@
     // (launchEarly: its second, when more than two pads have to go down).
     st.launchFor = bar => st.at(bar - 1, 3, 40 + 120 * s.rnd());
     st.launchEarly = bar => st.at(bar - 1, 2, 40 + 120 * s.rnd());
-    // A mute hit just ahead of the downbeat of `bar`.
-    st.onDownbeat = bar => st.at(bar, 1, -70 - 20 * s.rnd());
+    // A mute hit just ahead of the downbeat of `bar`. When MUTE waits for the
+    // launch point, only the bar is noted: mute() and mutePair() move the
+    // cursor themselves, as a group starts two bars before it.
+    st.onDownbeat = bar => {
+      if (!s.quantMutes) return st.at(bar, 1, -70 - 20 * s.rnd());
+      if (st.downbeat) throw new Error('artist: ' + form.id + ': bar ' + st.downbeat + ' has no MUTE');
+      st.downbeat = bar;
+    };
+    const downbeat = () => {
+      const bar = st.downbeat;
+      if (!bar) throw new Error('artist: ' + form.id + ': a MUTE with no onDownbeat');
+      st.downbeat = 0;
+      return bar;
+    };
+    // For the check, with quantMutes: the mutes alone just before and just
+    // after the downbeat of `bar`. An immediate MUTE fails the first, one that
+    // lands a bar late the second. A pair's second key is handled as late as
+    // about 38 ms before the downbeat.
+    const aroundDownbeat = (bar, before, after) => {
+      const t = st.time(bar, 1);
+      out.expected.push({ t: t - 25000, bar, ms: -25, mutesOnly: true, map: { muted: before } });
+      out.expected.push({ t: t + 40000, bar, ms: 40, mutesOnly: true, map: { muted: after } });
+    };
     st.sweepBars = bars => bars * BAR_US / 1e6;
     st.clipName = (track, row) => track === T.KIT ? song.kit.find(c => c.row === row).name
       : (track === T.KICK || track === T.FX ? song.drum : song.synth).find(c => c.track === track && c.row === row).name;
@@ -1048,18 +1075,59 @@
       for (let track = 0; track < 8; track++) state[track] = row;
     };
     st.mute = (track, why) => {
-      s.say('device', 'MUTE ' + TRACK_NAME[track] + ': ' + why);
+      const before = muted, bar = s.quantMutes ? downbeat() : 0;
+      if (bar) st.at(bar, 1, -70 - 20 * s.rnd());
+      s.say('device', 'MUTE ' + TRACK_NAME[track] + (bar ? ' чуть раньше такта, сработает с его началом' : '') + ': ' + why);
       s.tap(MUTE(track), 80, 100);
       muted ^= 1 << track;
+      if (bar) aroundDownbeat(bar, before, muted);
     };
     // Two MUTE keys with two fingers, so both land ahead of the downbeat.
+    // When MUTE waits for the launch point and the two bars before the
+    // downbeat are free, a group instead: the first key is held from beat 2
+    // of the bar before the last, the second pressed after the half second
+    // that makes the hold a group, and the first let go just before the
+    // downbeat. The first key's change, still waiting for the next bar when
+    // the second joins, is withdrawn into the group.
     st.mutePair = (a, b, why) => {
-      s.say('device', 'MUTE ' + TRACK_NAME[a] + ' и ' + TRACK_NAME[b] + ' двумя пальцами: ' + why);
+      const before = muted, bar = s.quantMutes ? downbeat() : 0;
+      muted ^= (1 << a) | (1 << b);
+      if (bar) {
+        const offset = -70 - 20 * s.rnd();
+        if (s.t > st.time(bar - 2, 2)) st.at(bar, 1, offset);
+        else {
+          st.at(bar - 2, 2);
+          s.say('device', 'MUTE ' + TRACK_NAME[a] + ' держит, ' + TRACK_NAME[b] + ' добавляет в группу (обе горят белым): ' + why);
+          s.down(MUTE(a));
+          s.wait(650);
+          s.down(MUTE(b));
+          // Both lights white in the middle of two sixteenths in a row, the
+          // first starting at least 100 ms after the second key's press: one
+          // of them is an even sixteenth, where a change that only waits shows
+          // its normal light and a collected key alone stays white. The middle,
+          // as the lights reach the chain up to a frame (about 33 ms) late.
+          const lit = t0 + (Math.ceil((s.t + 100000 - t0) / STEP_US) + 0.5) * STEP_US;
+          out.expected.push({ t: Math.round(lit), bar: bar - 2, lights: [a, b] });
+          out.expected.push({ t: Math.round(lit + STEP_US), bar: bar - 2, lights: [a, b], later: true });
+          s.wait(s.human(80));
+          s.up(MUTE(b));
+          // Nothing changes on the downbeat the hold crosses.
+          out.expected.push({ t: st.time(bar - 1, 1, 40), bar: bar - 1, ms: 40, mutesOnly: true, map: { muted: before } });
+          st.at(bar, 1, -120);
+          s.say('device', 'Отпускает MUTE ' + TRACK_NAME[a] + ': группа сработает с началом такта');
+          s.up(MUTE(a));
+          s.wait(s.human(100));
+          aroundDownbeat(bar, before, muted);
+          return;
+        }
+      }
+      s.say('device', 'MUTE ' + TRACK_NAME[a] + ' и ' + TRACK_NAME[b] + ' двумя пальцами' +
+        (bar ? ', сработают с началом такта' : '') + ': ' + why);
       s.down(MUTE(a)); s.wait(12); s.down(MUTE(b));
       s.wait(s.human(80));
       s.up(MUTE(a)); s.wait(10); s.up(MUTE(b));
       s.wait(s.human(100));
-      muted ^= (1 << a) | (1 << b);
+      if (bar) aroundDownbeat(bar, before, muted);
     };
     st.rig = (text, moves) => {
       if (text) s.say('rig', text);
@@ -1144,7 +1212,8 @@
       st.launchFor(bar + 1); st.pad(T.FX, 8, 'пустой клип: дорожка снова молчит');
     };
     st.stop = bar => {
-      st.onDownbeat(bar);
+      if (st.downbeat) throw new Error('artist: ' + form.id + ': bar ' + st.downbeat + ' has no MUTE');
+      st.at(bar, 1, -70 - 20 * s.rnd());
       s.say('device', 'PLAY: стоп');
       s.tap(PLAY, 80, 100);
       s.wait(1500);
@@ -1572,7 +1641,8 @@
   function perform(s) {
     const song = s.song, form = s.form;
     s.say('info', 'ЖИВОЙ СЕТ «' + song.title + '», ' + song.bpm + ' BPM, ' + song.key + '. Аранжировка «' + form.title + '»: ' +
-      form.about + '. Запуски пэдов ждут границы такта (1 BAR).');
+      form.about + (s.quantMutes ? '. Запуски пэдов и нажатия MUTE ждут границы такта (1 BAR); пока MUTE ждёт, его кнопка мигает белым.'
+        : '. Запуски пэдов ждут границы такта (1 BAR).'));
     const st = stage(s, form);
     s.say('device', 'PLAY');
     s.tap(PLAY, 80, 100);

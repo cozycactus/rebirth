@@ -66,5 +66,8 @@ bool panel_input_pad_down(uint8_t track, uint8_t row);
 // configuration that succeeds after one. A hold recorded under an older value
 // must not be trusted.
 uint32_t panel_input_generation(void);
+// True while the track's MUTE key is reported down, on the terms of
+// panel_input_pad_down(). False for a track out of range.
+bool panel_input_mute_down(uint8_t track);
 
 #endif

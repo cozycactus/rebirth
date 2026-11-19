@@ -91,9 +91,11 @@ static panel_event_t panel_queue[PANEL_QUEUE];
 static unsigned panel_head, panel_tail, panel_resyncs;
 static panel_event_t debouncing;
 static unsigned debounce_polls;
-// What the panel layer reports for each pad, and its sync generation. A queued
-// press sets the pad down, a queued release clears it; a resync forgets both.
+// What the panel layer reports for each pad and MUTE key, and its sync
+// generation. A queued press sets the key down, a queued release clears it; a
+// resync forgets both.
 static bool pads_down[NUM_TRACKS][8];
+static bool mutes_down[NUM_TRACKS];
 static uint32_t panel_generation;
 // The next poll loses the key state (a failed read): the generation changes
 // while the pads it reported down still read down.
@@ -118,11 +120,15 @@ bool panel_input_next(panel_event_t *out) {
 bool panel_input_pad_down(uint8_t track, uint8_t row) {
     return track < NUM_TRACKS && row < 8 && pads_down[track][row];
 }
+bool panel_input_mute_down(uint8_t track) {
+    return track < NUM_TRACKS && mutes_down[track];
+}
 uint32_t panel_input_generation(void) { return panel_generation; }
 void panel_input_resync(void) {
     panel_head = panel_tail = 0;
     debounce_polls = 0;
     memset(pads_down, 0, sizeof(pads_down));
+    memset(mutes_down, 0, sizeof(mutes_down));
     panel_generation++;
     panel_resyncs++;
 }
@@ -130,6 +136,7 @@ static void push_panel_event(panel_kind_t kind, uint8_t track, uint8_t row, bool
     CHECK(panel_tail + 1 <= PANEL_QUEUE);
     panel_queue[panel_tail++] = (panel_event_t){kind, track, row, down};
     if (kind == PANEL_PAD) pads_down[track][row] = down;
+    if (kind == PANEL_MUTE && track < NUM_TRACKS) mutes_down[track] = down;
 }
 static void push_panel(panel_kind_t kind, uint8_t track, uint8_t row) {
     push_panel_event(kind, track, row, true);
@@ -167,6 +174,7 @@ static void reset(void) {
     panel_head = panel_tail = panel_resyncs = 0;
     debounce_polls = 0;
     memset(pads_down, 0, sizeof(pads_down));
+    memset(mutes_down, 0, sizeof(mutes_down));
     panel_generation = 1;
     poll_loses_sync = false;
     encoder_resyncs = mcp_resyncs = 0;
@@ -2313,8 +2321,9 @@ static void test_grid_panel_keys_during_a_hold_leave_the_tap(void) {
     step_down(1u << 3);
     panel(PANEL_PLAY, 0, 0);
     CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
-    panel(PANEL_MUTE, 1, 0);
-    CHECK(g_seq.track_mutes == 2);
+    panel(PANEL_MUTE, 1, 0);                // waits for the loop end
+    CHECK(g_seq.mute_pending == 2);
+    CHECK(g_seq.track_mutes == 0);
     step_up(1u << 3);
     CHECK(STEP(0, 3).flags & STEP_FLAG_ACTIVE);
 }
@@ -3891,7 +3900,7 @@ static void test_midi_note_off_leaves_room_for_the_sequencer(void) {
 // may have overflowed and lost a Note Off.
 static void test_midi_input_from_before_the_ui_started_is_dropped(void) {
     uint8_t stream[3 + 61 + 3] = { KEY_ON, 60, 100 };
-    memset(stream + 3, 0xF8, 61);
+    memset(stream + 3, 0xFE, 61);           // Active Sensing: into the ring, ignored there
     stream[64] = KEY_OFF; stream[65] = 60; stream[66] = 0;     // does not fit the ring
     fake_uart_rx_push(stream, sizeof(stream));
     fake_irq_handlers[UART0_IRQ]();
@@ -3941,10 +3950,11 @@ static void test_midi_lost_bytes_are_a_gap(void) {
     step_down(1u << 2);
     MIDI_UPDATE(KEY_ON, 60, 100, 64, 100);
     CHECK(STEP(0, 2).note == 64);
-    // Between two updates more bytes arrive than the ring holds: 62 clock bytes, then a
-    // Note On cut after its note, and the rest of the stream lost.
+    // Between two updates more bytes arrive than the ring holds: 62 Active Sensing
+    // bytes (a Clock would go to the external clock instead), then a Note On cut after
+    // its note, and the rest of the stream lost.
     uint8_t burst[MIDI_IN_RING_SIZE + 8];
-    memset(burst, 0xF8, sizeof(burst));
+    memset(burst, 0xFE, sizeof(burst));
     burst[MIDI_IN_RING_SIZE - 2] = KEY_ON;
     burst[MIDI_IN_RING_SIZE - 1] = 70;
     midi_arrives(burst, sizeof(burst));
@@ -4653,6 +4663,859 @@ static void test_step_edit_long_press_without_a_key_still_toggles(void) {
     CHECK(STEP(0, 0).flags == STEP_FLAG_ACTIVE);
 }
 
+// ─── External clock ────────────────────────────────────────────
+
+// Text row y (8 pixels) across the whole width shows exactly `text` drawn at x.
+static bool row_is(uint8_t y, uint8_t x, const char *text) {
+    uint8_t saved[OLED_BUF_SIZE];
+    static bool actual[8][OLED_WIDTH];
+    memcpy(saved, ssd1309_get_framebuffer(), sizeof(saved));
+    for (int r = 0; r < 8; r++) {
+        for (int c = 0; c < OLED_WIDTH; c++) actual[r][c] = px(c, y + r);
+    }
+    display_clear();
+    ssd1309_draw_string(x, y, text, false);
+    bool same = true;
+    for (int r = 0; r < 8; r++) {
+        for (int c = 0; c < OLED_WIDTH; c++) if (actual[r][c] != px(c, y + r)) same = false;
+    }
+    memcpy(ssd1309_get_framebuffer(), saved, sizeof(saved));
+    return same;
+}
+
+// The cells `text` covers at (x, y) show exactly it.
+static bool text_is(uint8_t x, uint8_t y, const char *text) {
+    uint8_t saved[OLED_BUF_SIZE];
+    static bool actual[8][OLED_WIDTH];
+    unsigned width = FONT_CHAR_W * (unsigned)strlen(text);
+    memcpy(saved, ssd1309_get_framebuffer(), sizeof(saved));
+    for (int r = 0; r < 8; r++) {
+        for (unsigned c = 0; c < width; c++) actual[r][c] = px((int)(x + c), y + r);
+    }
+    display_clear();
+    ssd1309_draw_string(x, y, text, false);
+    bool same = true;
+    for (int r = 0; r < 8; r++) {
+        for (unsigned c = 0; c < width; c++) if (actual[r][c] != px((int)(x + c), y + r)) same = false;
+    }
+    memcpy(ssd1309_get_framebuffer(), saved, sizeof(saved));
+    return same;
+}
+
+// `count` Clocks 17,241 us apart (145 BPM) through the UART interrupt and core 1.
+static void clocks_in(unsigned count) {
+    for (unsigned i = 0; i < count; i++) {
+        timer_hw->timerawl += 17241;
+        uint8_t clock = MIDI_CLOCK;
+        fake_uart_rx_push(&clock, 1);
+        fake_irq_handlers[UART0_IRQ]();
+        if (timer_hw->intf & (1u << CLOCK_IN_ALARM)) sequencer_clock_in_isr();
+    }
+}
+
+static void test_step_15_cycles_the_clock_source(void) {
+    press_encoder(1, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    ui_update();
+    CHECK(!(led_mask & (1u << 14)));
+    press_step(14);
+    CHECK(transport_get_clock_source() == CLOCK_SOURCE_EXT);
+    CHECK(strcmp(ui.notify_msg, "CLOCK EXT") == 0);
+    CHECK(led_mask & (1u << 14));
+    release_step(14);
+    press_step(14);
+    CHECK(transport_get_clock_source() == CLOCK_SOURCE_AUTO);
+    CHECK(strcmp(ui.notify_msg, "CLOCK AUTO") == 0);
+    release_step(14);
+    press_step(14);
+    CHECK(transport_get_clock_source() == CLOCK_SOURCE_INT);
+    CHECK(!(led_mask & (1u << 14)));
+    // Shown beside the queue line.
+    transport_set_clock_source(CLOCK_SOURCE_AUTO);
+    ui.notify_ticks = 0;
+    display_clear();
+    ui_render();
+    CHECK(text_is(OLED_WIDTH - FONT_CHAR_W * 8, 30, "CLK AUTO"));
+}
+
+static void test_value_turns_set_the_tempo_only_on_the_internal_timer(void) {
+    turn(1, 5);
+    CHECK(fabsf(g_seq.transport.bpm - 120.5f) < 0.01f);
+    transport_set_clock_source(CLOCK_SOURCE_EXT);
+    turn(1, 5);
+    CHECK(fabsf(g_seq.transport.bpm - 120.5f) < 0.01f);
+    CHECK(strcmp(ui.notify_msg, "TEMPO EXT") == 0);
+    // AUTO: the knob works until Clocks arrive.
+    transport_set_clock_source(CLOCK_SOURCE_AUTO);
+    turn(1, -5);
+    CHECK(fabsf(g_seq.transport.bpm - 120.0f) < 0.01f);
+    clocks_in(5);
+    turn(1, 5);
+    CHECK(fabsf(g_seq.transport.bpm - 120.0f) < 0.01f);
+}
+
+static void test_session_tempo_line_names_the_source(void) {
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "120.0 BPM TRACK LOOP"));
+    transport_set_clock_source(CLOCK_SOURCE_EXT);
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "EXT  --.- TRACK LOOP"));
+    clocks_in(150);
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "EXT 145.0 TRACK LOOP"));
+    // AUTO with Clocks arriving shows them; without, its own tempo.
+    transport_set_clock_source(CLOCK_SOURCE_AUTO);
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "EXT 145.0 TRACK LOOP"));
+    timer_hw->timerawl += 500000;           // the Clocks stopped half a second ago
+    display_clear();
+    ui_render();
+    CHECK(row_is(28, 0, "INT 120.0 TRACK LOOP"));
+}
+
+static void test_pattern_view_tempo_ends_left_of_the_transport_symbol(void) {
+    transport_set_clock_source(CLOCK_SOURCE_EXT);
+    clocks_in(150);
+    press_encoder(0, BTN_PRESS);            // Session -> Pattern view
+    CHECK(ui.mode == UI_PATTERN_VIEW);
+    // A DRUM track: the step grid view with the tempo top right.
+    ui.selected_track = 4;
+    display_clear();
+    ui_render();
+    CHECK(text_is(OLED_WIDTH - FONT_CHAR_W * 2 - FONT_CHAR_W * 9, 0, "EXT 145.0"));
+}
+
+static void test_play_arms_in_ext_and_save_waits(void) {
+    transport_set_clock_source(CLOCK_SOURCE_EXT);
+    panel(PANEL_PLAY, 0, 0);
+    CHECK(transport_armed() && g_seq.transport.state == TRANSPORT_STOPPED);
+    press_encoder(1, BTN_LONG_PRESS);
+    step_buttons.pressed = 1u << 8;
+    ui_update();
+    CHECK(fake_flash_erases == 0);
+    CHECK(strcmp(ui.notify_msg, "STOP TO SAVE") == 0);
+    panel(PANEL_PLAY, 0, 0);                // PLAY again: no longer armed
+    CHECK(!transport_armed() && g_seq.transport.state == TRANSPORT_STOPPED);
+    panel(PANEL_PLAY, 0, 0);
+    clocks_in(1);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+}
+
+// ─── Quantised MUTE and mute groups ────────────────────────────
+
+#define BAR_PULSES (STEPS_PER_PATTERN * PULSES_PER_STEP)
+
+static void mute_down(uint8_t track) {
+    push_panel_event(PANEL_MUTE, track, 0, true);
+    ui_update();
+}
+
+static void mute_up(uint8_t track) {
+    push_panel_event(PANEL_MUTE, track, 0, false);
+    ui_update();
+}
+
+// 1 BAR, playing, and pulse 0 (a launch point) has run: a MUTE change made now
+// waits for the next bar.
+static void play_under_bar(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_start();
+    tick();
+}
+
+// Runs the transport up to the next bar's pulse, which has not run yet.
+static void run_to_bar(void) {
+    while (g_seq.transport.pulse_count % BAR_PULSES != 0) tick();
+}
+
+static bool white_full(rgb_t c) {
+    return rgb_is(c, LED_LEVEL_FULL, LED_LEVEL_FULL, LED_LEVEL_FULL);
+}
+
+// The MUTE keys at full white in a frame rendered now: the group. A waiting
+// change is white too, on the odd sixteenths, so while one waits the frame must
+// fall on an even sixteenth of the running transport, where a waiting change
+// shows the track's own light (never full white). The tests that call this
+// render on such a pulse (pulse 1, or the first pulses of a bar); a test moved
+// to an odd one fails here instead of reading a waiting change as a member.
+static uint8_t white_mutes(void) {
+    if (g_seq.mute_pending) {
+        CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+        CHECK((g_seq.transport.pulse_count / (PPQN / 4)) % 2 == 0);
+    }
+    ui_render();
+    uint8_t mask = 0;
+    for (uint8_t key = 0; key < PANEL_TRACKS; key++) {
+        if (white_full(shown[LED_MUTE(key)])) mask |= (uint8_t)(1u << key);
+    }
+    return mask;
+}
+
+// 1 BAR, playing: MUTE 0 held for the hold time, then MUTE 1 pressed and let
+// go. Both are collected (0's waiting change withdrawn) and 0 is still held.
+static void hold_group_of_0_and_1(void) {
+    play_under_bar();
+    mute_down(0);
+    CHECK(g_seq.mute_pending == 0x01);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);
+    mute_up(1);
+    CHECK(white_mutes() == 0x03);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+}
+
+static void test_mute_press_while_playing_waits(void) {
+    play_under_bar();
+    panel(PANEL_MUTE, 3, 0);
+    CHECK(g_seq.mute_pending == 1u << 3);
+    CHECK(g_seq.track_mutes == 0);
+    run_to_bar();
+    CHECK(g_seq.track_mutes == 0);
+    tick();                                 // the bar
+    CHECK(g_seq.track_mutes == 1u << 3);
+    CHECK(g_seq.mute_pending == 0);
+}
+
+static void test_mute_second_press_cancels(void) {
+    play_under_bar();
+    panel(PANEL_MUTE, 3, 0);
+    panel(PANEL_MUTE, 3, 0);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0);
+    // A press after a change has landed is a new change.
+    panel(PANEL_MUTE, 3, 0);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 1u << 3);
+    panel(PANEL_MUTE, 3, 0);
+    CHECK(g_seq.mute_pending == 1u << 3 && g_seq.track_mutes == 1u << 3);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+}
+
+static void test_two_quick_mute_presses_are_two_presses(void) {
+    play_under_bar();
+    mute_down(0);
+    sleep_ms(100);
+    mute_down(1);                           // acts at once: a join would withdraw 0's change
+    CHECK(g_seq.mute_pending == 0x03);
+    CHECK(white_mutes() == 0);
+    mute_up(1);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x03 && g_seq.track_mutes == 0);
+    CHECK(white_mutes() == 0);
+}
+
+static void test_mute_group_collects_after_half_a_second(void) {
+    play_under_bar();
+    mute_down(0);
+    CHECK(g_seq.mute_pending == 0x01);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);
+    mute_up(1);
+    CHECK(g_seq.mute_pending == 0);
+    CHECK(g_seq.track_mutes == 0);
+    ui_render();
+    CHECK(white_full(shown[LED_MUTE(0)]) && white_full(shown[LED_MUTE(1)]));
+    CHECK(!white_full(shown[LED_MUTE(2)]));
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x03);
+    CHECK(white_mutes() == 0);              // an even sixteenth: waiting, not collected
+    run_to_bar();
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0x03);
+    tick();                                 // both on the same pulse
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+}
+
+// The MUTE keys stand for the eight tracks of the page shown: with the focus on
+// track 41 key 1 is track 41, and its change waits and lands as on page 0.
+static void test_mute_key_follows_the_page(void) {
+    session_set_focus(41, 0);
+    play_under_bar();
+    mute_down(1);
+    mute_up(1);
+    CHECK(g_seq.mute_pending == TRACK_BIT(41) && g_seq.track_mutes == 0);
+    pulses(PULSES_PER_STEP);                // an odd sixteenth: the waiting flash
+    ui_render();
+    CHECK(white_full(shown[LED_MUTE(1)]) && !white_full(shown[LED_MUTE(0)]));
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == TRACK_BIT(41) && g_seq.mute_pending == 0);
+}
+
+// A group of tracks above 31: the masks are 64-bit all the way to the timer.
+static void test_mute_group_on_a_high_page(void) {
+    session_set_focus(40, 0);
+    play_under_bar();
+    mute_down(0);                           // track 40
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(3);                           // track 43 joins, 40's change is withdrawn
+    mute_up(3);
+    CHECK(g_seq.mute_pending == 0);
+    CHECK(ui.mute_group == (TRACK_BIT(40) | TRACK_BIT(43)));
+    ui_render();
+    CHECK(white_full(shown[LED_MUTE(0)]) && white_full(shown[LED_MUTE(3)]));
+    mute_up(0);
+    CHECK(g_seq.mute_pending == (TRACK_BIT(40) | TRACK_BIT(43)));
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == (TRACK_BIT(40) | TRACK_BIT(43)) && g_seq.mute_pending == 0);
+}
+
+// The held key keeps the track it stood for at its press when the page changes
+// under it; a key that joins stands for the track of the page shown at its press,
+// and the held key's release, by its key, applies them both.
+static void test_mute_held_key_keeps_its_track_across_pages(void) {
+    play_under_bar();
+    mute_down(0);                           // page 0: track 0
+    session_set_focus(9, 0);                // page 1 shown
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(2);                           // track 10 joins
+    mute_up(2);
+    CHECK(ui.mute_group == (TRACK_BIT(0) | TRACK_BIT(10)));
+    mute_up(0);
+    CHECK(g_seq.mute_pending == (TRACK_BIT(0) | TRACK_BIT(10)));
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == (TRACK_BIT(0) | TRACK_BIT(10)));
+}
+
+static void test_mute_press_and_release_in_one_pass(void) {
+    // The member's track is below the held key's: its press comes first and
+    // joins, then the release queues the group.
+    play_under_bar();
+    mute_down(1);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    push_panel_event(PANEL_MUTE, 0, 0, true);
+    push_panel_event(PANEL_MUTE, 1, 0, false);
+    ui_update();
+    CHECK(g_seq.mute_pending == 0x03 && g_seq.track_mutes == 0);
+    CHECK(white_mutes() == 0);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x03);
+    run_to_bar();
+    CHECK(g_seq.track_mutes == 0);
+    tick();
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+
+    // A member already collected, pressed again in the pass of the release:
+    // its press comes first and takes it out, then the release queues the rest.
+    reset();
+    play_under_bar();
+    mute_down(1);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(0);                           // joins
+    mute_up(0);
+    push_panel_event(PANEL_MUTE, 0, 0, true);
+    push_panel_event(PANEL_MUTE, 1, 0, false);
+    ui_update();
+    CHECK(g_seq.mute_pending == 0x02 && g_seq.track_mutes == 0);
+    mute_up(0);
+
+    // Above: the release comes first and ends the hold, and the press is an
+    // ordinary one.
+    reset();
+    play_under_bar();
+    mute_down(0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    push_panel_event(PANEL_MUTE, 0, 0, false);
+    push_panel_event(PANEL_MUTE, 1, 0, true);
+    ui_update();
+    CHECK(g_seq.mute_pending == 0x03 && g_seq.track_mutes == 0);
+    CHECK(white_mutes() == 0);
+    mute_up(1);
+    CHECK(g_seq.mute_pending == 0x03);
+    run_to_bar();
+    CHECK(g_seq.track_mutes == 0);
+    tick();
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+}
+
+static void test_mute_hold_threshold(void) {
+    play_under_bar();
+    mute_down(0);
+    sleep_ms(PAD_COPY_HOLD_MS - 1);
+    mute_down(1);                           // 499 ms: an ordinary press
+    CHECK(g_seq.mute_pending == 0x03);
+    CHECK(white_mutes() == 0);
+    mute_up(1);
+    sleep_ms(1);
+    mute_down(2);                           // 500 ms: joins and brings the held key in
+    CHECK(g_seq.mute_pending == 0x02);
+    CHECK(white_mutes() == 0x05);
+    mute_up(2);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x07);
+}
+
+static void test_mute_group_target_fixed_at_join(void) {
+    play_under_bar();
+    mute_down(0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // audible: joins to be muted
+    mute_up(1);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    seq_set_track_mute(1, true);            // muted another way before the release
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x01);      // 1 is at its target already: nothing waits
+    CHECK(g_seq.track_mutes == 0x02);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x03);       // the target, not a toggle of the state then
+    CHECK(g_seq.mute_pending == 0);
+
+    // The held key keeps the target its change was made with, not one worked
+    // out again when the change is withdrawn.
+    reset();
+    play_under_bar();
+    mute_down(0);                           // a change to muted waits
+    seq_set_track_mute(0, true);            // muted another way during the hold
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // withdraws 0's change, target muted
+    mute_up(1);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x02);      // 0 is at its target: nothing waits
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x03);
+}
+
+static void test_mute_group_member_toggles_out(void) {
+    hold_group_of_0_and_1();
+    mute_down(1);                           // in the group: the press takes it out
+    mute_up(1);
+    CHECK(white_mutes() == 0x01);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x01);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x01);
+}
+
+static void test_mute_group_waiting_key_press_cancels_it(void) {
+    play_under_bar();
+    panel(PANEL_MUTE, 2, 0);                // a tap: its change waits
+    CHECK(g_seq.mute_pending == 0x04);
+    mute_down(0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(2);                           // cancels that change and does not join
+    CHECK(g_seq.mute_pending == 0x01);      // no group formed: 0's change still waits
+    CHECK(white_mutes() == 0);
+    mute_up(2);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x01);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x01);
+}
+
+static void test_mute_empty_group_release_keeps_held_change(void) {
+    play_under_bar();
+    mute_down(0);
+    sleep_ms(2 * PAD_COPY_HOLD_MS);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x01 && g_seq.track_mutes == 0);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x01);
+}
+
+static void test_mute_group_without_landed_held_key(void) {
+    play_under_bar();
+    mute_down(0);
+    run_to_bar();
+    tick();                                 // 0's change lands during the hold (two seconds)
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0);
+    mute_down(1);                           // joins; the held key has nothing to withdraw
+    mute_up(1);
+    CHECK(white_mutes() == 0x02);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x02 && g_seq.track_mutes == 0x01);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x03);
+}
+
+static void test_mute_group_immediate_mode(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_STEP);
+    transport_start();
+    tick();
+    mute_down(0);                           // NEXT STEP: at once
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // joins: nothing changes yet
+    mute_up(1);
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0);
+    CHECK(white_mutes() == 0x02);
+    mute_up(0);
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);    // 0 not toggled again
+}
+
+static void test_mute_group_unmutes_stored_mute(void) {
+    // Track 1 is muted by a mute stored where it plays and in another slot.
+    pattern_set_step(&g_seq.patterns[0], 1, 0, 64, 100, STEP_FLAG_ACTIVE);
+    g_seq.patterns[0].tracks[1].muted = true;
+    g_seq.patterns[5].tracks[1].muted = true;
+    sequencer_refresh_track_playback(1, 0);
+    sequencer_refresh_track_playback(1, 5);
+    play_under_bar();
+    CHECK(seq_get_track_mutes() == 0x02);
+    mute_down(0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // muted: joins to be audible
+    mute_up(1);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x03);
+    run_to_bar();
+    fake_midi_length = 0;
+    tick();                                 // the bar: step 0 plays
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0);
+    CHECK(seq_get_track_mutes() == 0x01);
+    CHECK(count_channel_note_on(1, 64, 100) == 1);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) CHECK(!g_seq.patterns[p].tracks[1].muted);
+
+    // A held key whose change was an unmute: its withdrawn target (audible) is
+    // the one applied.
+    reset();
+    g_seq.patterns[0].tracks[0].muted = true;
+    sequencer_refresh_track_playback(0, 0);
+    play_under_bar();
+    mute_down(0);
+    CHECK(g_seq.mute_pending == 0x01);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);
+    mute_up(1);
+    CHECK(g_seq.mute_pending == 0);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x03);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x02 && seq_get_track_mutes() == 0x02);
+}
+
+// One group release unmutes track 1, muted by its stored mutes (where it plays
+// and in slot 5), and mutes track 2, audible with a stored mute in slot 7, where
+// it does not play. With the held key 0's withdrawn change all three land on the
+// bar's pulse; the release clears track 1's stored mutes and leaves track 2's.
+static void test_mute_group_unmutes_stored_and_mutes_audible_together(void) {
+    pattern_set_step(&g_seq.patterns[0], 1, 0, 64, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[0], 2, 0, 65, 100, STEP_FLAG_ACTIVE);
+    g_seq.patterns[0].tracks[1].muted = true;
+    g_seq.patterns[5].tracks[1].muted = true;
+    g_seq.patterns[7].tracks[2].muted = true;
+    sequencer_refresh_track_playback(1, 0);
+    sequencer_refresh_track_playback(1, 5);
+    sequencer_refresh_track_playback(2, 0);
+    sequencer_refresh_track_playback(2, 7);
+    play_under_bar();
+    CHECK(seq_get_track_mutes() == 0x02);
+    mute_down(0);                           // a change to muted waits
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // muted: joins to be audible
+    mute_up(1);
+    mute_down(2);                           // audible: joins to be muted
+    mute_up(2);
+    CHECK(white_mutes() == 0x07);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    CHECK(g_seq.patterns[0].tracks[1].muted && g_seq.patterns[5].tracks[1].muted);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x07 && (g_seq.mute_target & 0x07) == 0x05);
+    CHECK(g_seq.track_mutes == 0x02);       // 1 is silent by its live bit until the bar
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) CHECK(!g_seq.patterns[p].tracks[1].muted);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) CHECK(g_seq.patterns[p].tracks[2].muted == (p == 7));
+    run_to_bar();
+    CHECK(g_seq.track_mutes == 0x02 && g_seq.mute_pending == 0x07);
+    fake_midi_length = 0;
+    tick();                                 // the bar: all three on this pulse
+    CHECK(g_seq.track_mutes == 0x05 && g_seq.mute_pending == 0);
+    CHECK(seq_get_track_mutes() == 0x05);
+    CHECK(count_channel_note_on(1, 64, 100) == 1);      // 1's downbeat plays
+    CHECK(count_channel_note_on(2, 65, 100) == 0);      // 2's does not
+    CHECK(g_seq.patterns[7].tracks[2].muted);
+}
+
+static void test_mute_group_lands_as_targets(void) {
+    hold_group_of_0_and_1();
+    mute_up(0);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x03);       // both were audible
+    // A second group of the two, both muted now: both become audible.
+    mute_down(0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);
+    mute_up(1);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x03 && g_seq.track_mutes == 0x03);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+static void test_mute_sweep_drops_hold_not_reported_down(void) {
+    hold_group_of_0_and_1();
+    mutes_down[0] = false;                  // forgotten without a release, same generation
+    ui_update();
+    CHECK(white_mutes() == 0);
+    mute_up(0);                             // a late release is nothing
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0);
+}
+
+// A press of the held key with no release between: the release was lost, so
+// the hold and its group are dropped and the press is an ordinary one.
+static void test_mute_held_key_pressed_again_drops_the_group(void) {
+    hold_group_of_0_and_1();
+    mute_down(0);
+    CHECK(white_mutes() == 0);
+    CHECK(g_seq.mute_pending == 0x01);      // a new change: 0's withdrawn one went with the group
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x01);
+}
+
+static void test_mute_group_released_after_stop_applies_now(void) {
+    hold_group_of_0_and_1();
+    panel(PANEL_PLAY, 0, 0);                // Stop keeps the group
+    CHECK(g_seq.transport.state != TRANSPORT_PLAYING);
+    CHECK(white_mutes() == 0x03);
+    mute_up(0);
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+}
+
+// Stop cancels the held key's waiting change before anything joins: the held
+// key stays out of the group, and the release changes the group at once.
+static void test_mute_group_after_stop_cancelled_the_held_change(void) {
+    play_under_bar();
+    mute_down(0);
+    CHECK(g_seq.mute_pending == 0x01);
+    panel(PANEL_PLAY, 0, 0);                // Stop: the waiting change is gone
+    CHECK(g_seq.transport.state != TRANSPORT_PLAYING);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // joins; the held key has nothing to withdraw
+    mute_up(1);
+    CHECK(white_mutes() == 0x02);
+    CHECK(g_seq.track_mutes == 0);
+    mute_up(0);
+    CHECK(g_seq.track_mutes == 0x02 && g_seq.mute_pending == 0);
+    CHECK(white_mutes() == 0);
+}
+
+// A group collected while stopped and let go after PLAY: its changes wait for
+// the launch point after the release, as any change made while playing does.
+static void test_mute_group_collected_while_stopped_waits_after_play(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    mute_down(0);                           // stopped: at once
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // audible: joins to be muted
+    mute_up(1);
+    CHECK(white_mutes() == 0x02);
+    CHECK(g_seq.track_mutes == 0x01);
+    panel(PANEL_PLAY, 0, 0);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    tick();                                 // pulse 0, a launch point, has run
+    CHECK(white_mutes() == 0x02);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x02 && g_seq.track_mutes == 0x01);
+    run_to_bar();
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0x02);
+    tick();                                 // the bar
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+}
+
+static void test_mute_lost_hold_drops_group(void) {
+    hold_group_of_0_and_1();
+    poll_loses_sync = true;
+    ui_update();
+    CHECK(white_mutes() == 0);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+}
+
+static void test_mute_release_after_lost_generation_in_one_pass(void) {
+    hold_group_of_0_and_1();
+    poll_loses_sync = true;
+    push_panel_event(PANEL_MUTE, 0, 0, false);
+    ui_update();
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    CHECK(white_mutes() == 0);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0);
+}
+
+static void test_mute_join_in_a_pass_that_lost_the_hold(void) {
+    play_under_bar();
+    mute_down(0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    poll_loses_sync = true;
+    push_panel_event(PANEL_MUTE, 1, 0, true);
+    ui_update();
+    CHECK(g_seq.mute_pending == 0x03);      // 1 waits as an ordinary press; 0 still waits
+    CHECK(white_mutes() == 0);
+    mute_up(1);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x03);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x03);
+}
+
+// A press the panel layer hands out in the poll that lost its key state
+// carries the new generation, so it is no hold to collect into.
+static void test_mute_press_in_a_pass_that_lost_sync_holds_nothing(void) {
+    play_under_bar();
+    poll_loses_sync = true;
+    mute_down(0);                           // an ordinary press: its change waits
+    CHECK(g_seq.mute_pending == 0x01);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(1);                           // no key is held: another ordinary press
+    CHECK(g_seq.mute_pending == 0x03);
+    CHECK(white_mutes() == 0);
+    mute_up(1);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x03);
+}
+
+static void test_mute_hold_dropped_by_panic(void) {
+    hold_group_of_0_and_1();
+    held[0] = held[1] = true;
+    press_encoder(0, BTN_LONG_PRESS);       // Panic: this pass ends before the sweep
+    CHECK(ui.panic_latched);
+    CHECK(white_mutes() == 0);
+    held[0] = held[1] = false;
+    ui_update();                            // the latch clears
+    mute_up(0);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+// The stop the timer makes when the MIDI output overflows is not the panic
+// combo: the UI does not see it, so the hold survives it as it survives Stop,
+// and the release changes the group at once.
+static void test_mute_hold_kept_by_overflow_panic(void) {
+    hold_group_of_0_and_1();
+    fake_uart_writable = false;             // a stuck output: the queue overflows
+    for (unsigned n = 0; n <= (MIDI_TX_QUEUE_SIZE - 1u) / 3u; n++) midi_send_note_on(1, 10, 100);
+    CHECK(midi_output_overflowed());
+    tick();                                 // the timer raises the panic
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    CHECK(!midi_output_overflowed());
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    ui_update();                            // a pass: its sweep keeps the hold
+    CHECK(white_mutes() == 0x03);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+    mute_up(0);
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+    CHECK(white_mutes() == 0);
+}
+
+static void test_mute_hold_dropped_by_save(void) {
+    hold_group_of_0_and_1();
+    panel(PANEL_PLAY, 0, 0);                // a save needs the transport stopped
+    ui.mode = UI_PATTERN_SELECT;
+    step_down(1u << 8);                     // save: after this pass's sweep
+    CHECK(strcmp(ui.notify_msg, "SAVED OK") == 0);
+    CHECK(white_mutes() == 0);
+    step_up(1u << 8);
+    mute_up(0);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+// A failed load leaves the panel layer's generation and key state alone: only
+// the UI's own drop can end the hold.
+static void test_mute_hold_dropped_by_load(void) {
+    memset(fake_flash, 0, sizeof(fake_flash));
+    hold_group_of_0_and_1();
+    panel(PANEL_PLAY, 0, 0);
+    uint32_t generation = panel_generation;
+    ui.mode = UI_PATTERN_SELECT;
+    step_down(1u << 9);                     // load
+    CHECK(strcmp(ui.notify_msg, "LOAD FAILED") == 0);
+    CHECK(panel_generation == generation && mutes_down[0]);
+    CHECK(white_mutes() == 0);
+    step_up(1u << 9);
+    mute_up(0);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+static void test_selector_mute_acts_now_and_leaves_group(void) {
+    play_under_bar();
+    panel(PANEL_MUTE, 2, 0);
+    CHECK(g_seq.mute_pending == 0x04);
+    press_encoder(1, BTN_LONG_PRESS);       // the selector
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    press_step(2);
+    release_step(2);                        // button 3: track 2, at once
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0x04);
+
+    // Track 2 collected in a group: the button takes it out first.
+    mute_down(0);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    mute_down(2);                           // muted: joins to be audible
+    mute_up(2);
+    CHECK(white_mutes() == 0x05);
+    press_step(2);
+    release_step(2);                        // audible at once, and out of the group
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+    CHECK(white_mutes() == 0x01);
+    mute_up(0);
+    CHECK(g_seq.mute_pending == 0x01);
+    run_to_bar();
+    tick();
+    CHECK(g_seq.track_mutes == 0x01);       // 2 stays audible
+}
+
+// The selector's button on a track muted by its stored mutes (where it plays and
+// in slot 5), while playing under 1 BAR: audible at once, and no slot keeps a
+// stored mute; its next step plays.
+static void test_selector_mute_clears_stored_mutes_at_once(void) {
+    pattern_set_step(&g_seq.patterns[0], 2, 1, 66, 100, STEP_FLAG_ACTIVE);
+    g_seq.patterns[0].tracks[2].muted = true;
+    g_seq.patterns[5].tracks[2].muted = true;
+    sequencer_refresh_track_playback(2, 0);
+    sequencer_refresh_track_playback(2, 5);
+    play_under_bar();
+    CHECK(seq_get_track_mutes() == 0x04 && g_seq.track_mutes == 0);
+    press_encoder(1, BTN_LONG_PRESS);       // the selector
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    press_step(2);
+    release_step(2);                        // button 3: track 2
+    CHECK(seq_get_track_mutes() == 0);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+    for (uint8_t p = 0; p < MAX_PATTERNS; p++) CHECK(!g_seq.patterns[p].tracks[2].muted);
+    fake_midi_length = 0;
+    pulses(PULSES_PER_STEP);                // through step 1
+    CHECK(count_channel_note_on(2, 66, 100) == 1);
+}
+
+static void test_pending_mute_light_in_frame(void) {
+    play_under_bar();
+    panel(PANEL_MUTE, 4, 0);
+    pulses(PULSES_PER_STEP);                // pulse 25: an odd sixteenth
+    ui_render();
+    CHECK(white_full(shown[LED_MUTE(4)]));
+    CHECK(!white_full(shown[LED_MUTE(3)]));
+    pulses(PULSES_PER_STEP);                // an even one: the track's own light
+    ui_render();
+    CHECK(!white_full(shown[LED_MUTE(4)]));
+    CHECK(!rgb_is(shown[LED_MUTE(4)], 0, 0, 0));
+}
+
 int main(int argc, char **argv) {
     seq_lock_init();
     RUN(test_session_is_home_and_steps_edit_focus);
@@ -4674,6 +5537,11 @@ int main(int argc, char **argv) {
     RUN(test_selector_short_press_mutes_on_release);
     RUN(test_selector_leds_show_stored_mutes);
     RUN(test_flash_controls_are_blocked_during_playback);
+    RUN(test_step_15_cycles_the_clock_source);
+    RUN(test_value_turns_set_the_tempo_only_on_the_internal_timer);
+    RUN(test_session_tempo_line_names_the_source);
+    RUN(test_pattern_view_tempo_ends_left_of_the_transport_symbol);
+    RUN(test_play_arms_in_ext_and_save_waits);
     RUN(test_song_mode_has_a_return_to_pattern_playback);
     RUN(test_song_editor_lights_its_three_buttons);
     RUN(test_nonplaying_editor_hides_playhead);
@@ -4875,6 +5743,40 @@ int main(int argc, char **argv) {
     RUN(test_step_edit_long_press_after_a_midi_key_does_not_toggle);
     RUN(test_step_edit_long_press_without_a_key_still_toggles);
     RUN(test_pad_keyboard_is_off_in_the_frame_after_a_screen_change);
+    RUN(test_mute_press_while_playing_waits);
+    RUN(test_mute_second_press_cancels);
+    RUN(test_two_quick_mute_presses_are_two_presses);
+    RUN(test_mute_group_collects_after_half_a_second);
+    RUN(test_mute_key_follows_the_page);
+    RUN(test_mute_group_on_a_high_page);
+    RUN(test_mute_held_key_keeps_its_track_across_pages);
+    RUN(test_mute_press_and_release_in_one_pass);
+    RUN(test_mute_hold_threshold);
+    RUN(test_mute_group_target_fixed_at_join);
+    RUN(test_mute_group_member_toggles_out);
+    RUN(test_mute_group_waiting_key_press_cancels_it);
+    RUN(test_mute_empty_group_release_keeps_held_change);
+    RUN(test_mute_group_without_landed_held_key);
+    RUN(test_mute_group_immediate_mode);
+    RUN(test_mute_group_unmutes_stored_mute);
+    RUN(test_mute_group_unmutes_stored_and_mutes_audible_together);
+    RUN(test_mute_group_lands_as_targets);
+    RUN(test_mute_sweep_drops_hold_not_reported_down);
+    RUN(test_mute_held_key_pressed_again_drops_the_group);
+    RUN(test_mute_group_released_after_stop_applies_now);
+    RUN(test_mute_group_after_stop_cancelled_the_held_change);
+    RUN(test_mute_group_collected_while_stopped_waits_after_play);
+    RUN(test_mute_lost_hold_drops_group);
+    RUN(test_mute_release_after_lost_generation_in_one_pass);
+    RUN(test_mute_join_in_a_pass_that_lost_the_hold);
+    RUN(test_mute_press_in_a_pass_that_lost_sync_holds_nothing);
+    RUN(test_mute_hold_dropped_by_panic);
+    RUN(test_mute_hold_kept_by_overflow_panic);
+    RUN(test_mute_hold_dropped_by_save);
+    RUN(test_mute_hold_dropped_by_load);
+    RUN(test_selector_mute_acts_now_and_leaves_group);
+    RUN(test_selector_mute_clears_stored_mutes_at_once);
+    RUN(test_pending_mute_light_in_frame);
     reset();
     render_views(argc > 1 ? argv[1] : NULL);
     puts("PASS the six base OLED screens render (the four kit screens: test_render_kit_*)");
