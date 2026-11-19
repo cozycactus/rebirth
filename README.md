@@ -77,6 +77,19 @@ make -j$(nproc)
 
 Flash the resulting `.uf2` file by holding BOOTSEL and dragging to the Pico's USB drive.
 
+The same firmware builds for a Pico 2 module (RP2350, Arm cores) with Pico SDK 2.2.0
+installed in `~/.pico-sdk/sdk/2.2.0`:
+
+```bash
+cmake --preset pico2-release
+cmake --build --preset pico2-release
+```
+
+The image is `build/pico2-release/rebirth_pico2.uf2`. The pins and the save addresses in
+flash are those of the Pico. When exporting a song, choose **Pico 2 · RP2350** under
+**Плата для UF2** in the [MIDI Song importer](sim/README.md#midi-song). The Pico 2 build
+has not run on a board yet: see [HARDWARE_STATUS.md](HARDWARE_STATUS.md#needs-bench-verification).
+
 The default DAC gain is 1x. For a board designed for 0-4.096 V CV, configure with
 `-DREBIRTH_CV_DAC_GAIN=2`; the DAC supply and logic interface must support it.
 See [ARCHITECTURE.md](ARCHITECTURE.md#cv-circuit) before choosing the hardware.

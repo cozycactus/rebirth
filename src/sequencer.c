@@ -26,7 +26,7 @@
 
 // ─── Internal state ─────────────────────────────────────────────
 
-static uint32_t timer_alarm_num;
+static const unsigned int timer_alarm_num = 0;
 static uint32_t pulse_interval_us;
 static uint32_t playback_spinlock_num;
 
@@ -862,7 +862,7 @@ isr_done:
     timer_hw->alarm[timer_alarm_num] = target;
     if ((int32_t)(target - timer_hw->timerawl) <= 0) {
         hw_clear_bits(&timer_hw->intr, 1u << timer_alarm_num);
-        irq_clear(TIMER_IRQ_0);
+        irq_clear(TIMER_ALARM_IRQ_NUM(timer_hw, timer_alarm_num));
         timer_hw->alarm[timer_alarm_num] = timer_hw->timerawl + (has_midi_deadline ? 10u : pulse_interval_us);
     }
     jitter_expected_period_us = pulse_interval_us;
@@ -880,7 +880,6 @@ void sequencer_init(void) {
         playback_spinlock_num = spin_lock_claim_unused(true);
         lock_ready = true;
     }
-    timer_alarm_num = 0;
     pulse_interval_us = bpm_to_pulse_interval_us(g_seq.transport.bpm);
     jitter_expected_period_us = pulse_interval_us;
     jitter_reset_now();
@@ -903,8 +902,10 @@ void sequencer_core1_entry(void) {
 
     // Set up the hardware alarm
     hw_set_bits(&timer_hw->inte, 1u << timer_alarm_num);
-    irq_set_exclusive_handler(TIMER_IRQ_0, sequencer_timer_isr);
-    irq_set_enabled(TIMER_IRQ_0, true);
+    // The alarm's IRQ has a different name and number on the RP2350.
+    const unsigned int timer_irq = TIMER_ALARM_IRQ_NUM(timer_hw, timer_alarm_num);
+    irq_set_exclusive_handler(timer_irq, sequencer_timer_isr);
+    irq_set_enabled(timer_irq, true);
 
     // Arm the first alarm
     uint64_t now = timer_hw->timerawl;

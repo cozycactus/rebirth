@@ -84,5 +84,10 @@ pico_generate_pio_header(rp2040_sequencer ${CMAKE_CURRENT_LIST_DIR}/src/ws2812.p
 pico_enable_stdio_usb(rp2040_sequencer 0)
 pico_enable_stdio_uart(rp2040_sequencer 0)
 
-# Generate UF2 for drag-and-drop flashing
+# Generate UF2 for drag-and-drop flashing. A Pico 2 image gets its own name:
+# the boot ROM of one chip refuses the UF2 of the other.
+if(PICO_BOARD STREQUAL "pico2")
+    set_target_properties(rp2040_sequencer PROPERTIES OUTPUT_NAME rebirth_pico2)
+    pico_set_program_name(rp2040_sequencer "ReBirth Pico 2")
+endif()
 pico_add_extra_outputs(rp2040_sequencer)

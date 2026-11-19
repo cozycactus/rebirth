@@ -1,6 +1,6 @@
 # Hardware Status
 
-Last updated: 2026-11-17 (MIDI keyboard input added)
+Last updated: 2026-11-19 (Pico 2 build added)
 
 ## Migrating An Existing Build
 
@@ -28,7 +28,8 @@ retried every 100 ms); without the LED chain GPIO 27 drives nothing.
 ## Verified In This Repo
 
 - Host unit tests build and pass.
-- RP2040 firmware target builds with Pico SDK 2.2.0.
+- The RP2040 firmware target and the Pico 2 target (RP2350, Arm, preset `pico2-release`)
+  build with Pico SDK 2.2.0.
 - DIN MIDI UART output code is compiled into the firmware target.
 - CV/Gate, OLED, encoder, MCP23017, step LED, flash storage, and UI modules compile into the firmware target,
   as do the Session view (`session.c`), the LED frame builder (`led_frame.c`), the RGB LED chain
@@ -121,6 +122,9 @@ retried every 100 ms); without the LED chain GPIO 27 drives nothing.
 
 ## Needs Bench Verification
 
+- Everything on a Pico 2. Its firmware builds and links, and nothing more is known: it has
+  not run on a board. The items below apply to it separately, the timer ISR jitter and the
+  flash save/load first.
 - Timer ISR jitter under dense MIDI/CV output using GPIO 7 and on-device stats.
 - Compare jitter stats before/after UART TX queue and prepared playback events on physical hardware.
 - Gate alignment across all four CV/Gate channels.
