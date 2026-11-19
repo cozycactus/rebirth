@@ -79,6 +79,7 @@
   a.btn:hover { background: #343846; }
   .card select { max-width: 100%; min-width: 0; }
   #show-song, #show-form { flex: 1 1 200px; }
+  #show-song { scroll-margin-top: 11rem; }
   /* One floating hint for whatever carries data-tip (app.js, initTips). */
   #tip { position: fixed; z-index: 50; max-width: 330px; padding: 7px 10px; border-radius: 8px; background: #0d0e12;
     border: 1px solid #454a5b; color: var(--text); font-size: 12px; line-height: 1.4; white-space: pre-line;
@@ -340,8 +341,8 @@
     <div class="card">
       <h2>Гоа-артист</h2>
       <div class="row">
-        <button class="btn primary" id="show-start"
-          data-tip="Артист включает прибор заново, набирает на нём клипы выбранной песни и играет её вживую. Любое ваше нажатие на панели забирает управление у артиста.">▶ Сыграть гоа-сет</button>
+        <button class="btn primary" id="show-start" disabled
+          data-tip="Запускает выбранную песню со звуком. Для встроенного сета артист сначала набирает клипы.">Загрузка…</button>
         <button class="btn" id="show-stop" disabled
           data-tip="Останавливает артиста и нажимает PLAY, чтобы музыка стихла. Прибор остаётся в том состоянии, до которого артист дошёл.">■ Остановить</button>
         <button class="btn" id="reboot"
@@ -350,7 +351,7 @@
       <div class="row" style="margin-top:8px">
         <label for="show-song">Песня:</label>
         <select id="show-song"
-          data-tip="Что сыграет артист: у каждой песни свои тональность, темп, клипы и звук синтезаторов. Все песни написаны для этой страницы и не повторяют записей."></select>
+          data-tip="Выберите встроенный сет или импортированную MIDI-песню."></select>
       </div>
       <div class="row" style="margin-top:8px">
         <label for="show-form">Аранжировка:</label>

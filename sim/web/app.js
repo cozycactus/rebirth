@@ -9,6 +9,7 @@
   const MAX_STEP_S = 0.05;        // most device time one tick may add; under the look-ahead
   const $ = id => document.getElementById(id);
   const deviceEl = $('device');
+  const requestedSong = new URLSearchParams(location.search).get('song');
 
   let device, hands, rig = null, ctx = null;
   let playhead = -LOOKAHEAD_US;   // device time that is audible now
@@ -847,7 +848,7 @@
     return MidiSongs.image(song, Object.fromEntries(song.tracks.filter(p => p.route).map(p => [p.track, p.route])));
   }
 
-  function initMidiLibrary() {
+  async function initMidiLibrary() {
     const select = $('show-song');
     const group = document.createElement('optgroup');
     group.label = 'Импортированные MIDI';
@@ -859,8 +860,7 @@
         group.replaceChildren();
         importedSongs.forEach((song, i) => group.appendChild(new Option(song.title + ' · ' +
           Math.round(song.bpm) + ' BPM · ' + song.tracks.length + ' дор.', 'midi:' + i)));
-        const request = new URLSearchParams(location.search).get('song');
-        const index = importedSongs.findIndex(song => song.id === request);
+        const index = importedSongs.findIndex(song => song.id === requestedSong);
         if (index >= 0 || !fromLocal) select.value = 'midi:' + Math.max(0, index);
         select.dispatchEvent(new Event('change'));
         const count = importedSongs.flatMap(song => song.tracks).filter(part => part.patch).length;
@@ -902,7 +902,9 @@
       }
     }
     if (location.protocol === 'https:' || location.protocol === 'http:') {
-      loadBundledLibrary().catch(error => importStatus(error.message));
+      try {
+        await loadBundledLibrary();
+      } catch (error) { importStatus(error.message); }
     }
   }
 
@@ -1484,7 +1486,6 @@
       option.textContent = '«' + song.title + '» — ' + song.style + ', ' + song.key + ', ' + song.bpm + ' BPM';
       songs.appendChild(option);
     });
-    const requestedSong = new URLSearchParams(location.search).get('song');
     const songIndex = Artist.SONGS.findIndex(song => song.id === requestedSong);
     if (songIndex >= 0) songs.value = String(songIndex);
     const forms = $('show-form');
@@ -1611,6 +1612,8 @@
     if (rig && ctx && ctx.state === 'running') rig.allOff(ctx.currentTime);
   }
   function startShow() {
+    // A song is media playback, which iOS can play in silent mode.
+    if (ctx && navigator.audioSession) navigator.audioSession.type = 'playback';
     const imported = selectedMidiSong();
     if (imported) { startMidiSong(imported); return; }
     startAudio();
@@ -1690,6 +1693,7 @@
     playhead = device.now() - LOOKAHEAD_US;
     $('show-start').disabled = false;
     $('show-stop').disabled = true;
+    if (ctx && navigator.audioSession) navigator.audioSession.type = 'auto';
     if (message) say('info', message);
   }
   // A hand on the panel during the show takes it away from the artist.
@@ -1831,11 +1835,27 @@
     }
     buildRigPanel();
     initKeyboard();
-    initMidiLibrary();
     initTips();
     showBuild();
 
-    $('show-start').addEventListener('click', startShow);
+    const play = $('show-start');
+    const enablePlay = () => {
+      play.textContent = '▶ Сыграть гоа-сет';
+      play.disabled = false;
+    };
+    play.addEventListener('click', startShow);
+    const libraryReady = initMidiLibrary();
+    if (requestedSong && !Artist.SONGS.some(song => song.id === requestedSong)) {
+      play.textContent = 'Загрузка MIDI…';
+      libraryReady.then(() => {
+        if (selectedMidiSong()?.id !== requestedSong) {
+          const status = $('midi-import-status');
+          $('midi-library').open = true;
+          importStatus('Песня по ссылке недоступна. ' + status.textContent);
+        }
+        enablePlay();
+      });
+    } else enablePlay();
     $('show-stop').addEventListener('click', () => {
       endShow('Артист остановлен.');
       // The button also takes the artist's finger to PLAY, so the music stops.
