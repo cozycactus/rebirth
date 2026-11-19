@@ -5,6 +5,7 @@
 #include "hardware/irq.h"
 #include "sequencer.h"
 #include "kit.h"
+#include "clock_in.h"
 #include "midi_song.h"
 #include <string.h>
 #include <math.h>
@@ -119,6 +120,16 @@ static bool jitter_have_last_irq;
 static volatile bool jitter_reset_pending;
 static uint32_t jitter_expected_period_us;
 
+// The external clock, kept by core 1 under the playback lock (core 0's transport
+// commands take that lock too). See "External clock" below.
+enum { EXT_ARM_NONE, EXT_ARM_START, EXT_ARM_CONTINUE };
+static clock_est_t ext_est;         // the Clock times and the tempo estimate
+static bool ext_following;          // the pulses come from the Clock
+static uint8_t ext_armed;           // EXT_ARM_*: playing starts on the next Clock
+static uint32_t ext_owed;           // pulses due for Clocks received and not yet run
+static uint32_t ext_next_due_us;    // when the timer runs the next owed pulse
+static bool ext_inhibit;            // core 0 relies on "stopped" meaning core 1 is idle
+
 // ─── Helpers ────────────────────────────────────────────────────
 
 static uint32_t bpm_to_pulse_interval_us(float bpm) {
@@ -143,6 +154,11 @@ static void jitter_reset_now(void) {
     jitter_stats.max_isr_duration_us = 0;
     jitter_stats.overruns = 0;
     jitter_stats.flam_drops = 0;
+    jitter_stats.ext_clocks = 0;
+    jitter_stats.ext_max_dev_us = 0;
+    jitter_stats.ext_losses = 0;
+    jitter_stats.ext_catchups = 0;
+    jitter_stats.ext_dropped = 0;
     jitter_last_irq_us = 0;
     jitter_have_last_irq = false;
     jitter_reset_pending = false;
@@ -576,6 +592,53 @@ static bool apply_track_queue_if_ready(uint8_t track) {
     return changed;
 }
 
+// The launch quantization's rule, one for queued pads and MUTE changes: BAR and BEAT
+// on a global step that is a multiple of 16 or 4, STEP on every step, TRACK LOOP when
+// the track has played the `track_len` steps of its row.
+static bool launch_point_due(uint8_t quant, uint32_t global_step, uint32_t track_steps,
+                             uint8_t track_len) {
+    switch (quant) {
+        case LAUNCH_QUANT_BAR:  return (global_step % 16u) == 0;
+        case LAUNCH_QUANT_BEAT: return (global_step % 4u) == 0;
+        case LAUNCH_QUANT_STEP: return true;
+        default:                return track_steps >= track_len;
+    }
+}
+
+// At a step boundary with a MUTE change waiting: writes the due targets into the live
+// mutes, before the pulse's live mutes and the song advance, so the rest of the pulse
+// treats them as a mute set just before it. Due is the queued pads' rule; Song mode
+// reads TRACK LOOP as BAR. Under TRACK LOOP the waiting track's row is loaded first and
+// its length decides, as for a queued pad. Returns the tracks whose row it loaded:
+// phase 1 does not load them again, so a row Core 0 publishes in between cannot give
+// the pad another length than the mute had.
+static track_mask_t apply_due_mutes(transport_t *t) {
+    track_mask_t pending = g_seq.mute_pending;
+    uint8_t quant = g_seq.launch_quant;
+    if (t->mode == PLAY_MODE_SONG && quant == LAUNCH_QUANT_TRACK_LOOP) quant = LAUNCH_QUANT_BAR;
+    uint32_t global_step_count = t->pulse_count / PULSES_PER_STEP;
+    track_mask_t due = 0;
+    track_mask_t loaded = 0;
+    for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
+        if (!(pending & TRACK_BIT(tr))) continue;
+        if (quant == LAUNCH_QUANT_TRACK_LOOP) {
+            load_prepared_track(tr);
+            loaded |= TRACK_BIT(tr);
+        }
+        uint8_t track_len = clamp_pattern_steps(prepared_playback.track[tr].length);
+        if (launch_point_due(quant, global_step_count, t->track_step_count[tr], track_len)) {
+            due |= TRACK_BIT(tr);
+        }
+    }
+    if (due) {
+        uint32_t lock_state = seq_lock();
+        g_seq.track_mutes = (g_seq.track_mutes & ~due) | (g_seq.mute_target & due);
+        seq_unlock(lock_state);
+        g_seq.mute_pending = pending & ~due;
+    }
+    return loaded;
+}
+
 static void clear_runtime_note_state(void) {
     pending_gate_on = 0;
     pending_gate_off = 0;
@@ -594,7 +657,17 @@ static void clear_runtime_note_state(void) {
     memset(kit_runtime, 0, sizeof(kit_runtime));
 }
 
+// The external clock lets go: every path that stops the transport comes here.
+static void ext_disengage(void) {
+    ext_following = false;
+    ext_armed = EXT_ARM_NONE;
+    ext_owed = 0;
+}
+
+// Stops every output, and the external clock with them (Stop, Panic, an overflow,
+// a song that ends, a play-mode change, a restart, a lost clock in EXT).
 static void stop_playback_outputs(void) {
+    ext_disengage();
     midi_song_end();
     kit_release_all();
     // All note-offs in one MIDI send: one short TX lock section, not one per track.
@@ -605,6 +678,8 @@ static void stop_playback_outputs(void) {
     midi_buf_flush();
     cv_gate_all_off();
     clear_runtime_note_state();
+    // Waiting MUTE changes end with the run; every caller holds the playback lock.
+    g_seq.mute_pending = 0;
     midi_send_stop();
 }
 
@@ -696,32 +771,23 @@ done:
     return changed_mask;
 }
 
-// ─── Timer ISR — called every pulse (96 PPQN) ──────────────────
+// ─── One pulse (96 PPQN) ────────────────────────────────────────
 
-static void __isr __time_critical_func(sequencer_timer_isr)(void) {
-    uint32_t isr_start_us = timer_hw->timerawl;
-    gpio_put(JITTER_PROBE_PIN, 1);
-    uint32_t playback_irq_state = playback_lock();
-    uint32_t scheduled_us = timer_hw->alarm[timer_alarm_num];
-    jitter_record_entry(isr_start_us, scheduled_us);
-
-    // Clear the alarm IRQ
-    hw_clear_bits(&timer_hw->intr, 1u << timer_alarm_num);
-
+// One internal pulse of the playing transport: MIDI Clock, live mutes, note-off and
+// flam countdowns, and on a step boundary the step. Does nothing unless playing.
+// Called with the playback lock held. In RAM, as the timer ISR.
+static void __time_critical_func(run_pulse)(void) {
     transport_t *t = (transport_t *)&g_seq.transport;
-    uint32_t midi_deadline = 0;
-    bool has_midi_deadline = false;
-    if (t->state != TRANSPORT_PLAYING) goto isr_done;
-    if (t->mode == PLAY_MODE_MIDI_SONG) {
-        has_midi_deadline = midi_song_dispatch(isr_start_us, &midi_deadline);
-        if (!has_midi_deadline) {
-            t->state = TRANSPORT_STOPPED;
-            stop_playback_outputs();
-        }
-        goto isr_done;
-    }
+    // A MIDI Song runs on its own timeline, in the timer ISR, never through pulses.
+    if (t->state != TRANSPORT_PLAYING || t->mode == PLAY_MODE_MIDI_SONG) return;
 
     if ((t->pulse_count % (PPQN / MIDI_PPQN)) == 0) midi_send_clock();
+
+    // Pulse order 1a: due MUTE changes. Phase 1 keeps the rows loaded for them.
+    track_mask_t loaded_rows = 0;
+    if (g_seq.mute_pending && (t->pulse_count % PULSES_PER_STEP) == 0) {
+        loaded_rows = apply_due_mutes(t);
+    }
 
     // A mute cuts an already sounding note on the next internal pulse. A kit with
     // nothing sounding and no flam pending has nothing to release.
@@ -768,9 +834,7 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
             t->pulse_count > 0 &&
             (global_step_count % STEPS_PER_PATTERN) == 0) {
             track_mask_t changed_mask = advance_song_position();
-            if (t->state != TRANSPORT_PLAYING) {
-                goto isr_done;
-            }
+            if (t->state != TRANSPORT_PLAYING) return;
             for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
                 if (changed_mask & TRACK_BIT(tr)) {
                     t->track_step_count[tr] = 0;
@@ -789,21 +853,15 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
         pending_gate_off = 0;
 
         for (int tr = 0; tr < NUM_TRACKS; tr++) {
-            load_prepared_track((uint8_t)tr);
+            if (!(loaded_rows & TRACK_BIT(tr))) load_prepared_track((uint8_t)tr);
             prepared = &prepared_playback;
 
             uint8_t track_len = clamp_pattern_steps(prepared->track[tr].length);
             if (t->mode == PLAY_MODE_PATTERN &&
                 t->queued_pattern[tr] != NO_QUEUED_PATTERN) {
                 uint8_t quant = g_seq.launch_quant;
-                bool due;
-                switch (quant) {
-                    case LAUNCH_QUANT_BAR:  due = (global_step_count % 16u) == 0; break;
-                    case LAUNCH_QUANT_BEAT: due = (global_step_count % 4u) == 0; break;
-                    case LAUNCH_QUANT_STEP: due = true; break;
-                    default:                due = t->track_step_count[tr] >= track_len; break;
-                }
-                if (due) {
+                if (launch_point_due(quant, global_step_count, t->track_step_count[tr],
+                                     track_len)) {
                     if (apply_track_queue_if_ready((uint8_t)tr)) {
                         prepared = &prepared_playback;
                         track_len = clamp_pattern_steps(prepared->track[tr].length);
@@ -840,8 +898,460 @@ static void __isr __time_critical_func(sequencer_timer_isr)(void) {
     }
 
     t->pulse_count++;
+}
 
-isr_done:
+// ─── Transport helpers (playback lock held) ─────────────────────
+
+// Stops: the wire's Stop, PLAY, a lost clock in EXT. The position is kept.
+static void stop_locked(void) {
+    uint32_t lock_state = seq_lock();
+    transport_t *t = (transport_t *)&g_seq.transport;
+    t->state = TRANSPORT_STOPPED;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        t->queued_pattern[track] = NO_QUEUED_PATTERN;
+    }
+    seq_unlock(lock_state);
+    stop_playback_outputs();
+}
+
+// Back to the start, stopped, releasing what plays: transport_start() and the wire's
+// Start. False in Song mode when no entry plays (the position is then the song's end).
+static bool reset_position_locked(void) {
+    if (g_seq.transport.state == TRANSPORT_PLAYING) stop_playback_outputs();
+    ext_disengage();
+    clear_runtime_note_state();
+    uint32_t lock_state = seq_lock();
+    transport_t *t = (transport_t *)&g_seq.transport;
+    t->state = TRANSPORT_STOPPED;
+
+    // Reset position
+    t->pulse_count = 0;
+    t->current_step = 0;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        t->track_step_count[track] = 0;
+        t->current_track_step[track] = 0;
+        t->queued_pattern[track] = NO_QUEUED_PATTERN;
+    }
+    g_seq.mute_pending = 0;                 // before an empty song's early return
+
+    if (t->mode == PLAY_MODE_SONG) {
+        t->song_position = 0;
+        while (t->song_position < g_seq.song.length &&
+               g_seq.song.entries[t->song_position].repeats == 0) {
+            t->song_position++;
+        }
+        if (t->song_position >= g_seq.song.length) {
+            seq_unlock(lock_state);
+            return false;
+        }
+        memcpy(t->current_pattern,
+               g_seq.song.entries[t->song_position].pattern_index,
+               sizeof(t->current_pattern));
+        t->song_repeat_count = g_seq.song.entries[t->song_position].repeats;
+    }
+    seq_unlock(lock_state);
+    return true;
+}
+
+// A track's playing length, for a location read under seq_lock.
+static uint8_t track_length_at(uint8_t location, uint8_t track) {
+    if (location >= MAX_PATTERNS) location = 0;
+    return clamp_pattern_steps(pattern_get_track_length(&g_seq.patterns[location], track));
+}
+
+// Song Position Pointer in Song mode: the song walked entry by entry from its first
+// playable one, as advance_song_position() would run it, `spp` sixteenths on: the
+// entry, its remaining repeats, and each track's steps since its location last
+// changed. Past the end of a song that stops, the position is the song's end.
+// One short seq_lock section per entry passed.
+static void locate_song(uint16_t spp) {
+    transport_t *t = (transport_t *)&g_seq.transport;
+    uint32_t bars = spp / STEPS_PER_PATTERN;
+    uint32_t rem = spp % STEPS_PER_PATTERN;
+    const song_t *s = &g_seq.song;
+    uint8_t cur[NUM_TRACKS];
+    uint32_t steps[NUM_TRACKS] = {0};
+
+    uint32_t lock_state = seq_lock();
+    uint16_t pos = 0;
+    while (pos < s->length && s->entries[pos].repeats == 0) pos++;
+    if (pos >= s->length) {
+        t->song_position = s->length;
+        seq_unlock(lock_state);
+        return;
+    }
+    memcpy(cur, s->entries[pos].pattern_index, sizeof(cur));
+    uint8_t repeats = s->entries[pos].repeats;
+    seq_unlock(lock_state);
+
+    while (bars >= repeats) {
+        bars -= repeats;
+        for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) steps[tr] += STEPS_PER_PATTERN * repeats;
+        // The next entry that plays, wrapping or ending as the song's end mode says.
+        lock_state = seq_lock();
+        uint16_t length = s->length;
+        uint16_t next = pos;
+        bool found = false;
+        for (uint32_t n = 0; n <= length; n++) {
+            next++;
+            if (next >= length) {
+                if (s->end_mode == SONG_END_STOP) break;
+                next = 0;
+            }
+            if (next < length && s->entries[next].repeats) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            t->song_position = length;
+            seq_unlock(lock_state);
+            return;
+        }
+        for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
+            uint8_t location = s->entries[next].pattern_index[tr];
+            if (location != cur[tr]) {
+                cur[tr] = location;
+                steps[tr] = 0;      // a changed track restarts its loop
+            }
+        }
+        repeats = s->entries[next].repeats;
+        pos = next;
+        seq_unlock(lock_state);
+    }
+
+    lock_state = seq_lock();
+    t->song_position = pos;
+    t->song_repeat_count = (uint8_t)(repeats - bars);
+    for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
+        t->current_pattern[tr] = cur[tr];
+        uint32_t played = steps[tr] + STEPS_PER_PATTERN * bars + rem;
+        uint8_t step = (uint8_t)(played % track_length_at(cur[tr], tr));
+        t->track_step_count[tr] = step;
+        t->current_track_step[tr] = step;
+    }
+    seq_unlock(lock_state);
+    t->pulse_count = rem * PULSES_PER_STEP;
+    t->current_step = (uint8_t)rem;
+}
+
+// Song Position Pointer, stopped: the position `spp` sixteenths from the start. In
+// Pattern mode each track's next step is spp modulo its length.
+static void locate_locked(uint16_t spp) {
+    transport_t *t = (transport_t *)&g_seq.transport;
+    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+        t->queued_pattern[track] = NO_QUEUED_PATTERN;
+    }
+    if (t->mode == PLAY_MODE_SONG) {
+        locate_song(spp);
+        return;
+    }
+    uint32_t lock_state = seq_lock();
+    for (uint8_t tr = 0; tr < NUM_TRACKS; tr++) {
+        uint8_t step = (uint8_t)(spp % track_length_at(t->current_pattern[tr], tr));
+        t->track_step_count[tr] = step;
+        t->current_track_step[tr] = step;
+    }
+    seq_unlock(lock_state);
+    t->pulse_count = (uint32_t)spp * PULSES_PER_STEP;
+    t->current_step = (uint8_t)(spp % STEPS_PER_PATTERN);
+}
+
+// ─── External clock (core 1, playback lock held) ────────────────
+// Each received Clock is a hard reference: its first pulse (4n) runs when it is
+// handled, the other three follow at a quarter of the estimated Clock interval. A
+// step (24 pulses, six Clocks) therefore always starts on a Clock. No pulse runs
+// ahead of the last Clock. See ARCHITECTURE.md, "External clock".
+
+#define EXT_OWED_MAX        48u     // pulses behind the Clock at most: two steps
+#define EXT_CATCHUP_MIN_US  250u    // the closest a caught-up pulse follows another
+#define EXT_RELOCK_PLAUSIBLE 3u     // plausible intervals in a row before following again
+#define EXT_ALARM_LEAD_US   20u     // an alarm is never written closer than this
+
+// Spacing of a Clock's three later pulses: a quarter of the estimated interval, the
+// internal pulse period until two Clocks have been seen.
+static uint32_t __time_critical_func(ext_sub_us)(void) {
+    return ext_est.interval_us ? ext_est.interval_us / 4u : pulse_interval_us;
+}
+
+// Spacing while catching up with a burst: four times as fast.
+static uint32_t __time_critical_func(ext_catchup_us)(void) {
+    uint32_t us = ext_sub_us() / 4u;
+    return us > EXT_CATCHUP_MIN_US ? us : EXT_CATCHUP_MIN_US;
+}
+
+// Clocks arrive: two or more, the last within the loss timeout.
+static bool __time_critical_func(ext_present)(uint32_t now_us) {
+    return ext_est.count >= 2 &&
+           now_us - clock_est_last(&ext_est) < clock_est_timeout_us(&ext_est);
+}
+
+// Whether a start now waits for a Clock: EXT, or AUTO with Clocks arriving.
+static bool ext_source_follows(uint32_t now_us) {
+    return g_seq.clock_source == CLOCK_SOURCE_EXT ||
+           (g_seq.clock_source == CLOCK_SOURCE_AUTO && ext_present(now_us));
+}
+
+// The internal timer takes over from the current position at the measured tempo,
+// which becomes transport.bpm (AUTO after a loss, a change of source to INT).
+static void ext_to_internal(void) {
+    ext_following = false;
+    ext_owed = 0;
+    if (ext_est.shown_x16 == 0) return;     // never measured: transport.bpm stays
+    float bpm = 40000000.0f / (float)ext_est.shown_x16;   // 60e6 / (24 x interval)
+    if (bpm < MIN_BPM) bpm = MIN_BPM;
+    if (bpm > MAX_BPM) bpm = MAX_BPM;
+    uint32_t lock_state = seq_lock();
+    g_seq.transport.bpm = bpm;
+    seq_unlock(lock_state);
+    pulse_interval_us = bpm_to_pulse_interval_us(bpm);
+}
+
+// No Clock for the loss timeout while playing: following, EXT stops (notes, gates
+// and kit voices released, MIDI Stop out) and AUTO plays on on the internal timer.
+// EXT also stops when it plays on the internal timer waiting to follow (a change of
+// source while Clocks were still arriving) and the Clock goes away: EXT never runs
+// on its own.
+static void __time_critical_func(ext_check_loss)(uint32_t now_us) {
+    if (g_seq.transport.state != TRANSPORT_PLAYING) return;
+    if (g_seq.transport.mode == PLAY_MODE_MIDI_SONG) return;   // its own timeline
+    if (!ext_following && g_seq.clock_source != CLOCK_SOURCE_EXT) return;
+    if (ext_est.count && now_us - clock_est_last(&ext_est) < clock_est_timeout_us(&ext_est)) return;
+    jitter_stats.ext_losses++;
+    if (ext_following && g_seq.clock_source == CLOCK_SOURCE_AUTO) {
+        ext_to_internal();
+    } else {
+        stop_locked();
+    }
+}
+
+// A Clock older than the loss timeout is forgotten (after the loss has been handled,
+// which reads the shown tempo): the clock is not present, and 72 minutes later the
+// 32-bit difference to the last Clock cannot wrap round into "present" again. The
+// next Clock starts the estimate afresh, as after any gap.
+static void __time_critical_func(ext_forget_stale)(uint32_t now_us) {
+    if (ext_est.count && now_us - clock_est_last(&ext_est) >= clock_est_timeout_us(&ext_est)) {
+        clock_est_reset(&ext_est);
+    }
+}
+
+// The pulses of a Clock at t_us while following. Normally the at most three pulses
+// of the previous Clock still owed run at once (none is a step boundary), then this
+// Clock's first pulse, and the other three are scheduled. In a burst (a Clock less
+// than half the estimate after the last one, or one that finds the timer still
+// catching up) the Clock's four pulses are owed instead and the timer runs them four
+// times as fast; beyond EXT_OWED_MAX they are dropped.
+static void __time_critical_func(ext_take_clock)(uint32_t t_us, uint32_t interval,
+                                                 uint32_t estimate) {
+    bool burst = ext_owed > 3u || (interval && estimate && interval < estimate / 2u);
+    if (!burst) {
+        while (ext_owed && ext_following) {
+            ext_owed--;
+            run_pulse();
+        }
+        if (!ext_following) return;         // a song that stops has ended
+        run_pulse();                         // pulse 4n, on the Clock
+        if (!ext_following) return;
+        ext_owed = 3;
+        ext_next_due_us = t_us + ext_sub_us();
+        return;
+    }
+    if (ext_owed + 4u > EXT_OWED_MAX) {
+        jitter_stats.ext_dropped++;
+        return;
+    }
+    if (ext_owed <= 3u) jitter_stats.ext_catchups++;
+    ext_owed += 4u;
+    uint32_t soon = t_us + ext_catchup_us();
+    if ((int32_t)(ext_next_due_us - soon) > 0) ext_next_due_us = soon;
+}
+
+static void __time_critical_func(ext_on_clock)(uint32_t t_us) {
+    transport_t *t = (transport_t *)&g_seq.transport;
+    ext_check_loss(t_us);                   // the alarm may not have run yet
+    uint32_t estimate = ext_est.interval_us;
+    uint32_t interval = clock_est_tick(&ext_est, t_us);
+    jitter_stats.ext_clocks++;
+    if (interval && estimate) {
+        uint32_t dev = interval > estimate ? interval - estimate : estimate - interval;
+        if (dev > jitter_stats.ext_max_dev_us) jitter_stats.ext_max_dev_us = dev;
+    }
+    if (ext_inhibit || t->mode == PLAY_MODE_MIDI_SONG) return;   // a MIDI Song: tempo only
+
+    if (ext_armed != EXT_ARM_NONE) {
+        // The first Clock after a Start or Continue: playing begins on it.
+        bool resume = ext_armed == EXT_ARM_CONTINUE;
+        ext_armed = EXT_ARM_NONE;
+        uint32_t lock_state = seq_lock();
+        t->state = TRANSPORT_PLAYING;
+        seq_unlock(lock_state);
+        if (resume) {
+            midi_send_continue();
+        } else {
+            midi_send_start();
+        }
+        ext_owed = 0;
+        ext_take_clock(t_us, 0, 0);
+        return;
+    }
+    if (t->state != TRANSPORT_PLAYING) return;
+    if (!ext_following) {
+        // On the internal timer (AUTO after a loss, a change of source): follow again
+        // once the Clocks are steady. This Clock is the next multiple of four pulses.
+        if (g_seq.clock_source == CLOCK_SOURCE_INT ||
+            ext_est.plausible < EXT_RELOCK_PLAUSIBLE) {
+            return;
+        }
+        ext_following = true;
+        ext_owed = (4u - t->pulse_count % 4u) % 4u;
+        ext_take_clock(t_us, 0, 0);
+        return;
+    }
+    ext_take_clock(t_us, interval, estimate);
+}
+
+// One event from the DIN input, in the order received. Under INT only Clocks count,
+// and only for the tempo estimate.
+static void __time_critical_func(ext_on_event)(const clock_in_event_t *ev) {
+    transport_t *t = (transport_t *)&g_seq.transport;
+    if (ev->kind == CLOCK_IN_TICK) {
+        ext_on_clock(ev->t_us);
+        return;
+    }
+    // With INT, and in a MIDI Song (its own timeline), only Clocks count.
+    if (g_seq.clock_source == CLOCK_SOURCE_INT || t->mode == PLAY_MODE_MIDI_SONG) return;
+    switch (ev->kind) {
+    case CLOCK_IN_START:
+        if (ext_inhibit) return;
+        if (reset_position_locked()) {
+            ext_following = true;
+            ext_armed = EXT_ARM_START;
+        }
+        return;
+    case CLOCK_IN_CONTINUE:
+        if (ext_inhibit || t->state == TRANSPORT_PLAYING || ext_armed != EXT_ARM_NONE) return;
+        if (t->mode == PLAY_MODE_SONG && t->song_position >= g_seq.song.length) return;
+        t->pulse_count = (t->pulse_count + 3u) & ~3u;   // the first Clock is a Clock boundary
+        ext_following = true;
+        ext_armed = EXT_ARM_CONTINUE;
+        ext_owed = 0;
+        return;
+    case CLOCK_IN_STOP:
+        if (t->state == TRANSPORT_PLAYING || ext_armed != EXT_ARM_NONE) stop_locked();
+        return;
+    case CLOCK_IN_SPP:
+        if (ext_inhibit || t->state == TRANSPORT_PLAYING) return;
+        locate_locked(ev->value);
+        if (t->mode == PLAY_MODE_SONG && t->song_position >= g_seq.song.length) {
+            ext_disengage();                // past the end of a song that stops: no start
+        } else if (ext_armed == EXT_ARM_START) {
+            ext_armed = EXT_ARM_CONTINUE;
+        }
+        return;
+    default:
+        return;
+    }
+}
+
+// Every event waiting in the ring. Both core 1 interrupts call it: when both are
+// pending the alarm runs first.
+static void __time_critical_func(ext_drain)(void) {
+    clock_in_event_t ev;
+    while (clock_in_pop(&ev)) ext_on_event(&ev);
+}
+
+// While following: the owed pulses that are due, then the loss check.
+static void __time_critical_func(ext_run_due)(uint32_t now_us) {
+    while (ext_following && ext_owed && (int32_t)(now_us - ext_next_due_us) >= 0) {
+        ext_owed--;
+        run_pulse();
+        ext_next_due_us += ext_owed > 3u ? ext_catchup_us() : ext_sub_us();
+    }
+    ext_check_loss(now_us);
+}
+
+// When alarm 0 fires next while following: the next owed pulse, the loss deadline,
+// and at the latest one internal pulse period from now, so a return to the internal
+// timer (Stop, a change of source) never waits longer than one period.
+static uint32_t __time_critical_func(ext_alarm_target)(uint32_t now_us) {
+    uint32_t target = now_us + pulse_interval_us;
+    if (ext_owed && (int32_t)(ext_next_due_us - target) < 0) target = ext_next_due_us;
+    if (g_seq.transport.state == TRANSPORT_PLAYING && ext_est.count) {
+        uint32_t deadline = clock_est_last(&ext_est) + clock_est_timeout_us(&ext_est);
+        if ((int32_t)(deadline - target) < 0) target = deadline;
+    }
+    return target;
+}
+
+// Writes alarm 0, never at or behind the clock: such an alarm would wait for the
+// 32-bit counter to wrap (about 72 minutes).
+static void __time_critical_func(arm_alarm_at)(uint32_t target) {
+    uint32_t now_us = timer_hw->timerawl;
+    if ((int32_t)(target - now_us) < (int32_t)EXT_ALARM_LEAD_US) target = now_us + EXT_ALARM_LEAD_US;
+    timer_hw->alarm[timer_alarm_num] = target;
+    while ((int32_t)(target - timer_hw->timerawl) <= 0) {
+        target = timer_hw->timerawl + EXT_ALARM_LEAD_US;
+        timer_hw->alarm[timer_alarm_num] = target;
+    }
+}
+
+// ─── Timer ISR — called every pulse (96 PPQN) ──────────────────
+
+static void __isr __time_critical_func(sequencer_timer_isr)(void) {
+    uint32_t isr_start_us = timer_hw->timerawl;
+    gpio_put(JITTER_PROBE_PIN, 1);
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t scheduled_us = timer_hw->alarm[timer_alarm_num];
+
+    // Clear the alarm IRQ
+    hw_clear_bits(&timer_hw->intr, 1u << timer_alarm_num);
+
+    // Events of the DIN input may wait: when both core 1 interrupts are due this
+    // one runs first. A Clock may start or resume following here.
+    ext_drain();
+
+    if (ext_following) {
+        // Irregular deadlines: neither latency nor period error is recorded.
+        if (jitter_reset_pending) jitter_reset_now();
+        jitter_have_last_irq = false;
+        ext_run_due(timer_hw->timerawl);
+        ext_forget_stale(timer_hw->timerawl);
+        if (midi_output_overflowed()) panic_playback();
+        // Still following, or back on the internal timer from now.
+        arm_alarm_at(ext_following ? ext_alarm_target(timer_hw->timerawl)
+                                   : timer_hw->timerawl + pulse_interval_us);
+        jitter_expected_period_us = pulse_interval_us;
+        gpio_put(JITTER_PROBE_PIN, 0);
+        playback_unlock(playback_irq_state);
+        return;
+    }
+
+    if ((int32_t)(isr_start_us - scheduled_us) < 0) {
+        // Rewritten by the external clock while it was pending, then the clock let go:
+        // not due yet. The alarm stays as written.
+        gpio_put(JITTER_PROBE_PIN, 0);
+        playback_unlock(playback_irq_state);
+        return;
+    }
+    jitter_record_entry(isr_start_us, scheduled_us);
+    // EXT playing on the internal timer until it follows: stops once the Clock is gone.
+    if (g_seq.clock_source == CLOCK_SOURCE_EXT) ext_check_loss(isr_start_us);
+    ext_forget_stale(isr_start_us);
+
+    transport_t *t = (transport_t *)&g_seq.transport;
+    uint32_t midi_deadline = 0;
+    bool has_midi_deadline = false;
+    if (t->state == TRANSPORT_PLAYING && t->mode == PLAY_MODE_MIDI_SONG) {
+        // A MIDI Song keeps its own absolute timeline: the alarm follows its events.
+        has_midi_deadline = midi_song_dispatch(isr_start_us, &midi_deadline);
+        if (!has_midi_deadline) {
+            t->state = TRANSPORT_STOPPED;
+            stop_playback_outputs();
+        }
+    } else {
+        run_pulse();
+    }
+
     if (midi_output_overflowed()) {
         panic_playback();
         has_midi_deadline = false;
@@ -871,6 +1381,25 @@ isr_done:
     playback_unlock(playback_irq_state);
 }
 
+// ─── Doorbell ISR — the UART interrupt forced TIMER_IRQ_1 ───────
+// Same priority as the timer ISR, so neither interrupts the other.
+
+static void __isr __time_critical_func(sequencer_clock_in_isr)(void) {
+    // Cleared before the ring is drained: an event pushed meanwhile rings again.
+    hw_clear_bits(&timer_hw->intf, 1u << CLOCK_IN_ALARM);
+    uint32_t playback_irq_state = playback_lock();
+    bool was_following = ext_following;
+    ext_drain();
+    if (ext_following) ext_run_due(timer_hw->timerawl);
+    if (midi_output_overflowed()) panic_playback();
+    if (ext_following) {
+        arm_alarm_at(ext_alarm_target(timer_hw->timerawl));
+    } else if (was_following) {
+        arm_alarm_at(timer_hw->timerawl + pulse_interval_us);
+    }
+    playback_unlock(playback_irq_state);
+}
+
 // ─── Core 1 Entry ───────────────────────────────────────────────
 
 void sequencer_init(void) {
@@ -884,6 +1413,11 @@ void sequencer_init(void) {
     jitter_expected_period_us = pulse_interval_us;
     jitter_reset_now();
     clear_runtime_note_state();
+    clock_est_reset(&ext_est);
+    ext_disengage();
+    ext_inhibit = false;
+    g_seq.mute_pending = 0;
+    g_seq.mute_target = 0;
     memset(playback_pattern, NO_QUEUED_PATTERN, sizeof(playback_pattern));
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         kit_config_defaults(&g_seq.kit_config[track]);
@@ -907,6 +1441,14 @@ void sequencer_core1_entry(void) {
     irq_set_exclusive_handler(timer_irq, sequencer_timer_isr);
     irq_set_enabled(timer_irq, true);
 
+    // The external clock's doorbell: core 0's UART interrupt forces this alarm's
+    // interrupt (it is never armed). Same priority as the pulse timer.
+    hw_set_bits(&timer_hw->inte, 1u << CLOCK_IN_ALARM);
+    // TIMER_IRQ_1 on the RP2040; named by its alarm for the RP2350, like the pulse timer's.
+    const unsigned int doorbell_irq = TIMER_ALARM_IRQ_NUM(timer_hw, CLOCK_IN_ALARM);
+    irq_set_exclusive_handler(doorbell_irq, sequencer_clock_in_isr);
+    irq_set_enabled(doorbell_irq, true);
+
     // Arm the first alarm
     uint64_t now = timer_hw->timerawl;
     timer_hw->alarm[timer_alarm_num] = (uint32_t)(now + pulse_interval_us);
@@ -924,13 +1466,14 @@ void sequencer_core1_entry(void) {
 
 void transport_start(void) {
     uint32_t playback_irq_state = playback_lock();
-    if (g_seq.transport.state == TRANSPORT_PLAYING) stop_playback_outputs();
-    clear_runtime_note_state();
-    uint32_t lock_state = seq_lock();
-    transport_t *t = (transport_t *)&g_seq.transport;
-    t->state = TRANSPORT_STOPPED;
-
-    if (t->mode == PLAY_MODE_MIDI_SONG) {
+    if (g_seq.transport.mode == PLAY_MODE_MIDI_SONG) {
+        // A MIDI Song keeps its own timeline: it never waits for the external clock.
+        if (g_seq.transport.state == TRANSPORT_PLAYING) stop_playback_outputs();
+        clear_runtime_note_state();
+        ext_disengage();
+        uint32_t lock_state = seq_lock();
+        transport_t *t = (transport_t *)&g_seq.transport;
+        t->state = TRANSPORT_STOPPED;
         if (midi_song_loaded()) {
             const uint32_t start = timer_hw->timerawl + 1000u;
             midi_song_begin(start);
@@ -943,34 +1486,13 @@ void transport_start(void) {
         playback_unlock(playback_irq_state);
         return;
     }
-
-    // Reset position
-    t->pulse_count = 0;
-    t->current_step = 0;
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        t->track_step_count[track] = 0;
-        t->current_track_step[track] = 0;
-        t->queued_pattern[track] = NO_QUEUED_PATTERN;
+    if (!reset_position_locked()) {
+        playback_unlock(playback_irq_state);
+        return;
     }
-
-    if (t->mode == PLAY_MODE_SONG) {
-        t->song_position = 0;
-        while (t->song_position < g_seq.song.length &&
-               g_seq.song.entries[t->song_position].repeats == 0) {
-            t->song_position++;
-        }
-        if (t->song_position >= g_seq.song.length) {
-            seq_unlock(lock_state);
-            playback_unlock(playback_irq_state);
-            return;
-        }
-        memcpy(t->current_pattern,
-               g_seq.song.entries[t->song_position].pattern_index,
-               sizeof(t->current_pattern));
-        t->song_repeat_count = g_seq.song.entries[t->song_position].repeats;
-    }
-
-    seq_unlock(lock_state);
+    // Stopped no longer means core 1 is idle: a Start and a Clock from the wire could
+    // start it while the rows load. Nothing starts from the wire meanwhile.
+    ext_inhibit = true;
     playback_unlock(playback_irq_state);
 
     // Stopped, the timer ISR leaves the prepared rows alone: load them with
@@ -978,26 +1500,23 @@ void transport_start(void) {
     for (uint8_t track = 0; track < NUM_TRACKS; track++) load_prepared_track(track);
 
     playback_irq_state = playback_lock();
-    lock_state = seq_lock();
-    t = (transport_t *)&g_seq.transport;
-    t->state = TRANSPORT_PLAYING;
-    seq_unlock(lock_state);
-    midi_send_start();
+    ext_inhibit = false;
+    if (ext_source_follows(timer_hw->timerawl)) {
+        // EXT, or AUTO with Clocks arriving: playing starts on the next Clock.
+        ext_following = true;
+        ext_armed = EXT_ARM_START;
+    } else {
+        uint32_t lock_state = seq_lock();
+        g_seq.transport.state = TRANSPORT_PLAYING;
+        seq_unlock(lock_state);
+        midi_send_start();
+    }
     playback_unlock(playback_irq_state);
 }
 
 void transport_stop(void) {
     uint32_t playback_irq_state = playback_lock();
-    uint32_t lock_state = seq_lock();
-    transport_t *t = (transport_t *)&g_seq.transport;
-    t->state = TRANSPORT_STOPPED;
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        t->queued_pattern[track] = NO_QUEUED_PATTERN;
-    }
-    seq_unlock(lock_state);
-
-    // All notes off
-    stop_playback_outputs();
+    stop_locked();
     playback_unlock(playback_irq_state);
 }
 
@@ -1077,6 +1596,66 @@ launch_quant_t transport_get_launch_quant(void) {
     return (launch_quant_t)g_seq.launch_quant;
 }
 
+void transport_set_clock_source(clock_source_t source) {
+    if ((unsigned)source >= CLOCK_SOURCE_COUNT) return;
+    uint32_t playback_irq_state = playback_lock();
+    g_seq.clock_source = (uint8_t)source;
+    if (source == CLOCK_SOURCE_INT) {
+        if (ext_armed != EXT_ARM_NONE) {
+            ext_disengage();                // stopped: nothing waits for a Clock
+        } else if (ext_following) {
+            ext_to_internal();              // playing on at the measured tempo
+        }
+    } else if (source == CLOCK_SOURCE_EXT && g_seq.transport.state == TRANSPORT_PLAYING &&
+               g_seq.transport.mode != PLAY_MODE_MIDI_SONG &&
+               !ext_following && !ext_present(timer_hw->timerawl)) {
+        stop_locked();                      // EXT never runs on the internal timer
+    }
+    // On the internal timer with Clocks arriving, the next steady Clock is followed.
+    playback_unlock(playback_irq_state);
+}
+
+clock_source_t transport_get_clock_source(void) {
+    return (clock_source_t)g_seq.clock_source;
+}
+
+bool transport_armed(void) {
+    uint32_t playback_irq_state = playback_lock();
+    bool armed = ext_armed != EXT_ARM_NONE;
+    playback_unlock(playback_irq_state);
+    return armed;
+}
+
+bool transport_running(void) {
+    uint32_t playback_irq_state = playback_lock();
+    bool running = g_seq.transport.state == TRANSPORT_PLAYING || ext_armed != EXT_ARM_NONE;
+    playback_unlock(playback_irq_state);
+    return running;
+}
+
+bool transport_tempo_is_internal(void) {
+    uint32_t playback_irq_state = playback_lock();
+    bool internal = g_seq.clock_source == CLOCK_SOURCE_INT ||
+                    (g_seq.clock_source == CLOCK_SOURCE_AUTO && !ext_following &&
+                     !ext_present(timer_hw->timerawl));
+    playback_unlock(playback_irq_state);
+    return internal;
+}
+
+bool sequencer_storage_begin(void) {
+    uint32_t playback_irq_state = playback_lock();
+    bool idle = g_seq.transport.state == TRANSPORT_STOPPED && ext_armed == EXT_ARM_NONE;
+    if (idle) ext_inhibit = true;
+    playback_unlock(playback_irq_state);
+    return idle;
+}
+
+void sequencer_storage_end(void) {
+    uint32_t playback_irq_state = playback_lock();
+    ext_inhibit = false;
+    playback_unlock(playback_irq_state);
+}
+
 static bool queue_patterns(track_mask_t track_mask, uint8_t pattern_index) {
     if (pattern_index >= MAX_PATTERNS) return false;
     uint32_t playback_irq_state = playback_lock();
@@ -1146,6 +1725,64 @@ bool transport_launch(track_mask_t track_mask, uint8_t pattern_index) {
     return true;
 }
 
+// ─── MUTE changes (called from Core 0) ─────────────────────────
+
+typedef enum { MUTES_TOGGLE, MUTES_SET, MUTES_NOW } mutes_op_t;
+
+// One decision under both locks, published at once, so the timer never applies a
+// boundary between the decision and the write. The stored mutes are cleared after.
+static void change_mutes(track_mask_t mask, track_mask_t target, mutes_op_t op) {
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t lock_state = seq_lock();
+    track_mask_t muted = seq_track_mutes_locked();
+    // Tracks in `mask` left out of `change` only lose a waiting change: under a toggle
+    // the ones that had one, under a set the ones already in their target state.
+    track_mask_t change = mask;
+    if (op == MUTES_TOGGLE) change &= ~g_seq.mute_pending;
+    if (op == MUTES_SET) change &= target ^ muted;
+    g_seq.mute_pending &= ~mask;
+    track_mask_t want = (op == MUTES_SET ? target : ~muted) & change;
+    track_mask_t unmute = change & ~want;
+    // A track muted only by its stored mute stays silent by its live bit until its
+    // change lands: the stored mutes are cleared below, with no lock held.
+    g_seq.track_mutes |= unmute & muted;
+    if (op == MUTES_NOW ||
+        g_seq.transport.state != TRANSPORT_PLAYING ||
+        g_seq.launch_quant == LAUNCH_QUANT_STEP) {
+        g_seq.track_mutes = (g_seq.track_mutes & ~change) | want;
+    } else {
+        g_seq.mute_target = (g_seq.mute_target & ~change) | want;
+        g_seq.mute_pending |= change;
+    }
+    seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
+    if (unmute) seq_clear_stored_mutes(unmute);
+}
+
+void transport_toggle_mutes(track_mask_t mask) {
+    change_mutes(mask, 0, MUTES_TOGGLE);
+}
+
+void transport_set_mutes(track_mask_t mask, track_mask_t target) {
+    change_mutes(mask, target, MUTES_SET);
+}
+
+void transport_toggle_mutes_now(track_mask_t mask) {
+    change_mutes(mask, 0, MUTES_NOW);
+}
+
+// Not a change_mutes() op: it changes no live bit and clears no stored mute.
+track_mask_t transport_cancel_mutes(track_mask_t mask, track_mask_t *target) {
+    uint32_t playback_irq_state = playback_lock();
+    uint32_t lock_state = seq_lock();
+    track_mask_t cancelled = g_seq.mute_pending & mask;
+    if (target) *target = g_seq.mute_target & cancelled;
+    g_seq.mute_pending &= ~cancelled;
+    seq_unlock(lock_state);
+    playback_unlock(playback_irq_state);
+    return cancelled;
+}
+
 // Runs from RAM, as do the lock helpers it calls: it holds the playback lock
 // about 30 times a second, and a cache-cold run from XIP flash could stretch
 // that hold and delay the timer (MIDI Clock, gate edges).
@@ -1158,6 +1795,7 @@ void __not_in_flash_func(sequencer_snapshot)(transport_snapshot_t *out) {
     out->mode = t->mode;
     out->pulse_count = t->pulse_count;
     out->live_mutes = g_seq.track_mutes;
+    out->mute_pending = g_seq.mute_pending;
     out->stored_mutes = 0;
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         out->current[track] = t->current_pattern[track];
@@ -1168,7 +1806,13 @@ void __not_in_flash_func(sequencer_snapshot)(transport_snapshot_t *out) {
             out->stored_mutes |= TRACK_BIT(track);
         }
     }
+    out->bpm = t->bpm;
     seq_unlock(lock_state);
+    out->clock_source = g_seq.clock_source;
+    out->ext_following = ext_following;
+    out->ext_armed = ext_armed != EXT_ARM_NONE;
+    out->ext_present = ext_present(timer_hw->timerawl);
+    out->ext_shown_x16 = ext_est.shown_x16;
     playback_unlock(playback_irq_state);
 }
 
@@ -1241,6 +1885,11 @@ void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out) {
     out->max_isr_duration_us = jitter_stats.max_isr_duration_us;
     out->overruns = jitter_stats.overruns;
     out->flam_drops = jitter_stats.flam_drops;
+    out->ext_clocks = jitter_stats.ext_clocks;
+    out->ext_max_dev_us = jitter_stats.ext_max_dev_us;
+    out->ext_losses = jitter_stats.ext_losses;
+    out->ext_catchups = jitter_stats.ext_catchups;
+    out->ext_dropped = jitter_stats.ext_dropped;
     playback_unlock(playback_irq_state);
 }
 

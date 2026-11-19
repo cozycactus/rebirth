@@ -14,11 +14,12 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **Live pattern editing** — step, length, and track-setting edits update playback while running
 - **Session view** — 8×8 pad grid (tracks × slots of the shown bank), SCENE column,
   MUTE row and a PLAY button; the 16 step buttons edit the focused clip
-- **Launch quantization** — pad and scene launches land on the next bar (default),
-  beat, step, or at the end of the track's loop
+- **Launch quantization** — pad and scene launches and MUTE changes land on the
+  next bar (default), beat, step, or at the end of the track's loop
 - **Song mode** — chain patterns with repeat counts, loop or stop at end
 - **Pattern queue** — schedule the next pattern during playback
-- **Track mutes** — instant bitmask-based mute/unmute
+- **Track mutes** — MUTE changes at the launch point and flashes white while it
+  waits; hold one MUTE key and press others to change several tracks together
 - **Panic combo** — hold both encoder buttons to stop playback, drop gates, and send MIDI all-notes-off
 - **Grouped gate edges** — two-phase output; DAC and DIN MIDI transfers remain sequential
 - **MIDI output** — DIN-5 UART only, avoiding USB MIDI host scheduling jitter
@@ -29,6 +30,9 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
 - **CV/Gate output** — 4 channels via MCP4822 DACs (1V/oct, 12-bit; default 0-2.048 V)
 - **MIDI Song playback** — import a timed MIDI arrangement with up to 64 source tracks and assign its output channels and CV/Gate pairs. [Import and playback](sim/README.md#midi-song)
 - **96 PPQN** internal timing, **24 PPQN** MIDI Clock, 20–300 BPM
+- **External clock** — follows a MIDI Clock on the DIN input (CLOCK INT / EXT /
+  AUTO) with Start, Stop, Continue and Song Position Pointer; the OLED shows the
+  measured tempo as `EXT 145.0`
 - **Swing value** per pattern (playback timing pending)
 - **Step flags** — accent, slide, tie (synth and drum tracks)
 
@@ -113,11 +117,11 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
-Fifteen CTest targets (fourteen test sources; `test_sync` is built twice, once per DAC
+Sixteen CTest targets (fifteen test sources; `test_sync` is built twice, once per DAC
 gain) cover pattern/song data (`test_pattern`, `test_song`), the kit lane
 helpers and settings (`test_kit`), the MIDI input parser (`test_midi_in`), MIDI/gate output at
 both DAC gains (`test_sync`, `test_sync_gain2`), the real timer/transport code
-(`test_playback`), flash storage (`test_storage`), the Session view
+(`test_playback`), following an external clock (`test_clock`), flash storage (`test_storage`), the Session view
 (`test_session`), the LED frame builder (`test_led_frame`), the MCP23017 key
 matrix scan driver (`test_key_scan`), the panel input on that scanner
 (`test_panel_input`), the MCP23017 button/LED expanders and encoder
@@ -152,11 +156,44 @@ buttons edit it.
 - **SCENE:** launches the row on every track together; tracks already playing
   it keep playing. Pressed while any track is queued to that row, it cancels
   all queues.
-- **MUTE:** toggles the track's mute at once. On a track silenced by a mute
-  stored in an older save, it makes the track audible and clears that stored
-  mute in every slot.
+- **MUTE:** toggles the track's mute at the next launch point, the one a pad
+  launch would wait for (under TRACK LOOP the end of the track's loop, or the
+  next bar in Song mode). While stopped, and under NEXT STEP, it acts at once.
+  While the change waits, the MUTE key flashes white, one sixteenth white and
+  one sixteenth its usual light. A second press before the launch point
+  cancels the change; a press after it has landed is a new change. On a track
+  silenced by a mute stored in an older save, MUTE makes the track audible and
+  clears that stored mute in every slot; the track stays silent until the
+  change lands, and stays muted if the change is cancelled.
+- **Mute groups:** hold a MUTE key for half a second, then press other MUTE
+  keys. The first key's own press is an ordinary MUTE press: it changes that
+  key's track, or starts it waiting to change, as any MUTE press does. The
+  other keys do not act: they are collected, and their keys are steady white.
+  When the first key is let go, the collected tracks change together at the
+  next launch point (at once while stopped or under NEXT STEP). Each other
+  key changes its track to the opposite of the state the track had when the
+  key joined. The first key goes with them if its own change was still
+  waiting when the first other key joined: that change is taken back then,
+  its key turns steady white, and it goes with the group to the target fixed
+  at its press. If its change had already landed, acted at once or been
+  cancelled by Stop, the first key stays out of the group. Pressing a
+  collected key again takes it out; pressing a key whose change is waiting
+  cancels that change and does not collect it. Under TRACK LOOP in Pattern
+  mode each track changes at its own loop end, so they change together only
+  when their loops end together. A MUTE key pressed less
+  than half a second after the first is an ordinary press, so two fingers
+  together are two presses. Stop keeps the group, and a release after Stop
+  changes it at once. The stop the device makes itself when its MIDI output
+  overflows does the same: the group is kept and its release changes it at
+  once. A hold that the panel may have lost (after the panic combo of both
+  encoder buttons, a save or load, or a panel error) is dropped and changes
+  nothing, the first key's taken-back change included. Each MUTE key stands
+  for the track in its column on the page shown when it is pressed, so a group
+  can take tracks from several pages: hold the first key, turn TRACK to
+  another page, press more. In the MIDI Song player the MUTE keys are the
+  player's own and collect nothing.
 - **PLAY:** starts and stops the transport; it is the only start/stop. Stop
-  cancels pending queues.
+  cancels pending queues and waiting MUTE changes.
 - **Step buttons 1-16:** a short press toggles the step on release; a long
   press opens the step editor on that step without toggling it. Both act on
   the clip that was focused when the button went down, even if a pad or
@@ -212,7 +249,7 @@ buttons edit it.
   have a note keep it, and DRUM and kit tracks do not use it. It is not saved.
   Holding empty steps and turning therefore moves them relative to it.
 - **MIDI keyboard** on the DIN input (J402), any channel; notes only, no
-  control change, pitch bend or clock. **Hold a step in the Pattern view and
+  control change or pitch bend (a MIDI Clock there is the external clock, below). **Hold a step in the Pattern view and
   press a key:** the step is switched on if it was off and takes the key's
   note (SYNTH tracks) and velocity; two held steps take the same key, and a step
   that a key wrote to is not toggled on release. In the step editor the same
@@ -254,9 +291,44 @@ buttons edit it.
 - Hold both encoder buttons for Panic: it stops playback and returns to the
   Session view. Release both before issuing another command; keys held through
   the panic or pressed while it is held do nothing afterwards.
-- In the selector, buttons 1-8 mute on **short release**; holding opens track
-  configuration without muting. Save/load (9/10) require stopped playback;
-  buttons, pads and PLAY held through a save or load do nothing afterwards.
+- In the selector, buttons 1-8 mute on **short release**, at once whatever the
+  launch quantization: a waiting change of that track is cancelled, and the
+  track leaves a mute group. Holding opens track configuration without
+  muting. Save/load (9/10) require stopped playback (and no start waiting for
+  an external Clock); buttons, pads, MUTE and PLAY held through a save or load
+  do nothing afterwards.
+- **External clock.** In the selector, button 15 cycles the clock source:
+  `CLOCK INT` (the device is the master, as at power-up), `CLOCK EXT` (it only
+  follows a MIDI Clock on the DIN input) and `CLOCK AUTO` (it follows one when
+  it is there, else runs on its own); the selector shows `CLK EXT` and button 15
+  is lit when the source is not INT. It is not saved.
+  - Each Clock received drives four of the 96 PPQN pulses: the first when it
+    arrives, so every step starts on its Clock, the other three spaced by the
+    measured tempo. Steps keep the master's timing, jitter included; a bunch of
+    late Clocks is caught up quickly rather than played at once.
+  - A Start from the master starts from the beginning on the first Clock after
+    it; Stop stops; Continue goes on from where it stopped or from a Song
+    Position Pointer received while stopped (in Pattern mode each track goes to
+    the position modulo its length, in Song mode to the entry and repeat). An
+    SPP during playback is ignored. With INT the wire's transport is ignored.
+  - PLAY with EXT (or AUTO with a Clock coming in) waits for the next Clock to
+    start; the tempo prefix blinks meanwhile, and PLAY again cancels it. This
+    starts in time with a master that sends Clock without Start, but not on its
+    bar. In AUTO a start that waits keeps waiting if the master falls silent
+    first; PLAY again cancels it, and the next PLAY, with no Clock coming in,
+    starts the device's own timer.
+  - The tempo line reads `EXT 145.0` (the measured tempo), `EXT  --.-` (EXT
+    with no Clock) or `INT 120.0` (AUTO on its own timer). VALUE sets the tempo
+    only on the internal timer and otherwise shows `TEMPO EXT`.
+  - When the Clock stops for three Clock intervals (at least 50 ms), EXT stops
+    and releases every note and gate; AUTO plays on at the measured tempo and
+    follows the Clock again from where it is when it returns (the tempo locks,
+    a phase lost in the gap stays until the next Start).
+  - MIDI Clock out follows: one Clock out for each Clock in, while playing,
+    with Start, Continue and Stop when the device's own transport changes. SPP
+    is not passed on.
+  - A MIDI Song (selector button 14) keeps its own timing: the external clock
+    and the wire's transport do not apply to it.
 - A long press only counts on the screen where the button went down.
 - Pad and scene launches are unavailable in Song mode (`SONG MODE`); a pad
   still moves the focus. In the song editor, button 2 selects Song mode and
@@ -363,6 +435,8 @@ src/
   song.c            — Song editing, track mutes
   midi_out.c        — MIDI UART, buffered output, running status, input ring
   midi_in.c         — Parser for the bytes of the DIN input
+  clock_in.c        — External clock: received Clock/Start/Stop/Continue/SPP for core 1,
+                      tempo estimate
   kit.c             — Kit lane helpers, settings, glyphs
   cv_gate.c         — MCP4822 DAC + GPIO gate control
   display.c         — OLED drawing layer
@@ -384,6 +458,8 @@ test/
   test_kit.c        — Kit lane, settings and glyph helpers
   test_encoder.c    — Encoder clicks and detent-rate acceleration
   test_midi_in.c    — MIDI input parser
+  test_clock.c      — Following an external clock: tempo, Start/Stop/Continue/SPP,
+                      jitter, bursts, loss, AUTO
   test_sync.c       — Synchronization layer tests
   test_song.c       — Song mode tests
   test_playback.c   — Timer, transport, launch quantization, note and MIDI
@@ -419,13 +495,19 @@ test/
       in [HARDWARE_STATUS.md](HARDWARE_STATUS.md)), save format v7
 - [x] Note entry from a MIDI keyboard: step + key, pass-through otherwise (host
       tests only; the input circuit is a bench item in [HARDWARE_STATUS.md](HARDWARE_STATUS.md))
-- [ ] MIDI clock sync (external)
+- [x] External MIDI clock: INT / EXT / AUTO, Start, Stop, Continue, SPP (host
+      tests and the simulator; a real master is a bench item in
+      [HARDWARE_STATUS.md](HARDWARE_STATUS.md))
 
 ## Known Issues
 
 - The kit feature is not bench verified; see [HARDWARE_STATUS.md](HARDWARE_STATUS.md).
 - The MIDI keyboard input is not bench verified (the H11L1 input circuit is not
   validated); see [HARDWARE_STATUS.md](HARDWARE_STATUS.md).
+- Following an external clock is not bench verified. A byte lost in the UART
+  receiver (only possible with core 0's interrupts off for more than one byte
+  time) is not detected: a lost Clock leaves the device a Clock behind the
+  master until its next Start.
 
 ## License
 

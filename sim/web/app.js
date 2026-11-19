@@ -103,11 +103,19 @@
         'Пока сцена ждёт в очереди, повторное нажатие отменяет все очереди.';
     }
     label('MUTE', 236, 1131);
+    // An older core switches the track at once; a newer one waits for the launch point.
+    const quantMutes = device.features().quantMutes;
     for (let track = 0; track < 8; track++) {
       const key = box('mutekey', PAD_X(track), 1113, 80, 37);
       els.mute[track] = key;
       bindHold(key, down => device.mute(track, down));
-      key.dataset.tip = 'MUTE · столбец ' + (track + 1) + ': выключает и возвращает дорожку сразу, без ожидания границы такта. Светится, пока дорожка слышна.';
+      key.dataset.tip = quantMutes
+        ? 'MUTE · столбец ' + (track + 1) + ': выключает или возвращает дорожку на границе квантования запуска, как пэд; ' +
+          'на остановленном приборе и при NEXT STEP — сразу. Пока изменение ждёт, кнопка мигает белым; ' +
+          'повторное нажатие его отменяет. Светится, пока дорожка слышна.\n' +
+          'Удержать полсекунды и нажать другие MUTE: они собираются в группу (горят ровным белым) ' +
+          'и меняются вместе после того, как отпущена первая.'
+        : 'MUTE · столбец ' + (track + 1) + ': выключает и возвращает дорожку сразу, без ожидания границы такта. Светится, пока дорожка слышна.';
     }
     for (let i = 0; i < 16; i++) {
       els.stepLed[i] = box('stepled', STEP_X(i) + 19, 1173, 14, 14);
@@ -1625,7 +1633,8 @@
     lastLed.fill('');
     const variant = $('show-variant').value;
     show = Artist.buildShow(undefined, { song: +$('show-song').value, form: $('show-form').value || undefined,
-                                         fw2: variant !== 'base', keys: variant === 'keys', pads: variant === 'pads' });
+                                         fw2: variant !== 'base', keys: variant === 'keys', pads: variant === 'pads',
+                                         quantMutes: device.features().quantMutes });
     patchShow(show.song);
     Artist.schedule(show, device, hands, io);
     phase = 'prep';

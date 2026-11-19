@@ -4,12 +4,13 @@
 
 | Context | Work |
 | --- | --- |
-| Core 1 timer IRQ | 96 PPQN timing, playheads, note durations, MIDI production, CV/gate output |
+| Core 1 timer IRQ | 96 PPQN timing, playheads, note durations, MIDI production, CV/gate output; while following an external clock, the pulses still owed for a Clock and the loss deadline |
+| Core 1 doorbell IRQ | `TIMER_IRQ_1`, forced by Core 0's UART interrupt: the external clock's events, in order (see External clock) |
 | Core 0 main loop | Panel I2C polling (key matrix scan on two MCP23017, one bus step per pass; MCP23017 step buttons and LEDs), PLAY and encoders, edits, transport commands and launches; per ~33 ms frame: one transport snapshot, the RGB frame build and its LED DMA start, the OLED; stopped-only storage |
-| Core 0 UART IRQ | First read every received byte into the input ring, then drain pending MIDI bytes into UART0, one byte per interrupt (hardware FIFO off) |
+| Core 0 UART IRQ | First read every received byte, stamped with the time: Clock, Start, Continue, Stop and SPP into the external clock's ring for Core 1 (then force `TIMER_IRQ_1`), every byte but the first four into the input ring; then drain pending MIDI bytes into UART0, one byte per interrupt (hardware FIFO off) |
 
 The playback lock serializes the complete timer handler with Start, Stop,
-Continue, mode changes, selection and Panic. Stop/Panic return after any
+Continue, mode changes, selection, MUTE changes and Panic. Stop/Panic return after any
 in-progress step has finished and its outputs have been cleared. Bytes already
 in the UART hardware still need time to reach the receiving instrument.
 
@@ -17,8 +18,15 @@ Lock order is **playback -> shared state or MIDI**. UI edits take the shared loc
 release it, then refresh playback data. Transport commands and storage operations
 are Core 0 APIs. The timer uses internal stop helpers under the playback lock.
 
+The live mutes `track_mutes` are written under the shared lock: by Core 0, and by
+the timer when it applies a due MUTE change; the timer reads the byte once per
+pulse without it. The two masks of waiting MUTE changes, `mute_pending` and
+`mute_target`, are cleared by `sequencer_init()` before the timer runs and from
+then on written only under the playback lock: by Core 0, or by the timer, which
+holds it throughout.
+
 What can delay the timer: Core 0 sections that hold the playback lock, i.e.
-transport commands, pad/scene launches, Panic and the per-frame transport
+transport commands, pad/scene launches, MUTE changes, Panic and the per-frame transport
 snapshot (one short copy per frame, never one per UI pass); shared-lock
 sections the timer waits on; and bus or flash contention from Core 0, such as
 the LED DMA and Core 0 code running from flash through the XIP cache. The
@@ -72,9 +80,13 @@ lane order.
   play at once, also in Song mode and with mixed launches. `seq_set_track_config()`
   refuses a third kit before it changes anything and the save validator enforces
   the same rule.
-- **Pulse order.** Each pulse: 1 MIDI Clock; 2 live mutes (a muted kit releases
-  its sounding voices and cancels a pending flam); 3 note-off countdowns;
-  4 flam countdowns (the second hits); 5 on a step boundary, the step. Kit
+- **Pulse order.** Each pulse: 1 MIDI Clock; 1a on a step boundary, the due MUTE
+  changes (Playback Rules), so the live mutes of that pulse include them; 2 live
+  mutes (a muted kit releases its sounding voices and cancels a pending flam);
+  3 note-off countdowns; 4 flam countdowns (the second hits); 5 on a step
+  boundary, the step. Under `TRACK LOOP` with a change waiting, the track's row
+  is loaded in 1a, so a kind-change release (and the flam it cancels) can come
+  before that pulse's note-off and flam countdowns. Kit
   messages of 2-4 go out through their own send call, never through `midi_buf`,
   which step 5 clears. With the gate at 100 % the countdown ends in step 3 of the
   pulse that begins the next step, before its Note Ons.
@@ -146,8 +158,42 @@ lane order.
   neither the live mute nor the stored mute of the location it plays is set;
   MUTE, the RGB lights, the selector's step LEDs 1-8 and the OLED mute lines
   all show a track as muted by this rule (`seq_get_track_mutes()`).
-  MUTE on a muted track clears the live bit and the stored mute of every
-  location, so it is undone with one press.
+  MUTE on a muted track makes it audible when its change lands: the stored
+  mute of every location is cleared as soon as the change is made (a press,
+  or a group's release), the live bit when the change lands, and until then
+  the live bit keeps the track silent (below).
+- A MUTE change gives a track a target live mute: `transport_toggle_mutes()`
+  (a press) the opposite of its state by the rule above, `transport_set_mutes()`
+  the bit it is given; a track already in that state gets none and only loses a
+  waiting change, so nothing waits and its stored mutes stay. A change applies
+  at once while the transport is not playing or under `STEP`;
+  `transport_toggle_mutes_now()` cancels and toggles at once in every case.
+  Otherwise it waits (`mute_pending`, its target in `mute_target`;
+  neither is saved) for the next launch point: a global step that is a multiple
+  of 16 (`BAR`) or 4 (`BEAT`), or under `TRACK LOOP` that track's loop end by the
+  queued pads' rule, decided on the same row the pad uses at that boundary
+  (Song mode reads `TRACK LOOP` as the bar, where song entries change). The rule
+  is read at each step boundary, so a quantization change moves a waiting change.
+  A press of a track with a change waiting cancels it (`transport_cancel_mutes()`
+  cancels without a press); a press after the change landed is a new change.
+- A change is decided and published in one critical section (playback lock,
+  then shared state), so the timer never applies a boundary between the decision
+  and the write. The timer applies due changes at the step boundary before the
+  live mutes and the song advance: a newly muted track's notes and kit voices are
+  released in that pulse and its step does not play; a newly unmuted track plays
+  that step.
+- Stored mutes: a change to audible of a track muted by a stored mute sets its
+  live bit in that section (the track is silent already), and the change clears
+  that bit, at once or when it lands. After the section the stored mute of every
+  location is cleared and the track's rows are refreshed
+  (`seq_clear_stored_mutes()`), so from then on the live bit alone mutes it and a
+  cancelled change leaves it live-muted. A launch point that falls inside the
+  refresh can play one step of that track silent.
+- Stop, Start while playing, a play-mode change, Panic (also the timer's on a
+  MIDI overflow) and the end of a song that stops cancel waiting changes, as does
+  a Start that finds an empty song; a change due on the song's last boundary
+  lands before it stops. `transport_clear_queue()` and
+  `transport_clear_track_queue()` are about pads and leave them.
 - Selection while stopped is immediate and survives Start.
 - Stop cancels pending queues and retains the current playing locations.
 - Manual queues are rejected in Song mode. Song entries apply on 16-step bar
@@ -168,7 +214,8 @@ lane order.
 
 ## Timing and MIDI
 
-The internal timer runs at 96 PPQN. MIDI Clock runs at **24 PPQN**, one message
+The internal timer runs at 96 PPQN (from the received Clock when following an
+external clock; see External clock). MIDI Clock runs at **24 PPQN**, one message
 every four internal pulses. At 120 BPM the integer timer period is 5,208 us; the
 nominal MIDI Clock interval is approximately 20.833 ms.
 [MIDI Timing Clock reference](https://docs.circuitpython.org/projects/midi/en/latest/api.html#adafruit_midi.timing_clock.TimingClock).
@@ -212,8 +259,9 @@ the ring is full: with the FIFO off the interrupt stays asserted until the data
 register is read; the byte is counted in `midi_in_dropped()` and lost. The main
 loop (`ui_update()`, Core 0) takes at most 48 bytes a pass, before the panic
 check, and feeds them to the pure parser in `midi_in.c`. The ring has one
-producer and one consumer, both on Core 0, so it has no lock, and nothing new
-runs in the timer interrupt.
+producer and one consumer, both on Core 0, so it has no lock. Clock, Start,
+Continue and Stop do not enter this ring: they go to the external clock (below),
+the one thing the input adds to Core 1.
 
 A key is passed through to the track being edited with `midi_try_send_bytes_capped()`
 only, as the ordinary sends set the overflow flag that stops the transport: a
@@ -247,10 +295,138 @@ layout is `pad_key_note()` in `led_frame.c`, shared by the UI and the frame
 builder; `led_state_t.keys` makes `led_frame_build()` light the pads from it.
 Nothing runs in the timer interrupt and no lock is added.
 
+### External clock
+
+The clock source (`g_seq.clock_source`: INT, EXT, AUTO; Pattern Select step 15;
+not saved, INT at power-up) says where the 96 PPQN pulses come from. The design
+and the reasons are in
+`docs/superpowers/specs/2026-11-17-external-clock-design.md`.
+
+- **Receiving.** The UART interrupt reads `timer_hw->timerawl` for each byte and
+  hands it to `clock_in_rx_byte()` (`clock_in.c`, in RAM). Clock, Start,
+  Continue, Stop and SPP (`F2 lsb msb`, real-time bytes may come between its
+  bytes) become `{time, kind, value}` events in a 32-entry single-producer ring
+  (a barrier orders an entry before the head that publishes it). After a pass
+  that pushed one it sets bit 1 of `timer_hw->intf`: alarm 1 is never armed,
+  its interrupt is Core 1's doorbell. The UART interrupt takes no new lock.
+- **Core 1.** The timer ISR and the doorbell ISR have the same priority and run
+  under the playback lock; each drains the ring in order first (the alarm runs
+  first when both are pending). The doorbell clears its request before it
+  drains. Core 1 keeps, under the playback lock, whether it follows the Clock,
+  whether a start is armed (waiting for the first Clock), the pulses owed for
+  Clocks received and when the next is due, and the tempo estimate (the last
+  128 Clock times). Every path that stops the transport goes through
+  `stop_playback_outputs()`, which also lets go of the clock, so a song that
+  ended is never restarted by the master's next Clock.
+- **Pulses.** A Clock is a hard reference. Its first pulse (4n) runs when it is
+  handled; the other three follow at a quarter of the mean of the last four
+  intervals (the internal pulse period before two Clocks have been seen). A step
+  is 24 pulses, six Clocks, so every step, MIDI Clock out and launch decision
+  (a queued pad or a waiting MUTE change) falls on a received Clock and carries the master's timing, jitter included,
+  plus the handling latency. No pulse runs ahead of the last Clock. An early
+  Clock runs the at most three sub-pulses of the previous one at once (never a
+  step boundary). A burst (a Clock less than half the estimate after the last,
+  or one that finds the timer still behind) adds four owed pulses that the timer
+  runs four times as fast (never closer than 250 us) until at most three are
+  left; owed pulses beyond 48 (two steps) are dropped and counted, so a stall
+  shifts the phase only when it is that long. While following, alarm 0 fires at
+  the next owed pulse, the loss deadline, or one internal pulse period from
+  now, whichever comes first, so a return to the internal timer never waits
+  longer than today's first pulse. Its writes never fall at or behind the clock.
+  Launch quantisation and Song bar changes read `pulse_count` at step
+  boundaries as before.
+- **Transport from the wire** (EXT, or AUTO; ignored with INT), applied by Core 1
+  with helpers that run under the playback lock it holds. Start resets the
+  position as `transport_start()` does and arms; the first Clock after it is
+  pulse 0, and MIDI Start goes out just before it. Continue arms at the position
+  rounded up to a multiple of four pulses; MIDI Continue goes out on the first
+  Clock. Stop stops (MIDI Stop out). SPP while stopped sets the position: in
+  Pattern mode every track's next step is SPP modulo its length; in Song mode the
+  song is walked entry by entry as `advance_song_position()` would run it (one
+  short `seq_lock` section per entry passed): the entry, its remaining repeats
+  and each track's steps since its location last changed. SPP while playing is
+  ignored, and an SPP past the end of a song that stops disarms a start.
+- **Core 0.** `transport_start()` in EXT, or AUTO with Clocks arriving, arms
+  instead of playing; PLAY while armed disarms (`transport_stop()`). Stopped no
+  longer means Core 1 is idle, so one inhibit flag, set under the playback lock,
+  covers each Core 0 section that relies on it: `transport_start()` between its
+  two lock sections (it loads the rows with the lock released) and flash save
+  and load (`sequencer_storage_begin()` / `_end()`, which refuse unless stopped
+  and not armed). While it is set Core 1 ignores Start, Continue and SPP and
+  starts nothing on a Clock.
+- **Loss.** No Clock for `max(3 x interval, 50 ms)`, the interval being the
+  longer of the short and the shown estimate (a burst shortens only the short
+  one; 375 ms before either is known), checked at alarm 0's deadline and on the
+  next Clock: EXT stops as on Stop (notes, gates and kit voices released, MIDI
+  Stop out), also when it still plays on the internal timer after a change of
+  source and has not yet followed the Clock; AUTO hands over to
+  the internal timer at the measured tempo, which becomes `transport.bpm`, and
+  follows again from its current position once three plausible intervals in a
+  row have arrived (that Clock is the next multiple of four pulses). An interval
+  longer than the timeout restarts the estimate (a flash save, a cable), and
+  alarm 0 forgets an estimate whose last Clock is older than the timeout, so the
+  32-bit difference to it never wraps round into "present" 72 minutes later.
+- **Shown tempo.** The time over the last 96 intervals divided by their number,
+  then averaged over Clocks with weight 1/16, in us x 16
+  (`transport_snapshot_t.ext_shown_x16`); three Clocks in a row more than 4 % off
+  restart that window from the last two intervals. Only an interval of a tempo
+  (a quarter to four times the shown one) counts as off, so the bunched Clocks
+  that end a stall do not restart it. Core 0 turns it into BPM and
+  keeps the shown tenth until the value leaves it by more than 0.07 BPM.
+- **MIDI Song mode** plays its file on its own absolute timeline (the timer ISR
+  follows the song's event deadlines), so the external clock takes no part in
+  it: PLAY starts the song as before, the wire's Start, Continue, Stop and SPP
+  are ignored, and neither a lost clock nor a change of source stops it. Clocks
+  still feed the tempo estimate.
+- **Not covered.** A byte lost in the UART receiver (Core 0's interrupts off for
+  more than one byte time) is not detected; a lost Clock leaves the device a
+  Clock behind until the next Start. SPP is not forwarded.
+
 After an overrun the timer re-arms a future deadline, preventing a past alarm
 from stalling until the 32-bit counter wraps. It emits no catch-up burst.
 Jitter snapshots are coherent; tempo changes do not count the new period as
 timing noise. See [JITTER_MEASUREMENT.md](JITTER_MEASUREMENT.md).
+
+### MUTE hold and groups
+
+`ui.c` remembers one held MUTE key: the physical key (`ui.mute_held`, `MUTE_NONE`
+for none; its release and the sweep go by it) and the logical track it stood for
+on the page shown at its press (`ui.mute_held_track`), the time the UI handled its
+press and the panel generation then, and the group (`ui.mute_group`, a
+`track_mask_t` of logical tracks, so it can span pages) with each member's target
+(`ui.mute_group_target`, bit set = muted). In the MIDI Song player the MUTE keys
+go to the player before any of this, and opening it drops the hold. A MUTE press with no key held is an ordinary press
+(`transport_toggle_mutes()`) and becomes the held key. Another key pressed less
+than `PAD_COPY_HOLD_MS` (500 ms) after it, or when the panel generation is no
+longer the one of its press, is an ordinary press as well. A later one joins: a
+member pressed again leaves, a key with a waiting change only has it cancelled,
+and any other key joins with the opposite of its state then as its target. While
+the group is empty a join first withdraws the held key's waiting change with
+`transport_cancel_mutes()`; the held key is in the group, with that change's
+target, only when the call returns its bit. The join checks the generation only,
+not whether the held key is still reported down: the panel samples every MUTE key
+in one column, so a member's press and the held key's release can arrive in one
+pass, and the panel already reports the key up while its release waits behind the
+press; the pass's events are taken in order. The held key's release sets the
+group to its targets in one `transport_set_mutes()` call, if the group is not
+empty and the generation is the one of its press. Only that call is conditional:
+every release of the held key ends the hold, and then no key is held. A press of the
+held key itself means its release was lost: the hold and its group are dropped,
+and the press is an ordinary one that starts a new hold. After the pass's events,
+a held key that `panel_input_mute_down()` no longer reports, or whose generation
+changed (in the pass of its press too), is dropped with its group. The panic
+combo (both encoder buttons) and a flash save or load drop it where they drop the
+pad holds. Stop does not, so a group let go after Stop changes at once, and
+neither does the stop the timer makes itself on a MIDI output overflow: the UI
+does not see that panic, so the group is kept and its release changes it at once,
+as after Stop. A drop changes nothing in the transport, a withdrawn change
+included. The selector's buttons 1-8 take their track out of the group before
+`transport_toggle_mutes_now()`, and `led_state_t.mute_group` lights the group
+steady white. The hold and the group are UI state on Core 0, kept between
+transport calls that take the locks themselves: the hold adds no lock and nothing
+to the timer interrupt. The MUTE calls do lock: each holds the playback lock, and
+the shared lock inside it, for one short section, and the timer takes the shared
+lock at a step boundary where a change waits (Playback Rules).
 
 ## Storage
 
@@ -408,5 +584,7 @@ not measure RP2040 timing or analog voltages.
 
 Inspect the linked ELF/map for memory usage. Measure GPIO 7 and physical outputs
 under load before claiming an ISR budget or timing margin; the kit track's ISR
-budget, wire-level Clock interval and Core 0 interrupts-off window are bench items. See
+budget, wire-level Clock interval and Core 0 interrupts-off window are bench items,
+and so is following a real master (the latency from a received Clock to the step
+it starts, and the jitter added). See
 [HARDWARE_STATUS.md](HARDWARE_STATUS.md) for remaining checks.
