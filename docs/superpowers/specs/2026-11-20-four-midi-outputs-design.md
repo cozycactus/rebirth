@@ -32,8 +32,8 @@ outputs give four times the wire, and separate instruments per socket.
    stored port.
 4. No stop on MIDI load in Pattern and Song mode: an overloaded output skips
    Note Ons, lower tracks first, and no other output is affected.
-5. At a steady tempo a port skips nothing while its load fits its wire (the
-   density table) **(call)**.
+5. At a steady tempo a port skips nothing up to the density table's notes per
+   step **(call)**.
 
 ## Non-goals
 
@@ -169,10 +169,10 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
 
 ### The density promise
 
-A port skips nothing while its load fits the wire at the tempo played. For n
-notes per step, each a Note On and a Note Off on its own channel, the load is
-6n + 6 bytes with the Clock, so n = floor((D - 6) / 6), nominally
-floor((floor(46,875 / BPM) - 6) / 6):
+At a steady tempo a port skips nothing up to n notes per step, counted in
+charges, not in wire bytes **(call)**. For n notes per step, each a Note On and
+a Note Off on its own channel, the load is 6n + 6 bytes with the Clock, so
+n = floor((D - 6) / 6), nominally floor((floor(46,875 / BPM) - 6) / 6):
 
 | BPM | D (bytes per step) | Budget | Notes per step on one output |
 |---|---|---|---|
@@ -608,8 +608,9 @@ the PIO interrupt, and `fake_uart_run_until()` serves both by wire time **(call)
 - **Routing:** Note On / Note Off pairs on one port when the setting changes
   mid-note, ties, slides and kit voices included; Stop and Panic on every port;
   the fold to A with one present port, stored ports unchanged.
-- **Density** (`test_playback`, `test_clock`), in wire time over 64 bars
-  **(call)**: per tempo of the table, no skip
+- **Density** (`test_playback`, `test_clock`), in wire time over 64 bars, the
+  fake's byte capture drained or enlarged for them **(call)**: per tempo of the
+  table, no skip
   at the table value at gate 10, 50 and 100 %, tied, and sliding every step;
   skips above it, lower tracks first, kit voice order; the kit edge (two full
   kits plus SYNTH tracks filling the budget, gate 100 %) **(call)**; D from the
