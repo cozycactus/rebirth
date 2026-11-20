@@ -92,6 +92,19 @@ jobs:
           path: build/firmware-debug/rp2040_sequencer.uf2
           if-no-files-found: error
 
+      - name: Configure firmware for Pico 2
+        run: cmake --preset pico2-release
+
+      - name: Build firmware for Pico 2
+        run: cmake --build --preset pico2-release --parallel
+
+      - name: Upload Pico 2 UF2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pico2-sequencer-uf2
+          path: build/pico2-release/rebirth_pico2.uf2
+          if-no-files-found: error
+
   simulator:
     name: Simulator (build and checks)
     runs-on: ubuntu-latest

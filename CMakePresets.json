@@ -31,6 +31,16 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "pico2-release",
+      "inherits": "firmware-release",
+      "displayName": "Firmware Release (Pico 2, RP2350 Arm)",
+      "description": "Cross-compile optimized firmware for the Pico 2 module",
+      "binaryDir": "${sourceDir}/build/pico2-release",
+      "cacheVariables": {
+        "PICO_BOARD": "pico2"
+      }
     }
   ],
   "buildPresets": [
@@ -41,6 +51,10 @@
     {
       "name": "firmware-release",
       "configurePreset": "firmware-release"
+    },
+    {
+      "name": "pico2-release",
+      "configurePreset": "pico2-release"
     }
   ],
   "testPresets": []
