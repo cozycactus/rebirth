@@ -94,6 +94,12 @@ flash are those of the Pico. When exporting a song, choose **Pico 2 · RP2350** 
 **Плата для UF2** in the [MIDI Song importer](sim/README.md#midi-song). The Pico 2 build
 has not run on a board yet: see [HARDWARE_STATUS.md](HARDWARE_STATUS.md#needs-bench-verification).
 
+The Rev B board ([hardware/rev-b](hardware/rev-b/README.md): RP2354B or RP2350B, four MIDI OUT,
+microSD, every connector on the rear panel) has two presets, `revb-rp2354b` (2 MiB flash in the
+package) and `revb-rp2350b` (external 16 MiB flash). Both set the DAC gain to 2x; the image is
+named after the board, e.g. `build/revb-rp2354b/rebirth_revb_rp2354b.uf2`. No Rev B board has been
+built yet.
+
 The default DAC gain is 1x. For a board designed for 0-4.096 V CV, configure with
 `-DREBIRTH_CV_DAC_GAIN=2`; the DAC supply and logic interface must support it.
 See [ARCHITECTURE.md](ARCHITECTURE.md#cv-circuit) before choosing the hardware.
