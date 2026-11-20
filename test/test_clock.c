@@ -447,6 +447,72 @@ static void test_two_kits_flamming_through_bursts_never_overflow(void) {
     CHECK(jitter_stats.ext_catchups > 0);
 }
 
+// Following, a Clock read from the DIN input runs its pulse at once, the pulse queues the
+// Clock out before its notes, and the drain sends it at the next message boundary. So
+// each Clock out starts on the wire within four byte times (1,280 us) of the Clock it
+// follows being read: the output adds at most that to the input's own jitter. Here the
+// input is +-3.5 ms off its tempo and the wire is busy at every Clock: two kits with
+// every voice on every step (one flammed, its second hits on the pulses between the
+// Clocks) and six SYNTH tracks with a note on every step. The model runs the doorbell
+// as the byte is read; the device's interrupt latency is what jitter_stats measures.
+static void test_clock_out_leaves_within_four_bytes_of_clock_in(void) {
+    reset(CLOCK_SOURCE_EXT);
+    make_kit(4, 9);
+    make_kit(5, 10);
+    g_seq.kit_config[4].flam_pulses = 3;
+    uint32_t flammed = 0, plain = 0;
+    for (uint8_t lane = 1; lane < KIT_LANES; lane++) {
+        flammed = kit_set(flammed, lane, KIT_FLAM);
+        plain = kit_set(plain, lane, KIT_NOTE);
+    }
+    for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+        g_seq.patterns[0].kit_steps[4][s] = flammed;
+        g_seq.patterns[0].kit_steps[5][s] = plain;
+    }
+    sequencer_refresh_track_playback(4, 0);
+    sequencer_refresh_track_playback(5, 0);
+    for (uint8_t track = 0; track < PANEL_TRACKS; track++) {
+        if (track == 4 || track == 5) continue;
+        g_seq.patterns[0].tracks[track].type = TRACK_TYPE_SYNTH;
+        for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) set_note(0, track, s, (uint8_t)(60 + s), 0);
+    }
+    wire_time = true;                       // the wire takes 320 us a byte from here
+    fake_uart_run_until(now());
+    uint32_t t = now() + 1000;
+    clocks(t, T145, 8);                     // the tempo is known before the start
+    t += 8 * T145;
+    wire(t, MIDI_START);
+    enum { CLOCKS_IN = 96 };
+    static uint32_t read_us[CLOCKS_IN];
+    unsigned seed = 11;
+    uint32_t nominal = t;
+    for (unsigned c = 0; c < CLOCKS_IN; c++) {
+        seed = seed * 1103515245u + 12345u;
+        int32_t jitter = (int32_t)((seed >> 16) % 7001u) - 3500;   // +-3.5 ms
+        nominal += T145;
+        read_us[c] = nominal + (uint32_t)jitter;
+        wire(read_us[c], MIDI_CLOCK);
+    }
+    run_until(read_us[CLOCKS_IN - 1] + T145 - 100);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    CHECK(!midi_output_overflowed());
+    // Every Clock was taken on its own: none was owed to a catch-up, none dropped.
+    CHECK(jitter_stats.ext_catchups == 0 && jitter_stats.ext_dropped == 0);
+    unsigned clock = 0;
+    uint32_t longest = 0;
+    for (unsigned i = 0; i < fake_midi_length; i++) {
+        if (fake_midi[i] != MIDI_CLOCK) continue;
+        CHECK(clock < CLOCKS_IN);
+        uint32_t wait = fake_midi_time_us[i] - read_us[clock++];
+        CHECK(wait <= 4u * 320u);
+        if (wait > longest) longest = wait;
+    }
+    CHECK(clock == CLOCKS_IN);
+    // The load reaches the Clocks: some waited past the two bytes already in the UART,
+    // for the rest of a message.
+    CHECK(longest > 2u * 320u);
+}
+
 // ─── Start, Stop, Continue, SPP ────────────────────────────────
 
 static void test_stop_and_continue_between_sub_pulses(void) {
@@ -949,6 +1015,7 @@ int main(void) {
     RUN(test_a_burst_is_caught_up_not_played_at_once);
     RUN(test_the_backlog_is_capped);
     RUN(test_two_kits_flamming_through_bursts_never_overflow);
+    RUN(test_clock_out_leaves_within_four_bytes_of_clock_in);
     RUN(test_stop_and_continue_between_sub_pulses);
     RUN(test_a_waiting_mute_lands_on_the_bar_of_the_clock);
     RUN(test_wire_transport_is_ignored_with_int);
