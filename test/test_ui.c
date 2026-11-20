@@ -662,6 +662,49 @@ static void test_play_pressed_during_panic_does_not_fire_after_it(void) {
     CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
 }
 
+// An eight-track save (version 4: no checksum) of the locations in RAM, where
+// the firmware before 64 tracks kept it: the last 128 KiB. A record holds the
+// first eight tracks; the song after the records is empty.
+static void write_old_save(void) {
+    typedef struct {
+        step_t steps[8][STEPS_PER_PATTERN];
+        track_config_t tracks[8];
+        uint8_t length, track_length[8], swing;
+        char name[9];
+    } old_pattern_t;
+    uint8_t *old = fake_flash + 0x001e0000u;
+    memset(old, 0, 128u * 1024);
+    memcpy(old, &(uint32_t){0x52425448u}, sizeof(uint32_t));    // 'RBTH'
+    old[4] = 4;
+    for (uint8_t i = 0; i < MAX_PATTERNS; i++) {
+        const pattern_t *p = &g_seq.patterns[i];
+        old_pattern_t record;
+        memset(&record, 0, sizeof(record));
+        memcpy(record.steps, p->steps, sizeof(record.steps));
+        memcpy(record.tracks, p->tracks, sizeof(record.tracks));
+        memcpy(record.track_length, p->track_length, sizeof(record.track_length));
+        memcpy(record.name, p->name, sizeof(record.name));
+        record.length = p->length;
+        record.swing = p->swing;
+        memcpy(old + 256 + i * sizeof(record), &record, sizeof(record));
+    }
+}
+
+// With no valid current save a load gives the eight-track one, and the notice
+// names it: it may be older than the save the user meant.
+static void test_load_of_the_old_save_says_so(void) {
+    memset(fake_flash, 0xFF, sizeof(fake_flash));
+    pattern_set_step(&g_seq.patterns[5], 2, 3, 64, 100, STEP_FLAG_ACTIVE);
+    write_old_save();
+    pattern_clear(&g_seq.patterns[5]);
+    press_encoder(1, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_PATTERN_SELECT);
+    step_down(1u << 9);                     // step 10: load
+    CHECK(strcmp(ui.notify_msg, "OLD SAVE LOADED") == 0);
+    CHECK(g_seq.patterns[5].steps[2][3].note == 64);
+    memset(fake_flash, 0xFF, sizeof(fake_flash));
+}
+
 static void test_step_held_through_save_or_load_does_not_mute(void) {
     press_encoder(1, BTN_LONG_PRESS);
     CHECK(ui.mode == UI_PATTERN_SELECT);
@@ -4549,6 +4592,49 @@ static void test_pad_pressed_as_a_key_clears_its_own_launcher_hold_only(void) {
     CHECK(ui.pad_seen[0] == 0 && ui.pad_seen[2] == (1u << 1));
 }
 
+// The same on a page past the first, where the pad's column is not its track.
+// The pad stays down as a key after the keyboard turns off: it must not be a
+// copy source for the next pad of its column.
+static void key_press_ends_the_launcher_hold_of(uint8_t track) {
+    uint8_t column = track % PANEL_TRACKS;
+    enter_pattern_view();
+    ui.selected_track = track;
+    pattern_set_step(&g_seq.patterns[7], track, 3, 71, 100, STEP_FLAG_ACTIVE);
+    pattern_set_step(&g_seq.patterns[3], track, 3, 99, 100, STEP_FLAG_ACTIVE);
+    hold_pad(column, 7);                    // a launcher press: a copy source
+    CHECK(ui.pad_seen[track] == (1u << 7));
+    step_down(1u << 2);
+    hold_pad(column, 7);                    // its release was lost: now a key
+    CHECK(ui.pad_key[column][7] != 0);
+    CHECK(ui.pad_seen[track] == 0);
+    step_up(1u << 2);
+    sleep_ms(PAD_COPY_HOLD_MS);
+    hold_pad(column, 3);
+    CHECK(g_seq.patterns[3].steps[track][3].note == 99);    // not copied over
+    CHECK(transport_now().current[track] == 3);             // an ordinary launch
+}
+
+static void test_pad_pressed_as_a_key_on_a_later_page_is_no_copy_source(void) {
+    key_press_ends_the_launcher_hold_of(12);
+    reset();
+    key_press_ends_the_launcher_hold_of(60);
+}
+
+// The pad is one physical key on every page: pressed as a key, its launcher
+// hold of another page ends too, as a release ends it.
+static void test_pad_pressed_as_a_key_clears_its_launcher_hold_of_every_page(void) {
+    enter_pattern_view();
+    ui.selected_track = 4;
+    hold_pad(4, 7);
+    ui.selected_track = 12;                 // the same column, the next page
+    hold_pad(4, 6);
+    CHECK(ui.pad_seen[4] == (1u << 7) && ui.pad_seen[12] == (1u << 6));
+    step_down(1u << 2);
+    hold_pad(4, 7);                         // its release was lost: now a key
+    CHECK(ui.pad_key[4][7] != 0);
+    CHECK(ui.pad_seen[4] == 0 && ui.pad_seen[12] == (1u << 6));
+}
+
 static void test_pad_key_note_off_goes_to_the_channel_it_started_on(void) {
     keys_step_held(2, 57);
     hold_pad(0, 7);
@@ -5561,6 +5647,7 @@ int main(int argc, char **argv) {
     RUN(test_second_held_step_does_not_toggle_in_the_editor);
     RUN(test_play_pressed_during_panic_does_not_fire_after_it);
     RUN(test_step_held_through_save_or_load_does_not_mute);
+    RUN(test_load_of_the_old_save_says_so);
     RUN(test_kit_step_cycles_on_release);
     RUN(test_kit_ac_toggle_and_ch_clears_oh);
     RUN(test_kit_step_beyond_length_does_nothing);
@@ -5735,6 +5822,8 @@ int main(int argc, char **argv) {
     RUN(test_pad_pressed_with_its_step_in_one_pass_launches_and_the_frame_agrees);
     RUN(test_pad_pressed_with_the_last_step_released_follows_the_snapshot);
     RUN(test_pad_pressed_as_a_key_clears_its_own_launcher_hold_only);
+    RUN(test_pad_pressed_as_a_key_on_a_later_page_is_no_copy_source);
+    RUN(test_pad_pressed_as_a_key_clears_its_launcher_hold_of_every_page);
     RUN(test_pad_key_note_off_goes_to_the_channel_it_started_on);
     RUN(test_pad_key_released_once_when_the_generation_changes);
     RUN(test_pad_key_pressed_in_a_poll_that_lost_sync_does_not_hang);

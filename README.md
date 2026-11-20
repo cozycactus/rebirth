@@ -324,7 +324,10 @@ buttons edit it.
 Projects use format 7 and a CRC32. Loading an eight-track project (versions
 4–6) restores T1–T8 and starts the higher tracks empty. Version 6 preserves
 its kit lanes and settings. The 64-track project occupies one flash slot,
-so losing power during a save can lose that save.
+so losing power during a save can lose that save. When flash holds no valid
+64-track project (none was saved yet, or a save was cut short), LOAD gives the
+eight-track project if one is still there and shows `OLD SAVE LOADED` instead
+of `LOADED OK`.
 
 ### Kit track
 

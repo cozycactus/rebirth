@@ -7,6 +7,7 @@ extern unsigned fake_flash_erases;
 extern unsigned fake_flash_programs;
 extern uint32_t fake_flash_last_program_offset;
 extern unsigned fake_flash_program_limit;
+extern unsigned fake_flash_program_skip;    // this one call is lost; UINT32_MAX = none
 #define XIP_BASE ((uintptr_t)fake_flash)
 void flash_range_erase(uint32_t offset, size_t count);
 void flash_range_program(uint32_t offset, const uint8_t *data, size_t count);

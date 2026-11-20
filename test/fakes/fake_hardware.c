@@ -39,6 +39,7 @@ unsigned fake_flash_erases;
 unsigned fake_flash_programs;
 uint32_t fake_flash_last_program_offset;
 unsigned fake_flash_program_limit = UINT32_MAX;
+unsigned fake_flash_program_skip = UINT32_MAX;
 static bool uart_drained;
 #define FAKE_UART_BYTE_US 320u      // 10 bits at 31,250 baud
 static bool wire_time;              // set by fake_uart_run_until()
@@ -72,6 +73,7 @@ void fake_hardware_reset(void) {
     fake_flash_erases = 0;
     fake_flash_programs = 0;
     fake_flash_program_limit = UINT32_MAX;
+    fake_flash_program_skip = UINT32_MAX;
 }
 
 uint32_t spin_lock_claim_unused(bool required) {
@@ -254,7 +256,8 @@ void flash_range_erase(uint32_t offset, size_t count) {
 void flash_range_program(uint32_t offset, const uint8_t *data, size_t count) {
     assert(offset + count <= sizeof(fake_flash));
     assert(offset % 256 == 0 && count % 256 == 0);
-    if (fake_flash_programs++ >= fake_flash_program_limit) return;
+    unsigned call = fake_flash_programs++;
+    if (call >= fake_flash_program_limit || call == fake_flash_program_skip) return;
     for (size_t i = 0; i < count; i++) fake_flash[offset + i] &= data[i];
     fake_flash_last_program_offset = offset;
 }

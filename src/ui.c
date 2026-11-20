@@ -628,8 +628,10 @@ static void handle_pad_press(uint8_t track, uint8_t row, const step_buttons_t *s
     if (track < PANEL_TRACKS && row < PAD_ROWS) release_pad_key(track, row);
     if (ui.pad_keys_on && track < PANEL_TRACKS && row < PAD_ROWS) {
         // A pad shown as a key is never a copy source, and a stale hold of this
-        // very pad ends; the holds of other pads are left alone.
-        ui.pad_seen[track] &= (uint8_t)~(1u << row);
+        // very pad ends, on whichever page it was made; the holds of other
+        // pads are left alone.
+        for (uint8_t t = track; t < NUM_TRACKS; t += PANEL_TRACKS)
+            ui.pad_seen[t] &= (uint8_t)~(1u << row);
         uint8_t note = pad_key_note(ui.pad_keys_base, track, row);
         if (note != 0xFF) press_pad_key(track, row, note, steps);
         return;
@@ -1436,7 +1438,13 @@ static void handle_pattern_select(encoder_turn_t e1, encoder_turn_t e2,
             thru_release_all();
             midi_wait_output_idle();
             thru_retry_releases();
-            show_notify(flash_storage_load() ? "LOADED OK" : "LOAD FAILED");
+            // The eight-track save is named: it may not be the last one made.
+            static const char *const loaded[] = {
+                [FLASH_LOAD_FAILED] = "LOAD FAILED",
+                [FLASH_LOAD_OK] = "LOADED OK",
+                [FLASH_LOAD_OLD_SAVE] = "OLD SAVE LOADED",
+            };
+            show_notify(loaded[flash_storage_load()]);
             midi_in_gap();
             drop_step_gestures();
             drop_pad_holds();       // also when nothing was loaded
