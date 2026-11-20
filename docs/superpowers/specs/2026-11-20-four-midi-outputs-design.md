@@ -407,9 +407,12 @@ reservation is zero, so flams and keys see the real fill.
   real-time queue and Clock flag empty, then the transmitter idle (PL011:
   `uart_tx_wait_blocking`; PIO: TX FIFO empty, TXSTALL cleared and read set
   again, then one more byte time for the stop bit; one bit time would do). Its
-  three call sites: in `save_stopped()` before `multicore_lockout_start_blocking()`
+  five call sites: in `save_stopped()` before `multicore_lockout_start_blocking()`
   and again after it, before `save_and_disable_interrupts()`; in `load_stopped()`
-  before RAM is changed.
+  before RAM is changed; and in `ui.c` before a save and before a load, between
+  `thru_release_all()` and `thru_retry_releases()`, so that a pass-through
+  release a full queue refused goes out before the stall, now on whichever port
+  it is owed.
 
 ### UI and display (`ui.c`, `display.c`)
 
@@ -436,8 +439,10 @@ and 102-byte figures: the step buffer is `MIDI_STEP_BUFFER_BYTES`, 450;
 
 ## Constraints
 
-- Output A's path and the Pico builds stay as they are. Lock order stays
-  playback, then shared state or MIDI.
+- Output A's hardware path (UART0, FIFO off, its interrupt) stays as it is, and
+  the Pico builds use nothing else. The Port rows, the step budget and the skip
+  rule apply on every board: a Pico that stops on an overflow today skips notes
+  instead. Lock order stays playback, then shared state or MIDI.
 - Nothing optional may push a port's fill above 765 (asserted). `pattern_t`
   and every legacy record keep their bytes.
 
