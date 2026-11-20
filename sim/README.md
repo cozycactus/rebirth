@@ -203,7 +203,8 @@ so every part sits on the pads to launch and MUTE by hand afterwards:
   with channel 16, as the full arrangement does.
 
 The page writes the result into the simulated flash as a version 7 save
-(`Device.writeStore`), and the artist turns VALUE to the song's tempo, loads
+(`Device.writeStore`), and the artist turns VALUE to the song's tempo (the
+one it keeps longest: the device plays one tempo), loads
 the save with LOAD (step 10 in SELECT PATTERN), switches to Song mode in the
 song editor (step 2) and presses PLAY. After the song the clips stay on the
 pads, and the channel voices stay until the next start or a reboot. The

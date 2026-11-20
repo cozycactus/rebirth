@@ -214,8 +214,12 @@
     }
 
     const played = entries.slice(0, 256).reduce((n, e) => n + e.repeats, 0);
+    // The device plays one tempo: the one the song keeps longest (Snarled Up
+    // ramps through 75 BPM in its first bars and then stays at 147).
+    const tempo = song.tempos.map((t, i) => ({ us: t.us, ticks: (song.tempos[i + 1]?.tick ?? song.lastTick) - t.tick }))
+      .reduce((a, b) => b.ticks > a.ticks ? b : a);
     return {
-      title: song.title, bpm: Math.round(song.bpm * 10) / 10, bars, played, tracks, entries, channels,
+      title: song.title, bpm: Math.round(600000000 / tempo.us) / 10, bars, played, tracks, entries, channels,
       gateChannel: GATE_CHANNEL, drumChannel: DRUM_CHANNEL,
       lost: {
         offGrid: tracks.reduce((n, t) => n + t.offGrid, 0),
