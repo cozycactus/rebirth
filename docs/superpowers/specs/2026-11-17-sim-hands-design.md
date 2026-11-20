@@ -453,8 +453,10 @@ DeepSeek) led to one fix wave. What it changed against the text above:
   renderer refuses a software context (`failIfMajorPerformanceCaveat`); a lost
   WebGL context brings the ring back until it is restored. The `down` and
   `finger` classes are rebuilt from the controls the artist holds, never from
-  the plan. From disk (the 303s on the main thread) the hands are off by
-  default, as the measurement decided; the box turns them on.
+  the plan. The hands are off by default, over HTTP and from disk (the
+  owner's choice after the PR was opened; first only from disk, as the
+  measurement decided): the box turns them on, the browser keeps it, and the
+  scripts load only then.
 - Clearance and the check: every fingertip vertex is a clearance vertex; the
   check tests the whole mesh against the controls' volumes, that a grip turns
   with the knob (never more than 20.5°), that a group's fingers are on one hand

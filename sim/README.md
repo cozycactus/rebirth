@@ -404,8 +404,9 @@ hand and finger, where, when); `handrig.js` builds a hand from the model,
 poses it and fits its fingertips onto the controls, and its driver samples
 the plan into poses at the device's time; `handlayer.js` draws them in a
 WebGL2 canvas over the panel, only while a hand moves. `app.js` loads these
-scripts, with `three.js` and `handmodel.js`, one after another once the device
-is up, so the hands hold up neither the device nor the sound; from disk too.
+scripts, with `three.js` and `handmodel.js`, only once the box is ticked, one
+after another after the device is up, so the hands hold up neither the device
+nor the sound; from disk too.
 Building the hands from them (the canvas, the two rigs, shaders compiled and
 textures uploaded) is one task of 0.2–0.3 s, so it never runs while a live
 set plays: when the box is first ticked during a set (the hands not built on
@@ -423,12 +424,11 @@ once while the music plays, which may be heard (from disk the 303s and the
 SH-101s run on that thread).
 
 The checkbox "показывать руки" in the artist's card shows and hides them,
-and the browser keeps the choice. Until it is first changed it is ticked,
-except on the page opened from disk: there the 303s run on the main thread,
-the hands' heaviest frames delay them (see the frame cost below), and so the
-hands are off until the box is ticked; ticked, they are drawn lighter there
-(a 1024 px shadow map and a pixel ratio of at most 1.5, instead of 2048 and
-2). Without the hands a ring marks the control under the artist's finger, as
+and the browser keeps the choice. It is off until the user ticks it: by
+default the page shows the ring. On the page opened from disk the 303s run
+on the main thread and the hands' heaviest frames delay them (see the frame
+cost below), so ticked there the hands are drawn lighter (a 1024 px shadow
+map and a pixel ratio of at most 1.5, instead of 2048 and 2). Without the hands a ring marks the control under the artist's finger, as
 before. The ring is also what shows when the browser has no WebGL2 or would
 draw it in software, when the hands' scripts fail to load, while the WebGL
 context is lost (the hands come back when the browser restores it), for the
@@ -464,8 +464,8 @@ hands, three runs each over HTTP and six from disk:
   first poses. One interval passed 32 ms (1.5 buffers): 33.6 ms, in one of
   the six runs with the hands; none did in the runs without them. (An
   earlier round, before the last fixes to the hands, had 3 such intervals
-  in 2 of 6 runs with the hands, none without.) Hence the hands off by
-  default there.
+  in 2 of 6 runs with the hands, none without.) Hence the lighter drawing
+  there.
 - Once per page, building the hands is one task of 0.2–0.3 s, its warm-up
   (shaders compiled, textures uploaded) included, and never inside a live
   set (see above); planning a show takes 13–18 ms at its start.

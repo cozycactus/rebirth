@@ -1827,14 +1827,11 @@
   // ─── The hands ────────────────────────────────────────────────
   // Two hands drawn over the panel (handlayer.js) play what the artist does;
   // without them a ring marks the control under the artist's finger. The
-  // checkbox is kept in localStorage. Absent, it is on, except where the 303s
-  // run on the main thread (rig.js inline: the page from disk): there the
-  // hands' heaviest frames delay the 303s' callbacks (sim/README.md, "The
-  // hands"), so it is off until ticked. handsDecided settles that default
-  // before anything loads the hands.
+  // checkbox is off until the user ticks it, and kept in localStorage; the
+  // hands' scripts load only once it is ticked.
   const HANDS_KEY = 'rebirth.hands';
   const HAND_SCRIPTS = ['three.js', 'handmodel.js', 'handrig.js', 'handplan.js', 'handlayer.js'];
-  let handsLoad = null, handsChosen = false, handsDecided = Promise.resolve();
+  let handsLoad = null;
   const handsWanted = () => $('show-hands').checked;
   // Shown: wanted, loaded, able to draw (its WebGL context not lost), not
   // failed on this show, and not in a preparation faster than x16 (there
@@ -1899,7 +1896,7 @@
       }
     };
     if (handLayer) plan();
-    else handsDecided.then(() => { if (handsWanted()) loadHands().then(layer => { if (layer) plan(); }); });
+    else if (handsWanted()) loadHands().then(layer => { if (layer) plan(); });
   }
   // The hands shown or hidden: the artist's controls held at this moment
   // (as io.touch left them, whatever became of the plan) marked again, with
@@ -2044,18 +2041,11 @@
       device.play(false, device.now() + 80000);
     });
 
-    try {
-      const kept = localStorage.getItem(HANDS_KEY);
-      if (kept === 'off') $('show-hands').checked = false;
-      handsChosen = kept === 'on' || kept === 'off';
-    } catch (e) { /* not kept: the default */ }
-    if (!handsChosen && rig) {
-      handsDecided = rig.ready.then(how => {
-        if (how === 'inline' && !handsChosen) $('show-hands').checked = false;
-      }, () => { /* the hands stay on */ });
-    }
+    // Set either way: a browser may restore a form's checkbox on reload.
+    let kept = null;
+    try { kept = localStorage.getItem(HANDS_KEY); } catch (e) { /* not kept: off */ }
+    $('show-hands').checked = kept === 'on';
     $('show-hands').addEventListener('change', () => {
-      handsChosen = true;
       try { localStorage.setItem(HANDS_KEY, handsWanted() ? 'on' : 'off'); } catch (e) { /* not kept */ }
       if (handsWanted()) planHands();
     });
@@ -2065,6 +2055,6 @@
     requestAnimationFrame(frame);
     window.sim = { device, hands, get rig() { return rig; }, get ctx() { return ctx; }, get phase() { return phase; },
                    get show() { return show; }, get handLayer() { return handLayer; }, startShow, endShow, sendMidiIn };
-    if (handsWanted()) planHands();     // loads the hands once the device is up
+    if (handsWanted()) planHands();     // ticked before: loads the hands once the device is up
   });
 })();
