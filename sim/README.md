@@ -172,6 +172,61 @@ The timed player preserves note and controller events at their original
 deadlines. The physical DIN output serializes simultaneous events at its
 wire rate. Hardware synth patches are set on the instruments themselves.
 
+### Clips on the pads
+
+**Клипы на падах · песня из клипов прибора** lays the song out as the
+device's own clips (`midi_clips.js`) and lets the firmware play it from them,
+so every part sits on the pads to launch and MUTE by hand afterwards:
+
+- Each source track with notes becomes a device track: a polyphonic part one
+  track per voice (a note goes to the lowest voice free when it starts), a
+  drum part one track per drum sound (the General MIDI note the full
+  arrangement plays it with). A part with more than 31 distinct bars goes on
+  in a track of its own right after it (`+2`).
+- Each bar is a 16-step clip. A track's distinct bars are its locations in
+  the order they first play, and the first free location after them is an
+  empty clip, the one a silent bar plays (bank A for most tracks). Notes are
+  quantised to the 1/16 grid; a note of n steps is n steps of its pitch, tied
+  but for the last, whose length is the track's gate (the median of its
+  notes' last steps). Two notes on one step of one track keep the louder.
+  Controllers and pitch bend are not carried over.
+- The bars in their order are the Song-mode chain, consecutive equal bars one
+  row with repeats. The chain holds 256 rows; a longer song plays up to the
+  bar where its 257th row would begin, and the log says how far (five of the
+  eight Twisted songs stop 4–79 bars before their end).
+- MIDI channels: the drums on 10, the Midi Gate part on 16, every other part
+  on 1–9 or 11–15. The busiest parts get a channel each while there are
+  channels left, a part with its own TAL preset too; the others share one
+  with parts of their role that play neither in their bars nor next to them.
+  The page sounds each channel through one SH-101 voice with the preset,
+  knobs and level of its busiest part, and gates the voices of gated parts
+  with channel 16, as the full arrangement does.
+
+The page writes the result into the simulated flash as a version 7 save
+(`Device.writeStore`), and the artist turns VALUE to the song's tempo, loads
+the save with LOAD (step 10 in SELECT PATTERN), switches to Song mode in the
+song editor (step 2) and presses PLAY. After the song the clips stay on the
+pads, and the channel voices stay until the next start or a reboot. The
+device is still in Song mode then, where pads are refused: step 3 in the song
+editor (VALUE long, then TRACK long) brings Pattern mode back, and each pad
+launches its part's clip. `sim/test/midi_clips_check.js` checks the save
+layout against one the firmware writes, LOAD of every Twisted song, that two
+of them, one longer than the chain, sound every note start at its step on
+its channel, and that a part's pad plays its clip after the chain.
+
+### Part sounds by ear
+
+In **Полная MIDI-аранжировка**, a part's panel (the SH-101 panel of its role,
+part chosen under **MIDI-партия**) changes its knobs and its level while the
+song plays; **соло** next to the level leaves that part alone (with the
+gate). **Начать с такта** starts the arrangement at a bar. Whatever a panel
+changes is kept in the browser (localStorage) per song and part and applies
+on the next load, over `songs/twisted/parts.json`, the library's tuned
+sounds, which in turn apply over the TAL presets. **Скачать звуки партий**
+saves everything tuned, both merged, as a `parts.json` to put in the library;
+**Сбросить звуки этой песни** drops this browser's edits of the selected
+song. The clips on the pads take the same sounds.
+
 ## SH-101
 
 BASS (MIDI channel 3), LEAD (channel 6), ARP (channel 7), FX (channel 8) and

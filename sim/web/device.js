@@ -106,6 +106,13 @@
     gates() { return (this.core._sim_gpio_levels() >>> PIN.GATES[0]) & 15; }
     dac(channel) { return this.core.HEAPU16[(this.core._sim_dac() >> 1) + channel]; }
     dacVolts(code) { return code * this.dacVoltsPerCode; }
+    // A save image written into the project's flash slot, as a UF2 would put
+    // it there; the firmware reads it on LOAD (MidiClips.store makes one).
+    writeStore(bytes) {
+      const c = this.core;
+      if (bytes.length > c._sim_flash_store_size()) throw Error('Образ больше слота сохранения.');
+      c.HEAPU8.set(bytes, c._sim_flash_store());
+    }
     openMidiSong(bytes) {
       const c = this.core;
       if (!c._sim_midi_song_slot || bytes.length > c._sim_midi_song_capacity() || this.inspect().state !== 0) return false;
