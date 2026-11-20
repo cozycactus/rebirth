@@ -16,9 +16,12 @@
   const MELODIC_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14];
   const ACTIVE = 1, TIE = 8;
 
-  // The version 7 save (src/flash_storage.c), as the wasm32 and RP2040 ABIs lay
-  // out pattern_t, song_t and kit_config_t. sim/test/midi_clips_check.js checks
-  // these against a save the firmware writes itself.
+  // The version 7 save (src/flash_storage.c) as the simulator's wasm32 build
+  // lays out pattern_t, song_t and kit_config_t (4-byte enums).
+  // sim/test/midi_clips_check.js checks it against a save that build writes.
+  // The RP2040 build packs enums into a byte (track_config_t 7 bytes, pattern_t
+  // 4108, song_t 16652), so this image is for the simulator only: an image for
+  // the board needs that layout.
   const PAGE = 256, PATTERN_BYTES = 4684, SONG_BYTES = 16660, KIT_BYTES = 15;
   const PAT_OFFSET = PAGE, SONG_OFFSET = PAT_OFFSET + Math.ceil(PATTERN_BYTES * LOCATIONS / PAGE) * PAGE;
   const KIT_OFFSET = SONG_OFFSET + Math.ceil(SONG_BYTES / PAGE) * PAGE;
@@ -45,15 +48,18 @@
   }
 
   // One voice per track: each note goes to the lowest voice that is free when
-  // it starts (quantised), so a chord's notes land on separate tracks.
+  // it starts, so a chord's notes land on separate tracks. A voice is free
+  // when its last note ends by this one's start on the grid, or in the file
+  // up to half a step after it (a legato overlap); two notes that follow each
+  // other within one step stay one voice, where the grid keeps the louder.
   function voices(notes, step) {
     const sorted = notes.slice().sort((a, b) => a.tick - b.tick || a.note - b.note);
     const ends = [], out = [];
     for (const n of sorted) {
       const s = Math.round(n.tick / step), e = s + Math.max(1, Math.round((n.end - n.tick) / step));
-      let v = ends.findIndex(end => end <= s);
-      if (v < 0) { v = ends.length; ends.push(0); out.push([]); }
-      ends[v] = e;
+      let v = ends.findIndex(end => end.grid <= s || end.tick <= n.tick + step / 2);
+      if (v < 0) { v = ends.length; ends.push(null); out.push([]); }
+      ends[v] = { grid: e, tick: n.end };
       out[v].push(n);
     }
     return out;
@@ -90,7 +96,6 @@
 
   function plan(song) {
     const step = song.ppqn / 4;
-    const bars = Math.ceil((song.lastTick + 1) / (step * STEPS));
     const tracks = [], parts = [];
     for (const raw of song.tracks) {
       const part = raw.role ? raw : MidiSongs.tag(raw);
@@ -118,6 +123,10 @@
     }
     if (tracks.length > NUM_TRACKS) throw Error('Партий с голосами ' + tracks.length + ', а треков 64.');
 
+    // The bars up to the end of the track chunks (an end on a bar line ends
+    // the bar before it), and the bar of any note quantised past that.
+    let bars = Math.max(1, Math.ceil(song.lastTick / (step * STEPS)));
+    for (const track of tracks) for (const n of track.notes) bars = Math.max(bars, Math.floor(Math.round(n.tick / step) / STEPS) + 1);
     for (const track of tracks) Object.assign(track, grid(track.notes, step, bars));
 
     // Melodic parts share a channel with parts of the same kind (role and
@@ -148,13 +157,24 @@
         ch = { key: info.key, channel: free.shift(), bars: new Set(), parts: [], poly: 0 };
         channels.push(ch);
       }
-      if (!ch) ch = clear.find(role) || clear[0];
+      // Not with a part gated otherwise: the channel's voice is gated or not.
+      const gating = c => c.key.endsWith(' gated') === !!info.part.gated;
+      // With no channel left, a part of the same kind that overlaps least
+      // (its notes add voices) comes before a quiet channel of another role,
+      // whose preset would be wrong; a role gated otherwise comes last.
+      const same = channels.filter(c => c.key === info.key);
+      const least = pool => pool.reduce((a, b) => overlap(b, info) < overlap(a, info) ? b : a);
       if (ch) ch.poly = Math.max(ch.poly, info.tracks.length);
-      else {
-        const same = channels.filter(c => c.key === info.key);
-        const pool = same.length ? same : channels;
-        ch = pool.reduce((a, b) => overlap(b, info) < overlap(a, info) ? b : a);
+      else if (same.length) {
+        ch = least(same);
         ch.poly += info.tracks.length;
+      } else {
+        ch = clear.find(c => role(c) && gating(c)) || clear.find(gating) || clear.find(role) || clear[0];
+        if (ch) ch.poly = Math.max(ch.poly, info.tracks.length);
+        else {
+          ch = least(channels);
+          ch.poly += info.tracks.length;
+        }
       }
       for (const b of info.active) ch.bars.add(b);
       ch.parts.push(info.part);
@@ -176,21 +196,36 @@
         return t;
       };
       layer();
-      for (let b = 0; b < bars; b++) {
-        const cells = track.cells.slice(b * STEPS, (b + 1) * STEPS);
-        const sig = cells.map(c => c ? c.note + '/' + c.vel + '/' + c.flags : '').join(',');
+      const sigOf = b => track.cells.slice(b * STEPS, (b + 1) * STEPS)
+        .map(c => c ? c.note + '/' + c.vel + '/' + c.flags : '').join(',');
+      // Bars a tied note crosses into go on one track together: a tie
+      // sounds on only within a track.
+      const tiedInto = b => {
+        const last = track.cells[b * STEPS - 1], first = track.cells[b * STEPS];
+        return b > 0 && last && first && (last.flags & TIE) && first.note === last.note;
+      };
+      for (let b = 0; b < bars;) {
+        let e = b;
+        while (e + 1 < bars && tiedInto(e + 1)) e++;
+        const group = [];
+        for (let k = b; k <= e; k++) if (/\d/.test(sigOf(k))) group.push(k);
+        const sigs = [...new Set(group.map(sigOf))];
         let owner = null;
-        if (cells.some(Boolean)) {
-          owner = layers.find(l => l.ids.has(sig));
-          if (!owner) {
-            owner = layers[layers.length - 1];
-            if (owner.clips.length >= SILENT) owner = layer();
-            owner.ids.set(sig, owner.clips.length);
-            owner.clips.push(cells);
+        if (group.length) {
+          const missing = l => sigs.filter(x => !l.ids.has(x)).length;
+          owner = layers.filter(l => l.clips.length + missing(l) <= SILENT)
+            .sort((x, y) => missing(x) - missing(y))[0] || layer();
+          for (const x of sigs) if (!owner.ids.has(x) && owner.clips.length < SILENT) {
+            owner.ids.set(x, owner.clips.length);
+            owner.clips.push(track.cells.slice(group.find(k => sigOf(k) === x) * STEPS, (group.find(k => sigOf(k) === x) + 1) * STEPS));
           }
-          owner.cells.splice(b * STEPS, STEPS, ...cells);
         }
-        for (const l of layers) l.locations[b] = l === owner ? l.ids.get(sig) : null;
+        for (let k = b; k <= e; k++) {
+          const x = sigOf(k), here = owner && owner.ids.has(x) ? owner : layers.find(l => l.ids.has(x));
+          if (here) here.cells.splice(k * STEPS, STEPS, ...track.cells.slice(k * STEPS, (k + 1) * STEPS));
+          for (const l of layers) l.locations[k] = l === here ? l.ids.get(x) : null;
+        }
+        b = e + 1;
       }
       // A silent bar plays the first free location, an empty clip next to
       // the track's own, so it stays in bank A for most tracks (a MUTE key
@@ -214,12 +249,18 @@
     }
 
     const played = entries.slice(0, 256).reduce((n, e) => n + e.repeats, 0);
-    // The device plays one tempo: the one the song keeps longest (Snarled Up
-    // ramps through 75 BPM in its first bars and then stays at 147).
-    const tempo = song.tempos.map((t, i) => ({ us: t.us, ticks: (song.tempos[i + 1]?.tick ?? song.lastTick) - t.tick }))
-      .reduce((a, b) => b.ticks > a.ticks ? b : a);
+    // The device plays one tempo: the one the song keeps longest, summed over
+    // its stretches (Snarled Up ramps through 75 BPM in its first bars and
+    // then stays at 147), within the firmware's 20-300 BPM.
+    const kept = new Map();
+    song.tempos.forEach((t, i) => {
+      const ticks = Math.max(0, (song.tempos[i + 1]?.tick ?? song.lastTick) - t.tick);
+      kept.set(t.us, (kept.get(t.us) || 0) + ticks);
+    });
+    const us = [...kept].reduce((a, b) => b[1] > a[1] ? b : a)[0];
+    const bpm = Math.min(300, Math.max(20, Math.round(600000000 / us) / 10));
     return {
-      title: song.title, bpm: Math.round(600000000 / tempo.us) / 10, bars, played, tracks, entries, channels,
+      title: song.title, bpm, bars, played, tracks, entries, channels,
       gateChannel: GATE_CHANNEL, drumChannel: DRUM_CHANNEL,
       lost: {
         offGrid: tracks.reduce((n, t) => n + t.offGrid, 0),
@@ -261,7 +302,7 @@
         bytes[o + 5] = track && track.drum ? track.drum : Math.min(127, 36 + t);
         view.setUint32(o + 8, 0, true);         // MIDI only
         bytes[o + 12] = 0;
-        bytes[o + 13] = track ? (track.type === 1 ? 50 : track.gate) : 50;
+        bytes[o + 13] = track ? track.gate : 50;
         bytes[o + 14] = 0;
         bytes[at + 4097 + t] = STEPS;
       }
