@@ -18,6 +18,30 @@
   let show = null, phase = 'idle';  // idle | prep | live
   let showPatch = [];
   let importedSongs = [], midiRun = null, launchSerial = 0;
+  // A MIDI song laid out as the device's clips (midi_clips.js): its plan and
+  // the SH-101 voices its MIDI channels play, kept until the next start or a
+  // reboot, so the pads still sound the song's parts after it has played.
+  let padsRun = null;
+  // The part that plays alone in the full arrangement (its track), or null:
+  // set by a part panel's solo box, dropped when that panel's part or parts
+  // change and when the song ends.
+  let soloPart = null;
+  // A solo starting lets go of the notes the other parts hold (the gate's
+  // aside), so it is alone at once.
+  function releaseOthers(part) {
+    if (!midiRun?.player || !midiRun.held) return;
+    const { song, player, held } = midiRun;
+    for (const [key, n] of held) {
+      const track = key >> 11, channel = (key >> 7) & 15, note = key & 127;
+      if (track === part || song.tracks[track]?.role === 'gate') continue;
+      for (let i = 0; i < n; i++) player.midi({ track, status: 0x80 | channel, d1: note, d2: 0 }, ctx.currentTime);
+      held.delete(key);
+    }
+  }
+  function clearSolo() {
+    soloPart = null;
+    document.querySelectorAll('.part-solo input').forEach(box => { box.checked = false; });
+  }
   const knobAngle = [0, 0];
   const anims = {};               // rig knob moves in progress, for the sliders
 
@@ -394,7 +418,9 @@
     if (!parts.length) { userSet(role + '.' + name, value); return; }
     for (const part of parts) {
       (part.controls ||= {})[name] = value;
+      (part.userControls ||= {})[name] = value;
       midiRun?.player?.control(part.track, name, value);
+      keepPartSound(part);
     }
   }
 
@@ -856,7 +882,97 @@
     return MidiSongs.image(song, Object.fromEntries(song.tracks.filter(p => p.route).map(p => [p.track, p.route])));
   }
 
+  // ─── Part sounds, tuned by ear ────────────────────────────────
+  // Per song title and part name: the SH-101 knobs a part's panel changed
+  // and its level. The library's parts.json comes first, this browser's
+  // edits (localStorage) over it; the TAL preset stays under both.
+  const PART_SOUNDS_KEY = 'rebirth.partSounds.v1';
+  let bundledSounds = {};
+  function keptSounds() {
+    try { return JSON.parse(localStorage.getItem(PART_SOUNDS_KEY) || '{}'); } catch (e) { return {}; }
+  }
+  // Only what this browser's user changed is kept (userControls, levelUser),
+  // so a later parts.json still reaches the knobs the user left alone.
+  function applyPartSounds(songs) {
+    const kept = keptSounds();
+    for (const song of songs) for (const part of song.tracks) {
+      const a = bundledSounds[song.title]?.[part.name], b = kept[song.title]?.[part.name];
+      if (!a && !b) continue;
+      part.controls = { ...a?.controls, ...b?.controls };
+      part.userControls = { ...b?.controls };
+      if (b?.levelDb !== undefined) { part.levelDb = b.levelDb; part.levelUser = true; }
+      else if (a?.levelDb !== undefined) part.levelDb = a.levelDb;
+    }
+  }
+  function keepPartSound(part) {
+    const song = importedSongs.find(s => s.tracks.includes(part));
+    if (!song) return;
+    const kept = keptSounds();
+    const entry = ((kept[song.title] ||= {})[part.name] = {});
+    if (part.userControls && Object.keys(part.userControls).length) entry.controls = part.userControls;
+    if (part.levelUser) entry.levelDb = part.levelDb;
+    try { localStorage.setItem(PART_SOUNDS_KEY, JSON.stringify(kept)); } catch (e) { /* not kept */ }
+    showSoundsStatus();
+  }
+  // Everything tuned, the library's file and this browser's edits merged, in
+  // the form of parts.json.
+  function allPartSounds() {
+    const out = JSON.parse(JSON.stringify(bundledSounds)), kept = keptSounds();
+    for (const [title, parts] of Object.entries(kept)) for (const [name, entry] of Object.entries(parts)) {
+      const into = ((out[title] ||= {})[name] ||= {});
+      if (entry.controls) into.controls = { ...into.controls, ...entry.controls };
+      if (entry.levelDb !== undefined) into.levelDb = entry.levelDb;
+    }
+    return out;
+  }
+  function showSoundsStatus() {
+    const song = selectedMidiSong(), kept = song && keptSounds()[song.title];
+    const n = kept ? Object.keys(kept).length : 0;
+    $('part-sounds-status').textContent = n ? 'Подстроено партий в этом браузере: ' + n : '';
+  }
+  function initPartSounds() {
+    $('part-sounds-export').addEventListener('click', () => {
+      const text = JSON.stringify(allPartSounds(), null, 2) + '\n';
+      const url = URL.createObjectURL(new Blob([text], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'parts.json';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const status = text => { $('part-sounds-status').textContent = text; };
+      status('parts.json скачан');
+      navigator.clipboard?.writeText(text).then(() => status('parts.json скачан и скопирован в буфер обмена'), () => {});
+    });
+    $('part-sounds-reset').addEventListener('click', () => {
+      const song = selectedMidiSong();
+      if (!song) return;
+      const kept = keptSounds();
+      delete kept[song.title];
+      try { localStorage.setItem(PART_SOUNDS_KEY, JSON.stringify(kept)); } catch (e) { /* not kept */ }
+      for (const part of song.tracks) {
+        delete part.controls;
+        delete part.userControls;
+        if (part.levelUser) { delete part.levelDb; delete part.levelUser; }
+      }
+      applyPartSounds([song]);
+      // The knobs change at once in a playing arrangement; a level the user
+      // set goes back to the automatic one at the next start.
+      if (midiRun?.player && midiRun.song === song) {
+        for (const part of song.tracks) {
+          if (!part.notes || part.drum || part.role === 'gate') continue;
+          const patch = { ...window.SH101.defaults(part.role), ...part.patch?.settings, ...part.controls };
+          for (const [id, value] of Object.entries(patch)) midiRun.player.control(part.track, id, value);
+        }
+      }
+      refreshMidiParts();
+      for (const panel of Object.values(sh101Panels)) panel.choosePart(-2);
+      showSoundsStatus();
+    });
+    $('show-song').addEventListener('change', showSoundsStatus);
+  }
+
   async function initMidiLibrary() {
+    initPartSounds();
     const select = $('show-song');
     const group = document.createElement('optgroup');
     group.label = 'Импортированные MIDI';
@@ -865,6 +981,7 @@
       try {
         const result = await MidiSongs.load(files);
         importedSongs = result.songs;
+        applyPartSounds(importedSongs);
         group.replaceChildren();
         importedSongs.forEach((song, i) => group.appendChild(new Option(song.title + ' · ' +
           Math.round(song.bpm) + ' BPM · ' + song.tracks.length + ' дор.', 'midi:' + i)));
@@ -898,6 +1015,10 @@
       for (const folder of folders) {
         const response = await fetch(folder + 'catalog.json');
         if (response.status === 404 && folder.startsWith('./local-songs/')) continue;
+        try {
+          const sounds = await fetch(folder + 'parts.json');
+          if (sounds.ok) bundledSounds = await sounds.json();
+        } catch (e) { /* the library plays with the presets alone */ }
         if (!response.ok) throw Error('Не удалось загрузить список песен Twisted.');
         const paths = await response.json();
         const files = await Promise.all(paths.map(async path => {
@@ -946,7 +1067,17 @@
     gain.step = 1;
     gain.setAttribute('aria-label', 'Уровень MIDI-партии, дБ');
     trackLevel.hidden = true;
-    trackLevel.append('Уровень партии ', gain, levelReadout);
+    const solo = document.createElement('label'), soloBox = document.createElement('input');
+    soloBox.type = 'checkbox';
+    solo.append(soloBox, ' соло');
+    solo.title = 'В полной аранжировке звучит только эта партия (и гейт)';
+    soloBox.addEventListener('change', () => {
+      soloPart = soloBox.checked && selectedPart ? selectedPart.track : null;
+      document.querySelectorAll('.part-solo input').forEach(box => { if (box !== soloBox) box.checked = false; });
+      if (soloPart !== null) releaseOthers(soloPart);
+    });
+    solo.className = 'part-solo';
+    trackLevel.append('Уровень партии ', gain, levelReadout, ' ', solo);
     details.querySelector('.sh101-transport').appendChild(trackLevel);
     let parts = [], selectedPart = null, groupSelected = false;
     const targets = () => groupSelected ? parts : selectedPart ? [selectedPart] : [];
@@ -962,10 +1093,12 @@
       levelReadout.textContent = ' ' + gain.value + ' дБ';
     }
     function choosePart(track) {
+      if (soloBox.checked && selectedPart?.track !== track) clearSolo();
       groupSelected = track === -2 && !!parts.length;
       selectedPart = parts.find(part => part.track === track) ?? null;
       partSelect.value = groupSelected ? '-2' : selectedPart ? String(selectedPart.track) : '-1';
       trackLevel.hidden = !selectedPart;
+      soloBox.checked = !!selectedPart && soloPart === selectedPart.track;
       const representative = selectedPart ?? (groupSelected ? parts.find(p => midiRun?.active?.[p.track]) ?? parts[0] : null);
       const patch = representative && { ...window.SH101.defaults(role), ...representative.patch?.settings, ...representative.controls };
       for (const def of window.SH101.controls) {
@@ -977,7 +1110,12 @@
       syncControls();
     }
     function showParts(next) {
-      if (next.length === parts.length && next.every((part, i) => part === parts[i])) { showPartLevel(); return; }
+      if (next.length === parts.length && next.every((part, i) => part === parts[i])) {
+        soloBox.checked = !!selectedPart && soloPart === selectedPart.track;
+        showPartLevel();
+        return;
+      }
+      if (soloBox.checked) clearSolo();
       parts = next;
       partPicker.hidden = !parts.length;
       partSelect.replaceChildren(new Option('Весь канал ' + role.toUpperCase(), '-2'), new Option('Панель · MIDI/ROM', '-1'));
@@ -988,6 +1126,8 @@
     gain.addEventListener('input', () => {
       if (!selectedPart) return;
       selectedPart.levelDb = Number(gain.value);
+      selectedPart.levelUser = true;
+      keepPartSound(selectedPart);
       levelReadout.textContent = ' ' + gain.value + ' дБ';
       midiRun?.player?.level(selectedPart.track, selectedPart.levelDb);
     });
@@ -1367,12 +1507,21 @@
     }
     if (m.status === 0xFA) { lastClock = 0; clockPeriod = 0; }
     if (m.status === 0xFC && sounding()) rig.allOff(audioTime(m.t), false);
+    if (m.status === 0xFC) releasePads(m.t);
     if (m.status >= 0xF0) {
       midiLines.push((m.t / 1e6).toFixed(3) + '  ' + ({ 0xFA: 'Start', 0xFC: 'Stop', 0xFB: 'Continue' }[m.status] || m.status.toString(16)));
       return;
     }
     const channel = m.status & 15, kind = m.status & 0xF0;
-    if (sounding()) rig.midi(m.status, m.d1, m.d2, audioTime(m.t));
+    if (padsRun?.channels.has(channel)) {
+      // A Note Off reaches the voice even with the sound off, so nothing
+      // hangs when it comes back on; Stop lets go of whatever is still held.
+      const off = kind === 0x80 || (kind === 0x90 && !m.d2), key = channel * 128 + m.d1;
+      if (kind === 0x90 && m.d2) padsRun.held.add(key);
+      else if (off) padsRun.held.delete(key);
+      if (sounding() || off) padsRun.player.midi({ track: channel, status: m.status, d1: m.d1, d2: m.d2 },
+                                                 sounding() ? audioTime(m.t) : ctx.currentTime);
+    } else if (sounding()) rig.midi(m.status, m.d1, m.d2, audioTime(m.t));
     if (kind === 0x90 && m.d2 > 0) {
       const inst = stripOf(channel, m.d1);
       if (inst !== undefined) flashStrip(inst, m.t);
@@ -1588,7 +1737,23 @@
       }
       while (midiRun.cursor < song.events.length && song.events[midiRun.cursor].t <= until) {
         const e = song.events[midiRun.cursor++];
-        player.midi(e, Math.max(now, start + e.t / 1e6));
+        const at = Math.max(now, start + e.t / 1e6);
+        // A note plays unless a solo leaves its part out; a Note Off goes
+        // out only for a Note On that went out (one before a seek's start,
+        // or one the solo held back, must not end a note struck since).
+        const key = (e.track * 16 + (e.status & 15)) * 128 + e.d1;
+        if (MidiSongs.noteOn(e)) {
+          if (soloPart === null || e.track === soloPart || song.tracks[e.track].role === 'gate') {
+            player.midi(e, at);
+            midiRun.held.set(key, (midiRun.held.get(key) || 0) + 1);
+          }
+        } else if (MidiSongs.noteOff(e)) {
+          const n = midiRun.held.get(key) || 0;
+          if (n) {
+            player.midi(e, at);
+            if (n > 1) midiRun.held.set(key, n - 1); else midiRun.held.delete(key);
+          }
+        } else player.midi(e, at);
         const on = MidiSongs.noteOn(e);
         if (on) midiRun.active[e.track]++;
         else if (MidiSongs.noteOff(e) && midiRun.active[e.track]) midiRun.active[e.track]--;
@@ -1625,6 +1790,7 @@
     const imported = selectedMidiSong();
     if (imported) { startMidiSong(imported); return; }
     startAudio();
+    stopPads();
     hands.clear();
     releaseAll();
     bootDevice();
@@ -1649,6 +1815,8 @@
   async function startMidiSong(song) {
     const request = ++launchSerial;
     const firmware = $('midi-song-mode').value === 'firmware';
+    const pads = $('midi-song-mode').value === 'pads';
+    stopPads();
     $('show-start').disabled = true;
     $('show-stop').disabled = false;
     try {
@@ -1664,7 +1832,30 @@
       speed = 1;
       lastWall = wall();
       $('log').replaceChildren();
-      if (firmware) {
+      if (pads) {
+        if (!rig) throw Error('Нет звукового движка.');
+        const plan = MidiClips.plan(song);
+        device.writeStore(MidiClips.store(plan));
+        phase = 'midi-loading';
+        const player = await rig.midiParts(channelSong(plan));
+        if (request !== launchSerial) { player.stop(ctx.currentTime); return; }
+        const run = MidiClips.show(plan, device.now() + 300000);
+        const barUs = Math.floor(60000000 / (plan.bpm * 96)) * 24 * 16;
+        show = { actions: run.actions, prepEnd: run.playAt - 200000, t0: run.playAt, barUs,
+                 end: run.playAt + plan.played * barUs + 1500000 };
+        Artist.schedule(show, device, hands, io);
+        padsRun = { plan, player, held: new Set(),
+                    channels: new Set([...plan.channels.map(c => c.channel), plan.gateChannel]) };
+        say('info', '«' + plan.title + '»: ' + plan.tracks.length + ' треков, ' + plan.channels.length +
+            ' MIDI-каналов синтов + барабаны на 10-м; вне сетки 1/16 сдвинуто нот: ' + plan.lost.offGrid +
+            ', слито на одном шаге: ' + plan.lost.merged + ', CC и Pitch Bend не перенесены: ' + plan.lost.controllers +
+            (plan.lost.entries ? '. В цепочку прибора вошли 256 строк из ' + plan.entries.length +
+             ': песня играет до такта ' + plan.played + ' из ' + plan.bars : '') +
+            '. После песни пады играют партии в режиме Pattern: VALUE долго, TRACK долго, кнопка 3.');
+        phase = 'prep';
+        speed = 1;                // the artist loads it at a hand's pace
+        refreshMidiParts();       // the part panels edit the full arrangement only
+      } else if (firmware) {
         if (!device.openMidiSong(firmwareMidiImage(song))) throw Error('Прошивка отклонила образ MIDI Song.');
         midiRun = { song, firmware, start: device.now() };
         phase = 'midi-firmware';
@@ -1678,9 +1869,15 @@
         phase = 'midi-loading';
         const player = await rig.midiParts(song);
         if (request !== launchSerial) { player.stop(ctx.currentTime); return; }
+        // From the bar asked for: the events before it are skipped, the tempo
+        // is the one in force there.
+        const from = song.timeAt(Math.max(0, (Math.round(+$('midi-song-from').value) || 1) - 1) * 4 * song.ppqn);
+        let cursor = song.events.findIndex(e => e.t >= from), tempo = 0;
+        if (cursor < 0) cursor = song.events.length;
+        while (tempo + 1 < song.tempos.length && song.tempos[tempo + 1].time <= from) tempo++;
         midiRun = {
-          song, player, cursor: 0, tempo: 0, active: new Uint16Array(song.tracks.length),
-          start: ctx.currentTime + 0.1,
+          song, player, cursor, tempo, active: new Uint16Array(song.tracks.length), held: new Map(),
+          start: ctx.currentTime + 0.1 - from / 1e6,
         };
         phase = 'midi-full';
         refreshMidiParts();
@@ -1689,8 +1886,36 @@
       if (request === launchSerial) endShow(error.message);
     }
   }
+  // One SH-101 voice per MIDI channel of the laid-out song, with the preset,
+  // knobs and level of the busiest part on that channel; the gate channel
+  // gates the voices of the gated parts, as in the full arrangement.
+  // Channel 10 (the drums) stays with the rig's kit.
+  function channelSong(plan) {
+    const tracks = Array.from({ length: 16 }, (_, c) => ({ track: c, name: 'CH ' + (c + 1), notes: 0, events: [] }));
+    for (const ch of plan.channels) {
+      const first = ch.parts.reduce((a, b) => b.notes > a.notes ? b : a);
+      // A channel's voice is gated only when every part on it is.
+      tracks[ch.channel] = { ...first, track: ch.channel, poly: Math.max(1, ch.poly), drum: undefined, notes: 1,
+                             gated: ch.parts.every(part => part.gated) };
+    }
+    tracks[plan.gateChannel] = { track: plan.gateChannel, name: 'Gate', role: 'gate', notes: 1, events: [] };
+    return { tracks };
+  }
+  function releasePads(t) {
+    if (!padsRun) return;
+    const at = sounding() ? audioTime(t) : ctx.currentTime;
+    for (const key of padsRun.held) padsRun.player.midi({ track: key >> 7, status: 0x80 | (key >> 7), d1: key & 127, d2: 0 }, at);
+    padsRun.held.clear();
+  }
+  function stopPads() {
+    if (!padsRun) return;
+    padsRun.player.stop(ctx.currentTime);
+    padsRun = null;
+  }
   function endShow(message) {
     launchSerial++;
+    clearSolo();
+    if (phase === 'prep') stopPads();   // stopped before the song was loaded
     midiRun?.player?.stop(ctx.currentTime);
     midiRun = null;
     hands.clear();
@@ -1707,10 +1932,13 @@
   }
   // A hand on the panel during the show takes it away from the artist.
   function takeOver() {
-    if (phase === 'prep' || phase === 'live') endShow('Артист остановлен: управление у вас.');
+    if (phase === 'prep' || phase === 'live' || phase === 'midi-loading') endShow('Артист остановлен: управление у вас.');
   }
   function reboot() {
+    launchSerial++;               // a start still waiting for the audio gives up
     if (phase !== 'idle') endShow();
+    clearSolo();
+    stopPads();
     hands.clear();
     releaseAll();
     bootDevice();

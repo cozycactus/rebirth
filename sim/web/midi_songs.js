@@ -270,7 +270,7 @@
     return bytes;
   }
 
-  const api = { read, load, image, uf2, noteOn, noteOff };
+  const api = { read, load, image, uf2, noteOn, noteOff, tag: tagPart };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MidiSongs = api;
 })(globalThis);

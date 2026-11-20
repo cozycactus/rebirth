@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # The files of the page this script owns in the site's rebirth/ folder.
-PAGE_FILES="index.html app.js artist.js device.js rig.js acid.js dsp.js sh101.js sh101_cpu.js sh101_rom.js midi_songs.js core.js version.js"
+PAGE_FILES="index.html app.js artist.js device.js rig.js acid.js dsp.js sh101.js sh101_cpu.js sh101_rom.js midi_songs.js midi_clips.js core.js version.js"
 SONG_LIBRARY="songs/twisted"
 
 fail() { echo "publish: $*" >&2; exit 1; }

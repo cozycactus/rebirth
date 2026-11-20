@@ -1,0 +1,377 @@
+// A Standard MIDI File laid out as the device's own clips. Each SMF track
+// with notes becomes one or more device tracks (a polyphonic part one track
+// per voice, a drum part one track per drum sound), each bar a 16-step clip,
+// the distinct bars of a track its locations, and the song's order of bars a
+// Song-mode chain. The result is a version 7 save image that the firmware
+// loads with LOAD, as if it had saved it itself; the page writes it into the
+// simulated flash (Device.writeStore). Notes are quantised to the 1/16 grid;
+// controllers and pitch bend are not carried over. The chain holds 256 rows:
+// a longer song plays up to the bar where its 257th row would start.
+(function (root) {
+  'use strict';
+
+  const MidiSongs = root.MidiSongs || (typeof require !== 'undefined' ? require('./midi_songs.js') : null);
+  const NUM_TRACKS = 64, LOCATIONS = 32, STEPS = 16, SILENT = LOCATIONS - 1;
+  const DRUM_CHANNEL = 9, GATE_CHANNEL = 15;
+  const MELODIC_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14];
+  const ACTIVE = 1, TIE = 8;
+
+  // The version 7 save (src/flash_storage.c) as the simulator's wasm32 build
+  // lays out pattern_t, song_t and kit_config_t (4-byte enums).
+  // sim/test/midi_clips_check.js checks it against a save that build writes.
+  // The RP2040 build packs enums into a byte (track_config_t 7 bytes, pattern_t
+  // 4108, song_t 16652), so this image is for the simulator only: an image for
+  // the board needs that layout.
+  const PAGE = 256, PATTERN_BYTES = 4684, SONG_BYTES = 16660, KIT_BYTES = 15;
+  const PAT_OFFSET = PAGE, SONG_OFFSET = PAT_OFFSET + Math.ceil(PATTERN_BYTES * LOCATIONS / PAGE) * PAGE;
+  const KIT_OFFSET = SONG_OFFSET + Math.ceil(SONG_BYTES / PAGE) * PAGE;
+  const STORE_BYTES = 192 * 1024;
+  const KIT_DEFAULT = [36, 38, 45, 47, 50, 37, 39, 42, 46, 49, 51, 80, 110, 127, 3];
+  const DRUM_NAME = { 36: 'BD', 38: 'SD', 39: 'CP', 42: 'CH', 44: 'PH', 46: 'OH', 49: 'CY', 54: 'TB', 57: 'RC', 37: 'RS' };
+
+  function notesOf(part) {
+    const notes = [], open = new Map();
+    for (const e of part.events) {
+      const key = (e.status & 15) * 128 + e.d1;
+      if (MidiSongs.noteOn(e)) {
+        const n = { tick: e.tick, end: null, note: e.d1, vel: e.d2 };
+        notes.push(n);
+        if (!open.has(key)) open.set(key, []);
+        open.get(key).push(n);
+      } else if (MidiSongs.noteOff(e)) {
+        const held = open.get(key);
+        if (held && held.length) held.shift().end = e.tick;
+      }
+    }
+    for (const n of notes) if (n.end === null) n.end = n.tick + 1;
+    return notes;
+  }
+
+  // One voice per track: each note goes to the lowest voice that is free when
+  // it starts, so a chord's notes land on separate tracks. A voice is free
+  // when its last note ends by this one's start on the grid, or in the file
+  // up to half a step after it (a legato overlap); two notes that follow each
+  // other within one step stay one voice, where the grid keeps the louder.
+  function voices(notes, step) {
+    const sorted = notes.slice().sort((a, b) => a.tick - b.tick || a.note - b.note);
+    const ends = [], out = [];
+    for (const n of sorted) {
+      const s = Math.round(n.tick / step), e = s + Math.max(1, Math.round((n.end - n.tick) / step));
+      let v = ends.findIndex(end => end.grid <= s || end.tick <= n.tick + step / 2);
+      if (v < 0) { v = ends.length; ends.push(null); out.push([]); }
+      ends[v] = { grid: e, tick: n.end };
+      out[v].push(n);
+    }
+    return out;
+  }
+
+  // The track's notes on the global 16th grid: a note of n steps is n active
+  // steps of its pitch, tied but for the last, cut at the next note's start.
+  function grid(notes, step, bars) {
+    const cells = new Array(bars * STEPS).fill(null);
+    const byStep = new Map();
+    let offGrid = 0;
+    for (const n of notes) {
+      if (n.tick % step) offGrid++;
+      const s = Math.round(n.tick / step);
+      if (s >= cells.length) continue;
+      const prior = byStep.get(s);
+      if (!prior || n.vel > prior.vel) byStep.set(s, n);
+    }
+    const starts = [...byStep.keys()].sort((a, b) => a - b);
+    const fracs = [];
+    starts.forEach((s, i) => {
+      const n = byStep.get(s);
+      const want = Math.max(1, Math.round((n.end - n.tick) / step));
+      const end = Math.min(s + want, i + 1 < starts.length ? starts[i + 1] : cells.length);
+      if (end - s === want) fracs.push(Math.min(1, Math.max(0.1, (n.end - n.tick) / step - (want - 1))));
+      for (let g = s; g < end; g++) {
+        cells[g] = { note: n.note, vel: Math.max(1, n.vel), flags: ACTIVE | (g < end - 1 ? TIE : 0) };
+      }
+    });
+    fracs.sort((a, b) => a - b);
+    const gate = fracs.length ? Math.round(Math.min(100, Math.max(10, fracs[fracs.length >> 1] * 100))) : 50;
+    return { cells, gate, offGrid, merged: notes.length - byStep.size };
+  }
+
+  function plan(song) {
+    const step = song.ppqn / 4;
+    const tracks = [], parts = [];
+    for (const raw of song.tracks) {
+      const part = raw.role ? raw : MidiSongs.tag(raw);
+      const notes = notesOf(part);
+      if (!notes.length) continue;
+      const lost = part.events.filter(e => (e.status & 0xf0) === 0xb0 || (e.status & 0xf0) === 0xe0).length;
+      const info = { part, lost, tracks: [] };
+      parts.push(info);
+      if (part.role === 'gate') {
+        info.tracks.push({ name: part.name, role: 'gate', type: 0, channel: GATE_CHANNEL, notes });
+      } else if (part.drum) {
+        const gm = n => part.drum === 42 && [42, 44, 46].includes(n.note) ? n.note : part.drum;
+        const sounds = [...new Set(notes.map(gm))].sort((a, b) => a - b);
+        for (const sound of sounds) {
+          info.tracks.push({ name: part.name + (sounds.length > 1 ? ' ' + (DRUM_NAME[sound] || sound) : ''),
+            role: part.role, type: 1, drum: sound, channel: DRUM_CHANNEL,
+            notes: notes.filter(n => gm(n) === sound).map(n => ({ ...n, note: sound })) });
+        }
+      } else {
+        const split = voices(notes, step);
+        split.forEach((voice, v) => info.tracks.push({ name: part.name + (split.length > 1 ? ' ' + (v + 1) : ''),
+          role: part.role, type: 0, notes: voice }));
+      }
+      tracks.push(...info.tracks);
+    }
+    if (tracks.length > NUM_TRACKS) throw Error('Партий с голосами ' + tracks.length + ', а треков 64.');
+
+    // The bars up to the end of the track chunks (an end on a bar line ends
+    // the bar before it), and the bar of any note quantised past that.
+    let bars = Math.max(1, Math.ceil(song.lastTick / (step * STEPS)));
+    for (const track of tracks) for (const n of track.notes) bars = Math.max(bars, Math.floor(Math.round(n.tick / step) / STEPS) + 1);
+    for (const track of tracks) Object.assign(track, grid(track.notes, step, bars));
+
+    // Melodic parts share a channel with parts of the same kind (role and
+    // gating) that never play in the same or a neighbouring bar. Each kind
+    // gets a channel first, so a late kind is not left without one; when the
+    // channels run out, a part joins the one of its kind it overlaps least
+    // and that channel's voice gets its notes as extra polyphony.
+    const infos = [];
+    for (const info of parts) {
+      if (info.tracks[0].channel !== undefined) continue;
+      info.active = new Set();
+      for (const t of info.tracks) t.cells.forEach((c, g) => { if (c) info.active.add(Math.floor(g / STEPS)); });
+      info.key = info.part.role + (info.part.gated ? ' gated' : '');
+      infos.push(info);
+    }
+    // The busiest parts get a channel each while channels last; a later part
+    // joins a channel none of whose parts plays in its bars or next to them,
+    // of its own kind if there is one, else of any kind.
+    const free = MELODIC_CHANNELS.slice(), channels = [];
+    const overlap = (ch, info) => [...info.active].filter(b => ch.bars.has(b) || ch.bars.has(b - 1) || ch.bars.has(b + 1)).length;
+    infos.sort((a, b) => b.tracks.reduce((n, t) => n + t.notes.length, 0) - a.tracks.reduce((n, t) => n + t.notes.length, 0));
+    for (const info of infos) {
+      const clear = channels.filter(c => !overlap(c, info));
+      const role = c => c.key.split(' ')[0] === info.part.role;
+      // A part with a preset of its own keeps it on a channel of its own.
+      let ch = info.part.patch && free.length ? null : clear.find(c => c.key === info.key);
+      if (!ch && free.length) {
+        ch = { key: info.key, channel: free.shift(), bars: new Set(), parts: [], poly: 0 };
+        channels.push(ch);
+      }
+      // Not with a part gated otherwise: the channel's voice is gated or not.
+      const gating = c => c.key.endsWith(' gated') === !!info.part.gated;
+      // With no channel left, a part of the same kind that overlaps least
+      // (its notes add voices) comes before a quiet channel of another role,
+      // whose preset would be wrong; a role gated otherwise comes last.
+      const same = channels.filter(c => c.key === info.key);
+      const least = pool => pool.reduce((a, b) => overlap(b, info) < overlap(a, info) ? b : a);
+      if (ch) ch.poly = Math.max(ch.poly, info.tracks.length);
+      else if (same.length) {
+        ch = least(same);
+        ch.poly += info.tracks.length;
+      } else {
+        ch = clear.find(c => role(c) && gating(c)) || clear.find(gating) || clear.find(role) || clear[0];
+        if (ch) ch.poly = Math.max(ch.poly, info.tracks.length);
+        else {
+          ch = least(channels);
+          ch.poly += info.tracks.length;
+        }
+      }
+      for (const b of info.active) ch.bars.add(b);
+      ch.parts.push(info.part);
+      for (const t of info.tracks) t.channel = ch.channel;
+    }
+
+    // Each track's distinct bars are its clips, in the order they first play.
+    // A track holds 31 of them and an empty one; a part with more goes on in
+    // a track of its own right after it ("+2", same routing), which plays the
+    // bars of its clips while the first is silent, and so on.
+    const laid = [];
+    for (const track of tracks) {
+      const layers = [];
+      const layer = () => {
+        const t = { ...track, name: layers.length ? track.name + ' +' + (layers.length + 1) : track.name,
+                    cells: new Array(track.cells.length).fill(null), clips: [], ids: new Map(), locations: [] };
+        if (layers.length) t.offGrid = t.merged = 0;
+        layers.push(t);
+        return t;
+      };
+      layer();
+      const sigOf = b => track.cells.slice(b * STEPS, (b + 1) * STEPS)
+        .map(c => c ? c.note + '/' + c.vel + '/' + c.flags : '').join(',');
+      // Bars a tied note crosses into go on one track together: a tie
+      // sounds on only within a track.
+      const tiedInto = b => {
+        const last = track.cells[b * STEPS - 1], first = track.cells[b * STEPS];
+        return b > 0 && last && first && (last.flags & TIE) && first.note === last.note;
+      };
+      for (let b = 0; b < bars;) {
+        let e = b;
+        while (e + 1 < bars && tiedInto(e + 1)) e++;
+        const group = [];
+        for (let k = b; k <= e; k++) if (/\d/.test(sigOf(k))) group.push(k);
+        const sigs = [...new Set(group.map(sigOf))];
+        let owner = null;
+        if (group.length) {
+          const missing = l => sigs.filter(x => !l.ids.has(x)).length;
+          owner = layers.filter(l => l.clips.length + missing(l) <= SILENT)
+            .sort((x, y) => missing(x) - missing(y))[0] || layer();
+          for (const x of sigs) if (!owner.ids.has(x) && owner.clips.length < SILENT) {
+            owner.ids.set(x, owner.clips.length);
+            owner.clips.push(track.cells.slice(group.find(k => sigOf(k) === x) * STEPS, (group.find(k => sigOf(k) === x) + 1) * STEPS));
+          }
+        }
+        for (let k = b; k <= e; k++) {
+          const x = sigOf(k), here = owner && owner.ids.has(x) ? owner : layers.find(l => l.ids.has(x));
+          if (here) here.cells.splice(k * STEPS, STEPS, ...track.cells.slice(k * STEPS, (k + 1) * STEPS));
+          for (const l of layers) l.locations[k] = l === here ? l.ids.get(x) : null;
+        }
+        b = e + 1;
+      }
+      // A silent bar plays the first free location, an empty clip next to
+      // the track's own, so it stays in bank A for most tracks (a MUTE key
+      // blinks while its track plays a location outside the shown bank).
+      for (const l of layers) {
+        l.silent = Math.min(l.clips.length, SILENT);
+        l.locations = Array.from({ length: bars }, (_, b) => l.locations[b] ?? l.silent);
+        delete l.ids;
+      }
+      laid.push(...layers);
+    }
+    if (laid.length > NUM_TRACKS) throw Error('С продолжениями партий нужно ' + laid.length + ' треков, а их 64.');
+    tracks.splice(0, tracks.length, ...laid);
+
+    const entries = [];
+    for (let b = 0; b < bars; b++) {
+      const locations = Array.from({ length: NUM_TRACKS }, (_, t) => tracks[t] ? tracks[t].locations[b] : 0);
+      const last = entries[entries.length - 1];
+      if (last && last.repeats < 255 && last.locations.every((l, t) => l === locations[t])) last.repeats++;
+      else entries.push({ locations, repeats: 1 });
+    }
+
+    const played = entries.slice(0, 256).reduce((n, e) => n + e.repeats, 0);
+    // The device plays one tempo: the one the song keeps longest, summed over
+    // its stretches (Snarled Up ramps through 75 BPM in its first bars and
+    // then stays at 147), within the firmware's 20-300 BPM.
+    const kept = new Map();
+    song.tempos.forEach((t, i) => {
+      const ticks = Math.max(0, (song.tempos[i + 1]?.tick ?? song.lastTick) - t.tick);
+      kept.set(t.us, (kept.get(t.us) || 0) + ticks);
+    });
+    const us = [...kept].reduce((a, b) => b[1] > a[1] ? b : a)[0];
+    const bpm = Math.min(300, Math.max(20, Math.round(600000000 / us) / 10));
+    return {
+      title: song.title, bpm, bars, played, tracks, entries, channels,
+      gateChannel: GATE_CHANNEL, drumChannel: DRUM_CHANNEL,
+      lost: {
+        offGrid: tracks.reduce((n, t) => n + t.offGrid, 0),
+        merged: tracks.reduce((n, t) => n + t.merged, 0),
+        controllers: parts.reduce((n, p) => n + p.lost, 0),
+        entries: Math.max(0, entries.length - 256),   // rows past the 256 the device holds
+      },
+    };
+  }
+
+  function crc32(crc, bytes) {
+    for (const byte of bytes) {
+      crc ^= byte;
+      for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+    return crc >>> 0;
+  }
+
+  function store(p) {
+    const bytes = new Uint8Array(STORE_BYTES).fill(0xff);
+    const view = new DataView(bytes.buffer);
+    const text = (at, s, size) => {
+      for (let i = 0; i < size; i++) bytes[at + i] = i < size - 1 ? (s.charCodeAt(i) || 0) : 0;
+    };
+    for (let loc = 0; loc < LOCATIONS; loc++) {
+      const at = PAT_OFFSET + loc * PATTERN_BYTES;
+      bytes.fill(0, at, at + PATTERN_BYTES);
+      for (let t = 0; t < NUM_TRACKS; t++) {
+        const track = p.tracks[t];
+        const clip = track && track.clips[loc];
+        if (clip) clip.forEach((c, s) => {
+          if (!c) return;
+          const o = at + (t * STEPS + s) * 3;
+          bytes[o] = c.note; bytes[o + 1] = c.vel; bytes[o + 2] = c.flags;
+        });
+        const o = at + 3072 + t * 16;
+        view.setUint32(o, track ? track.type : 0, true);
+        bytes[o + 4] = track ? track.channel : t % 16;
+        bytes[o + 5] = track && track.drum ? track.drum : Math.min(127, 36 + t);
+        view.setUint32(o + 8, 0, true);         // MIDI only
+        bytes[o + 12] = 0;
+        bytes[o + 13] = track ? track.gate : 50;
+        bytes[o + 14] = 0;
+        bytes[at + 4097 + t] = STEPS;
+      }
+      bytes[at + 4096] = STEPS;
+      bytes[at + 4161] = 50;
+      text(at + 4162, ('P' + (loc + 1)).padEnd(8, ' '), 9);
+    }
+    bytes.fill(0, SONG_OFFSET, SONG_OFFSET + SONG_BYTES);
+    p.entries.slice(0, 256).forEach((entry, i) => {
+      bytes.set(entry.locations, SONG_OFFSET + i * 65);
+      bytes[SONG_OFFSET + i * 65 + 64] = entry.repeats;
+    });
+    view.setUint16(SONG_OFFSET + 16640, Math.min(256, p.entries.length), true);
+    view.setUint32(SONG_OFFSET + 16644, 1, true);   // SONG_END_STOP
+    text(SONG_OFFSET + 16648, p.title.replace(/^\d+\s*/, '').toUpperCase().replace(/[^ -~]/g, ' ').slice(0, 8), 9);
+    for (let t = 0; t < NUM_TRACKS; t++) bytes.set(KIT_DEFAULT, KIT_OFFSET + t * KIT_BYTES);
+    view.setUint32(0, 0x52425448, true);            // 'RBTH'
+    bytes[4] = 7;
+    bytes.fill(0xff, 5, 8);
+    let crc = crc32(0xffffffff, bytes.subarray(PAT_OFFSET, PAT_OFFSET + PATTERN_BYTES * LOCATIONS));
+    crc = crc32(crc, bytes.subarray(SONG_OFFSET, SONG_OFFSET + SONG_BYTES));
+    crc = ~crc32(crc, bytes.subarray(KIT_OFFSET, KIT_OFFSET + KIT_BYTES * NUM_TRACKS)) >>> 0;
+    view.setUint32(8, crc, true);
+    return bytes;
+  }
+
+  // The panel moves that load it and play the chain: tempo, LOAD, Song mode,
+  // back to the Session view, PLAY. Actions in Artist.schedule's form.
+  function show(p, start = 600000) {
+    const actions = [];
+    let t = start;
+    const push = a => actions.push({ ...a, t });
+    const wait = ms => { t += Math.round(ms * 1000); };
+    const press = (ctl, hold, gap) => { push({ ...ctl, down: true }); wait(hold); push({ ...ctl, down: false }); wait(gap); };
+    const say = text => push({ op: 'say', kind: 'device', text });
+    const VALUE_SW = { op: 'encsw', enc: 1 }, TRACK_SW = { op: 'encsw', enc: 0 };
+    const worth = n => n <= 4 ? n : n <= 7 ? 4 + 4 * (n - 4) : 16 + 8 * (n - 7);
+    say('VALUE: темп 120 → ' + p.bpm + ' BPM');
+    let left = Math.round((p.bpm - 120) * 10);
+    const dir = left > 0 ? 1 : -1;
+    left = Math.abs(left);
+    while (left > 0) {
+      wait(110);
+      let n = 1;
+      while (worth(n + 1) <= left) n++;
+      for (let i = 0; i < n; i++) {
+        for (let e = 0; e < 4; e++) { push({ op: 'edge', enc: 1, dir }); wait(3); }
+        wait(13);
+      }
+      left -= worth(n);
+    }
+    wait(300);
+    say('VALUE долго → селектор; кнопка 10 — LOAD: «' + p.title + '», ' + p.tracks.length + ' треков');
+    press(VALUE_SW, 620, 200);
+    press({ op: 'step', index: 9 }, 80, 400);
+    say('TRACK долго → цепочка песни; кнопка 2 — режим Song (' + Math.min(256, p.entries.length) + ' строк, ' + p.played + ' тактов)');
+    press(TRACK_SW, 620, 200);
+    press({ op: 'step', index: 1 }, 80, 200);
+    press(VALUE_SW, 80, 200);
+    press(VALUE_SW, 620, 300);
+    say('PLAY: прибор играет песню из своих клипов');
+    push({ op: 'play', down: true });
+    const playAt = t;
+    wait(80);
+    push({ op: 'play', down: false });
+    return { actions, playAt };
+  }
+
+  const api = { plan, store, show, layout: { PAT_OFFSET, SONG_OFFSET, KIT_OFFSET, PATTERN_BYTES, SONG_BYTES, STORE_BYTES } };
+  if (typeof module !== 'undefined' && module.exports) module.exports = api;
+  else root.MidiClips = api;
+})(globalThis);

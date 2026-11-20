@@ -1,0 +1,11 @@
+{
+  "01 Contains LSD": {
+    "Intro Pad 1": { "controls": { "release": 0.755 } },
+    "Intro Pad 2": { "controls": { "release": 0.755 } },
+    "Intro Pad 3": { "controls": { "release": 0.755 } },
+    "Intro Pad 4": { "controls": { "release": 0.755 } },
+    "Gated Pad Line": { "controls": { "release": 0.755 } },
+    "Pad Line": { "controls": { "release": 0.755 } },
+    "Reverse Chord": { "controls": { "release": 0.755 } }
+  }
+}
