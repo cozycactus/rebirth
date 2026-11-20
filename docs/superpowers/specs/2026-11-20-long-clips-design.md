@@ -14,7 +14,10 @@ Decided by the project owner:
    and stop, or play N times and go to another clip of the same track.
 4. The clip's settings live on a **CLIP screen opened by selector button 16**;
    the FILL mode is that screen's last row.
-5. Carried over from 2026-11-17: per-step **trig conditions** (X%, A:B, FILL,
+5. Pool space comes back by **explicit clearing** (halving drops the bars
+   beyond, a CLEAR action on the CLIP screen); switched-off steps keep their
+   notes as today.
+6. Carried over from 2026-11-17: per-step **trig conditions** (X%, A:B, FILL,
    !FILL, 1ST, !1ST, LST, !LST); manual FILL from a **sustain pedal (CC64)** on
    the MIDI input; the pads show the clip in the **Pattern view and both step
    editors**, where a pad press picks the step.
@@ -277,20 +280,21 @@ block_t    pool[POOL_BLOCKS];
 - **Hidden bars**: steps beyond the length stay stored, as today's hidden
   steps 13-16 of a 12-step clip do; they come back when the clip is
   lengthened. They occupy the pool.
-- **How note bars are freed — pending the owner.** A switched-off step keeps
-  its note and velocity, and switching it on again brings them back
-  (`pattern_toggle_step()`); no panel action zeroes a step. So a note bar,
-  once used, never becomes all zero and keeps its block; only kit bars return
-  to zero (a lane cycled to OFF). Doubling every clip of 8 locations to four
-  bars on all 64 tracks fills the pool, and nothing on the panel would free it
-  but copying an empty clip over a used one. Choices:
-  1. **Explicit clearing, nothing existing changes** (my pick): halving drops
-     the bars beyond the new length; the CLIP screen gets a CLEAR action that
-     empties the clip (both layers; length and end kept); the switched-off
-     steps of a used bar keep their notes as today.
-  2. **Automatic**: a bar with no active step and no condition is freed; a step
-     switched on there again takes the track's last note, as a new step does,
-     instead of its old one.
+- **How note bars are freed: explicitly** (owner's choice). A switched-off
+  step keeps its note and velocity, and switching it on again brings them back
+  (`pattern_toggle_step()`); no panel action zeroes a step, so a note bar, once
+  used, keeps its block. That stays as it is. Blocks come back by:
+  - **halving** on the CLIP screen, which frees every bar that lies wholly
+    beyond the new length (steps beyond the length inside the last kept bar
+    stay, as today's hidden steps);
+  - **CLEAR** on the CLIP screen, which frees both layers of the clip and keeps
+    its length, end, plays and target;
+  - a kit bar returning to all zero (a lane cycled to OFF), and copying an
+    empty clip over a used one.
+  Shortening with selector buttons 11 and 12 frees nothing, as today's
+  shortening loses nothing. The rejected alternative freed a bar automatically
+  once no step in it was active, at the price of switched-off steps forgetting
+  their notes.
 - The location's default `length` and `track_length[]` go: every clip has its
   own length. Migration resolves "0 = the location's default".
 - The pool's free blocks form a list threaded through the blocks themselves
@@ -634,9 +638,11 @@ location, VALUE press returns to the selector.
 | TARGET | A1-D8 | `—` and inactive unless END is NEXT; choosing NEXT sets it to the next location (A8 → B1, D8 → A1) |
 | FILL (ALL) | OFF, ON, EVERY 2, 4, 8, 16 | for all tracks, not saved |
 
-On this screen step button 15 halves the length (`max(1, length / 2)`; what
-happens to the bars beyond depends on the pending freeing rule above) and step
-button 16 doubles it with copy (`min(512, 2 *
+On this screen step button 15 halves the length (`max(1, length / 2)`; the
+bars wholly beyond the new length are freed), step button 14 held for half a
+second clears the clip (notice `CLEARED`; a short press only shows `HOLD TO
+CLEAR`, my call, as nothing else on the panel destroys a whole clip at one
+touch) and step button 16 doubles it with copy (`min(512, 2 *
 length)`; each new step `s` becomes a copy of step `s − length`, both layers,
 conditions included). Their LEDs are lit; the OLED labels them (my call: the
 step buttons are free on this screen). Selector buttons 11 and 12 keep
@@ -684,7 +690,7 @@ Against `src/ui.c` at f8a8737:
 | Kit step editor | TRACK past RC | clamped at RC | COND stop | new stop |
 | Pattern selector | 16 | nothing | CLIP screen | owner-approved 2026-11-20 |
 | Pattern selector | 11, 12 | ±1 within 1-16 | ±1 within 1-512 | range only |
-| CLIP screen | all | — | rows; buttons 15 and 16 halve and double | new screen |
+| CLIP screen | all | — | rows; button 14 held clears, 15 halves, 16 doubles | new screen (CLEAR owner-approved 2026-11-20) |
 | Any view | pad of an idle track's location, or SCENE of its row | (no idle state) | launches it again | new state |
 | MIDI input | CC64 | ignored | FILL pedal | new input |
 
@@ -865,8 +871,11 @@ within `advance_song_position()`, within the bounds stated here.
 - 2026-11-20: the owner asked for up to 512 steps on the 64-track firmware;
   clip demand measured on eight songs; Codex, DeepSeek and Grok polled on
   storage, playback, end behaviour and the save format; the owner chose
-  passages as well as loops, the repeat count, and the CLIP screen on selector
-  button 16. Verified against the code: the prepared rows built in the timer
+  passages as well as loops, the repeat count, the CLIP screen on selector
+  button 16, and explicit clearing. A builder check against the code
+  reproduced the hash values, the gate formula and the size budgets, and led
+  to the SCENE rule for idle tracks, the extension mask in v8 and the
+  freeing question. Verified against the code: the prepared rows built in the timer
   interrupt, the song edits' `memmove`, the free kit-word bits, `uart_getc()`
   dropping UART errors, selector buttons 14 and 15 in use, the importer's v7
   in the simulator's layout.

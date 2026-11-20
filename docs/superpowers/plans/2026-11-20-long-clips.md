@@ -102,7 +102,7 @@ with:
 - `uint32_t clip_get_kit(const clip_store_t *s, uint8_t loc, uint8_t slot, uint16_t step)`
 - `bool clip_set_step(clip_store_t *s, uint8_t loc, uint8_t track, uint16_t step, step_t v)` and `bool clip_set_kit(...)` — false (nothing changed) when a block is needed and none is free.
 - `bool clip_set_length(clip_store_t *s, uint8_t loc, uint8_t track, uint16_t len)` (1-512, never allocates)
-- `bool clip_double(clip_store_t *s, uint8_t loc, uint8_t track)`, `void clip_halve(...)`, `bool clip_copy(clip_store_t *s, uint8_t track, uint8_t from, uint8_t to)`, `void clip_clear(...)`
+- `bool clip_double(clip_store_t *s, uint8_t loc, uint8_t track)`, `void clip_halve(...)` (frees every bar wholly beyond the new length), `bool clip_copy(clip_store_t *s, uint8_t track, uint8_t from, uint8_t to)`, `void clip_clear(...)` (frees both layers; keeps length, end, plays, target)
 - `uint16_t clip_blocks_needed_double(...)`, `uint16_t clip_pool_free(const clip_store_t *s)`
 - `bool clip_has_notes(const clip_store_t *s, uint8_t loc, uint8_t track)` (an active step, or a kit lane hit, within the length)
 
@@ -110,8 +110,7 @@ Allocation and freeing are internal; operations needing blocks take them all
 first and publish last (the publish is a plain write here; Task 3 wraps it in
 `seq_lock`).
 
-- [ ] **Before starting, read the owner's answer on how note bars are freed** (spec, Data model, "pending the owner"); with choice 1 `clip_halve()` frees the bars beyond the new length and `clip_clear()` is reachable from the CLIP screen (Task 10); with choice 2 a bar with no active step and no condition is freed on the edit that makes it so. Add the matching test (`halve_frees_bars_beyond` or `inactive_bar_freed`).
-- [ ] Tests: `sizes_on_arm` (4, 64, 8, 458; store 162,624 + 4); `fresh_store_is_empty` (free 2,048); `first_note_allocates_bar0_root`; `note_in_bar3_promotes_to_table` (2 blocks used; bar 0 kept); `zeroing_a_bar_frees_it`; `table_demotes_when_only_bar0_left`; `kit_layer_independent` (track 1 note and kit roots apart); `double_17_to_34_copies_both_layers_and_conds`; `halve_keeps_steps_within_last_bar`; `copy_takes_end_plays_target`; `pool_exhaustion_changes_nothing` (fill the pool, then `clip_set_step` in a new bar, `clip_double`, `clip_copy`: each false; snapshot of the store byte-equal before and after — Review Focus 1); `free_list_survives_random_ops` (10,000 seeded operations, the free count always equals 2,048 minus reachable blocks, no block reachable twice).
+- [ ] Tests: `sizes_on_arm` (4, 64, 8, 458; store 162,624 + 4); `fresh_store_is_empty` (free 2,048); `first_note_allocates_bar0_root`; `note_in_bar3_promotes_to_table` (2 blocks used; bar 0 kept); `zeroing_a_bar_frees_it`; `table_demotes_when_only_bar0_left`; `kit_layer_independent` (track 1 note and kit roots apart); `double_17_to_34_copies_both_layers_and_conds`; `halve_frees_bars_beyond` (300 steps → 150: bars 10-18 freed, steps 151-160 of bar 9 kept); `clear_frees_both_layers_keeps_length_and_end`; `switched_off_steps_keep_their_bar` (all 16 steps of bar 2 off: the block stays, notes come back on); `copy_takes_end_plays_target`; `pool_exhaustion_changes_nothing` (fill the pool, then `clip_set_step` in a new bar, `clip_double`, `clip_copy`: each false; snapshot of the store byte-equal before and after — Review Focus 1); `free_list_survives_random_ops` (10,000 seeded operations, the free count always equals 2,048 minus reachable blocks, no block reachable twice).
 - [ ] Implement in `src/clip.c` (no Pico SDK calls; pure C, built for host and firmware).
 - [ ] Run the host tests; commit `feat: block pool and clip store`.
 
@@ -241,7 +240,7 @@ API), `test/test_ui.c`, `README.md`.
 In this task END, PLAYS, TARGET and FILL rows are drawn and stored but END
 has no effect on playback yet (Task 12) and FILL none (Task 15).
 
-- [ ] Tests: `selector_16_opens_clip_screen` (for the selector's track and location); `length_row_accelerates`; `button_15_halves_16_doubles` (notice `LEN 32`; `POOL FULL` when short); `plays_and_target_inactive_while_loop`; `next_sets_target_to_next_location` (A8 → B1, D8 → A1); `track_press_next_track_value_press_back`; `pool_use_shown`.
+- [ ] Tests: `button_14_held_clears_short_press_warns` (`HOLD TO CLEAR`, then `CLEARED` after 500 ms; pool count back); `selector_16_opens_clip_screen` (for the selector's track and location); `length_row_accelerates`; `button_15_halves_16_doubles` (notice `LEN 32`; `POOL FULL` when short); `plays_and_target_inactive_while_loop`; `next_sets_target_to_next_location` (A8 → B1, D8 → A1); `track_press_next_track_value_press_back`; `pool_use_shown`.
 - [ ] Implement; run everything; commit `feat: CLIP screen on selector button 16`.
 
 ### Task 11: the simulator plays long clips
