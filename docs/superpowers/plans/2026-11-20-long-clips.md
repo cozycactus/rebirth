@@ -24,11 +24,12 @@ CTest, the WebAssembly simulator (`sim/`), Node for the simulator checks.
 - `step_t` is 4 bytes {note, velocity, flags, cond}, flags bits 4-7 zero; a kit word's condition is in bits 24-31.
 - `block_t` 64 bytes, `clip_t` 8 bytes, `location_t` 458 bytes on `__arm__`; asserted.
 - Condition codes, the list of 49 panel items, `mix32` and its golden values exactly as the spec's "Conditions".
-- Gate pulses `(pct * 24 * 5243) >> 19`; no division, no new flash callee on the timer path (relative ELF check, Task 4).
+- Gate pulses `(pct * 24 * 5243) >> 19`; no division, no new flash callee on the timer path (relative ELF check against the baseline of Task 0).
 - Positions and lengths are `uint16_t`; "none" is 0xFFFF.
 - "Page" means eight tracks; the 16 steps on the step buttons are a "bar" in code, UI text and docs.
 - Save v8 byte layout exactly as the spec's table; the fixed part is 60,172 bytes; the CRC is v7's `crc32_update` over bytes 256 to the payload end.
-- RAM of the RP2040 Release build (`arm-none-eabi-size -A`, `.data` + `.bss`) at most 236,000 bytes after every task; record it in the task's commit message.
+- The RP2040 Release build links after every task, and its RAM (`arm-none-eabi-size -A`, `.data` + `.bss`) goes in each task's commit message: about 241,000 until Task 3, about 196,000 after Task 3 (prepared rows gone), at most 236,000 from Task 4 on (the pool in).
+- Header ownership: `include/seq_types.h` (Task 1) holds the shared constants and `track_type_t`, `output_mode_t`, `track_config_t`, `kit_config_t`; `include/clip.h` (Task 2) holds the 4-byte `step_t`, `block_t`, `clip_t`, `location_t`, `clip_store_t` and includes only `seq_types.h`; `include/sequencer.h` includes `seq_types.h`, keeps today's 3-byte `step_t` and `pattern_t` until Task 4, which removes them and includes `clip.h`. Until Task 4 no file includes both `clip.h` and `sequencer.h`, and `src/clip.c` is built into the host tests only.
 - Host tests: `(cd test && cmake --preset host-tests-debug && cmake --build --preset host-tests-debug && ctest --preset host-tests-debug)`, also configured with `-DCMAKE_C_FLAGS=-fshort-enums` as CI does.
 - Firmware: `cmake --preset firmware-release && cmake --build --preset firmware-release`, and `pico2-release`, `revb-rp2354b`.
 - Simulator: `sim/build.sh web && sim/check.sh` (needs `sim/emsdk`; in a worktree, link the main checkout's and remove the link after). Every score this firmware takes stays green after every task.
@@ -48,7 +49,7 @@ CTest, the WebAssembly simulator (`sim/`), Node for the simulator checks.
 
 ### Task 0: saves written by today's code, as fixtures
 
-**Files:** Create `test/tools/make_fixtures.c`, `test/fixtures/v4.bin`,
+**Files:** Create `tools/isr_callees.sh`, `test/isr_callees.baseline`, `test/tools/make_fixtures.c`, `test/fixtures/v4.bin`,
 `v5.bin`, `v6.bin`, `v7-arm.bin`, `test/fixtures/README.md`. Modify
 `test/CMakeLists.txt` (a target `make_fixtures`, not run by CTest).
 
@@ -60,7 +61,8 @@ hidden steps 13-16 set), kit words (v6, v7), the song, kit settings.
 - [ ] Write `make_fixtures.c` from today's types and writers (`flash_storage.c`'s layout and CRC); it asserts `sizeof` 459, 972 and 4,108 for the v5, v6 and v7 records and refuses to run otherwise. Build it with `-fshort-enums` on the host: these records hold only 8- and 32-bit fields and one-byte enums, so the host lays them out as the RP2040 does.
 - [ ] Generate the images; write `README.md` from the tool's printout.
 - [ ] Test: the existing `test_storage` loads each image through today's loader and gets the README's contents (`fixtures_v4_v5_v6_v7_load_today`).
-- [ ] Run the host tests; commit `test: saves v4-v7 written by today's code as fixtures`.
+- [ ] Create `tools/isr_callees.sh <elf>`: prints the flash functions and division helpers reachable from `sequencer_timer_isr` (from `arm-none-eabi-objdump -d`). Run it on today's `firmware-release` ELF, before any other change, and commit the output as `test/isr_callees.baseline`.
+- [ ] Run the host tests; commit `test: saves v4-v7 written by today's code, and the timer's callee baseline`.
 
 ## Phase 1 — the pool, behaviour unchanged
 
@@ -69,13 +71,13 @@ score stays green.
 
 ### Task 1: constants, frozen types, 16-bit positions
 
-**Files:** Modify `include/sequencer.h`, `src/flash_storage.c`, `src/sequencer.c`,
+**Files:** Create `include/seq_types.h`. Modify `include/sequencer.h`, `src/flash_storage.c`, `src/sequencer.c`,
 `src/ui.c`, `src/display.c`, `include/session.h`, `src/session.c`,
 `sim/core/sim_main.c`, `test/test_storage.c`, `test/test_playback.c`.
 
 **Interfaces:** Produces `MAX_CLIP_STEPS`, `STEPS_PER_BAR`, `CLIP_BARS`,
-`POOL_BLOCKS`, `BLOCK_NONE`, `ROOT_TABLE` in `sequencer.h` (`MAX_CLIP_STEPS`
-still unused by the store); `step_v3_t`, `track_config_v7_t` and a `uint8_t`
+`POOL_BLOCKS`, `BLOCK_NONE`, `ROOT_TABLE` and the shared types moved into
+`seq_types.h` (see Global Constraints; `MAX_CLIP_STEPS` still unused); `step_v3_t`, `track_config_v7_t` and a `uint8_t`
 end mode inside `pattern_v5_t`, `pattern_v6_t`, `old_song_t`; frozen
 `pattern_v7_t`, `song_v7_t` (copies of today's `pattern_t`, `song_t`) in
 `flash_storage.c`; `uint16_t current_track_step[]`, snapshot `track_step[]`,
@@ -107,49 +109,49 @@ with:
 - `bool clip_has_notes(const clip_store_t *s, uint8_t loc, uint8_t track)` (an active step, or a kit lane hit, within the length)
 
 Allocation and freeing are internal; operations needing blocks take them all
-first and publish last (the publish is a plain write here; Task 3 wraps it in
-`seq_lock`).
+first and publish last (the publish is a plain write here; Task 4 wraps it in
+`seq_lock`). `clip.c` and `test_clip.c` include `clip.h` only.
 
 - [ ] Tests: `sizes_on_arm` (4, 64, 8, 458; store 162,624 + 4); `fresh_store_is_empty` (free 2,048); `first_note_allocates_bar0_root`; `note_in_bar3_promotes_to_table` (2 blocks used; bar 0 kept); `zeroing_a_bar_frees_it`; `table_demotes_when_only_bar0_left`; `kit_layer_independent` (track 1 note and kit roots apart); `double_17_to_34_copies_both_layers_and_conds`; `halve_frees_bars_beyond` (300 steps → 150: bars 10-18 freed, steps 151-160 of bar 9 kept); `clear_frees_both_layers_keeps_length_and_end`; `switched_off_steps_keep_their_bar` (all 16 steps of bar 2 off: the block stays, notes come back on); `copy_takes_end_plays_target`; `pool_exhaustion_changes_nothing` (fill the pool, then `clip_set_step` in a new bar, `clip_double`, `clip_copy`: each false; snapshot of the store byte-equal before and after — Review Focus 1); `free_list_survives_random_ops` (10,000 seeded operations, the free count always equals 2,048 minus reachable blocks, no block reachable twice).
 - [ ] Implement in `src/clip.c` (no Pico SDK calls; pure C, built for host and firmware).
 - [ ] Run the host tests; commit `feat: block pool and clip store`.
 
-### Task 3: the firmware on the clip store
+### Task 3: the timer reads steps directly
+
+**Files:** Modify `src/sequencer.c`, `include/sequencer.h`,
+`test/test_playback.c`, `ARCHITECTURE.md`.
+
+**Interfaces:** Consumes Task 1. The prepared-row machinery goes (the spec's
+list), still on today's dense `pattern_t`. New, RAM-resident:
+`static bool read_track_step(uint8_t track, track_read_t *out)` filling
+`typedef struct { track_config_t cfg; uint16_t length, pos; uint8_t location, kind; step_t step; uint32_t kit; kit_config_t kitcfg; } track_read_t;`
+inside one `seq_lock` section; `static uint8_t gate_pulses_for(uint8_t pct)`.
+Task 4 changes only the body of `read_track_step()`.
+
+- [ ] Tests: `gate_formula_matches_division` (10-100); `direct_read_plays_as_before` (the existing playback tests unchanged and green); `shortened_between_sections_never_plays_hidden_step`; `kind_change_releases_old_kind`; `edit_heard_next_occurrence`.
+- [ ] Implement; check the ELF: no line of `tools/isr_callees.sh` output that is not in `test/isr_callees.baseline`; RAM about 196,000.
+- [ ] Run everything; commit `perf: the timer reads one step per track; prepared rows removed`.
+
+### Task 4: the firmware on the clip store
 
 **Files:** Modify `include/sequencer.h`, `src/shared_state.c`, `src/pattern.c`,
 `src/sequencer.c`, `src/ui.c`, `src/session.c`, `src/kit.c`, `src/song.c`,
-`src/flash_storage.c`, `src/display.c`, `sim/core/sim_main.c`,
-`sim/core/sim_api.h`, `test/*.c`.
+`src/flash_storage.c`, `src/display.c`, `CMakeLists.txt` (`src/clip.c` into the
+firmware), `sim/core/sim_main.c`, `sim/core/sim_api.h`, `test/*.c`.
 
-**Interfaces:** Consumes Task 2. `sequencer_state_t` holds a `clip_store_t
-store` instead of `patterns[]`; `pattern_t` goes; `pattern.c` keeps its
-public names as thin wrappers where callers remain (`pattern_get_track_length()`
+**Interfaces:** Consumes Tasks 2 and 3. `sequencer.h` drops its 3-byte `step_t`
+and `pattern_t` and includes `clip.h`; `sequencer_state_t` holds a
+`clip_store_t store` instead of `patterns[]`. `pattern.c` keeps its public
+names as thin wrappers where callers remain (`pattern_get_track_length()`
 returns `uint16_t`). Every write path takes `seq_lock` around the publish
-only. The v7 save stays: it serializes the store into `pattern_v7_t` records
-page by page (bar 0 of each layer, `track_length` = length; lengths are ≤ 16 in
-this phase). Prepared rows stay, filled from `clip_get_step()`.
-`sim_dbg_step()` and `sim_dbg_kit_step()` read through the store.
+only. `read_track_step()` reads through the store (root, table entry, word).
+The v7 save stays: it serializes the store into `pattern_v7_t` records page by
+page (bar 0 of each layer, `track_length` = length; lengths are ≤ 16 in this
+phase). `sim_dbg_step()` and `sim_dbg_kit_step()` read through the store.
 
 - [ ] Test `v7_round_trip_through_store` (save, clear, load: every field equal).
-- [ ] Test `ram_budget` is not a test: record `arm-none-eabi-size` in the commit message; it must be ≤ 236,000 (the prepared rows are still here).
+- [ ] Check: RAM ≤ 236,000 (expect about 227,000); the ELF check still passes.
 - [ ] Implement; run the host tests (both enum sizes), the firmware builds and `sim/check.sh`; commit `refactor: the sequencer stores clips in the block pool`.
-
-### Task 4: the timer reads steps directly
-
-**Files:** Modify `src/sequencer.c`, `include/sequencer.h`,
-`test/test_playback.c`, `ARCHITECTURE.md`. Create `tools/isr_callees.sh`.
-
-**Interfaces:** Consumes Task 3. The prepared-row machinery goes (the spec's
-list). New, RAM-resident: `static bool read_track_step(uint8_t track, track_read_t *out)`
-filling `typedef struct { track_config_t cfg; uint16_t length, pos; uint8_t location, kind; step_t step; uint32_t kit; kit_config_t kitcfg; } track_read_t;`
-inside one `seq_lock` section; `static uint8_t gate_pulses_for(uint8_t pct)`.
-`tools/isr_callees.sh <elf>` prints the flash functions and division helpers
-reachable from `sequencer_timer_isr` (from `arm-none-eabi-objdump -d`).
-
-- [ ] Before any change: run `tools/isr_callees.sh` on the f8a8737 build; commit its output as `test/isr_callees.baseline`.
-- [ ] Tests: `gate_formula_matches_division` (10-100); `direct_read_plays_as_before` (the existing playback tests unchanged and green); `shortened_between_sections_never_plays_hidden_step`; `kind_change_releases_old_kind`; `edit_heard_next_occurrence`.
-- [ ] Implement; check the ELF: no line in `isr_callees.sh` output that is not in the baseline; RAM ≤ 236,000 (expect about 232,000).
-- [ ] Run everything; commit `perf: the timer reads one step per track; prepared rows removed`.
 
 ### Task 5: save format v8 and migration
 
