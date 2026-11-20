@@ -6,7 +6,11 @@
 
 // ─── Configuration ──────────────────────────────────────────────
 
-#define NUM_TRACKS          8
+#define PANEL_TRACKS        8
+#define NUM_TRACKS          64
+typedef uint64_t track_mask_t;
+#define TRACK_BIT(track) (UINT64_C(1) << (track))
+#define ALL_TRACKS UINT64_MAX
 #define STEPS_PER_PATTERN   16
 #define PATTERN_BANKS       4
 #define PATTERNS_PER_BANK   8
@@ -43,6 +47,8 @@
 #define MIDI_CONTINUE       0xFB
 // The UART TX queue (a power of two; one byte stays unused, so it holds one less).
 #define MIDI_TX_QUEUE_SIZE  1024
+// One slide per track and both kits hitting all their voices on one step.
+#define MIDI_STEP_BUFFER_BYTES (6 * NUM_TRACKS + 3 * MAX_KIT_TRACKS * KIT_VOICES)
 
 // Jitter measurement
 #define JITTER_PROBE_PIN    7       // High while sequencer timer ISR runs
@@ -76,6 +82,7 @@ typedef enum {
 #define KIT_LANE_SD     2
 #define KIT_LANE_CH     8
 #define KIT_LANE_OH     9
+#define KIT_TRACK_SLOTS 8
 #define MAX_KIT_TRACKS  2
 #define KIT_FLAM_MIN    1
 #define KIT_FLAM_MAX    12
@@ -107,6 +114,17 @@ typedef enum {
     OUTPUT_BOTH,
 } output_mode_t;
 
+// SYNTH uses the NOTE row's space for CV/Gate. DRUM keeps its NOTE row.
+typedef enum {
+    TRACK_PARAM_TYPE,
+    TRACK_PARAM_CHANNEL,
+    TRACK_PARAM_OUTPUT,
+    TRACK_PARAM_GATE,
+    TRACK_PARAM_NOTE,
+    TRACK_PARAM_DRUM_CV,
+    TRACK_PARAM_SYNTH_CV = TRACK_PARAM_NOTE,
+} track_param_t;
+
 typedef struct {
     track_type_t type;
     uint8_t      midi_channel;      // 0–15
@@ -124,7 +142,7 @@ typedef struct {
     uint8_t        track_length[NUM_TRACKS]; // Per-track/section step count: 1-16
     uint8_t        swing;           // 0–99, percentage of swing
     char           name[9];         // 8 chars + null
-    uint32_t       kit_steps[NUM_TRACKS][STEPS_PER_PATTERN]; // Kit step words
+    uint32_t       kit_steps[KIT_TRACK_SLOTS][STEPS_PER_PATTERN]; // Kit step words
 } pattern_t;
 
 // Song mode
@@ -155,6 +173,7 @@ typedef enum {
 typedef enum {
     PLAY_MODE_PATTERN,      // Loop single pattern
     PLAY_MODE_SONG,         // Play song chain
+    PLAY_MODE_MIDI_SONG,    // Play the timed event stream from flash
 } play_mode_t;
 
 typedef enum {
@@ -164,6 +183,14 @@ typedef enum {
     LAUNCH_QUANT_STEP,           // next step
     LAUNCH_QUANT_COUNT
 } launch_quant_t;
+
+// Where the 96 PPQN pulses come from (see ARCHITECTURE.md, "External clock").
+typedef enum {
+    CLOCK_SOURCE_INT = 0,   // the internal timer at transport.bpm (power-up)
+    CLOCK_SOURCE_EXT,       // only the MIDI Clock on the DIN input
+    CLOCK_SOURCE_AUTO,      // the MIDI Clock while there is one, else the internal timer
+    CLOCK_SOURCE_COUNT
+} clock_source_t;
 
 typedef struct {
     transport_state_t state;
@@ -195,6 +222,12 @@ typedef struct {
     uint32_t flam_drops;                // dropped flam sends: one per kit per flam pulse whose
                                         // second hits were skipped: the TX queue would
                                         // have held more than the flam cap
+    // The external clock (core 1), counted whatever the source:
+    uint32_t ext_clocks;                // Clocks received
+    uint32_t ext_max_dev_us;            // largest |interval - estimate before it|
+    uint32_t ext_losses;                // followed clocks lost (no Clock for the timeout)
+    uint32_t ext_catchups;              // bursts the timer caught up with
+    uint32_t ext_dropped;               // Clocks whose pulses were dropped (backlog cap)
 } sequencer_jitter_stats_t;
 
 // ─── Shared State (accessed by both cores) ──────────────────────
@@ -206,7 +239,14 @@ typedef struct {
     uint8_t              active_pattern[NUM_TRACKS]; // Edited pattern per track/section
     kit_config_t         kit_config[NUM_TRACKS];     // Kit settings per track
     volatile uint8_t     launch_quant;       // launch_quant_t; not saved
-    volatile uint8_t     track_mutes;        // Bitmask: bit N = track N muted for playback
+    volatile uint8_t     clock_source;       // clock_source_t; not saved, INT at power-up
+    volatile track_mask_t     track_mutes;        // Bitmask: bit N = track N muted for playback
+    // Bit N: a MUTE change of track N waits for the launch point; mute_target holds
+    // the live mute it writes there. Not saved; after sequencer_init(), which clears
+    // them before the timer runs, written and read only under the playback lock
+    // (64-bit: never read them without it).
+    volatile track_mask_t     mute_pending;
+    volatile track_mask_t     mute_target;
     // Spinlock index for mutex
     uint32_t             spinlock_num;
     bool                 spinlock_ready;
@@ -235,6 +275,24 @@ void transport_set_bpm(float bpm);
 void transport_set_mode(play_mode_t mode);
 void transport_set_launch_quant(launch_quant_t q);  // ignores q >= COUNT
 launch_quant_t transport_get_launch_quant(void);
+// Core 0. Ignores source >= COUNT. Playing: to INT, the internal timer takes over at
+// the measured tempo; to EXT or AUTO, the Clock is followed once one is there (EXT
+// with no Clock stops). Stopped and armed: to INT disarms.
+void transport_set_clock_source(clock_source_t source);
+clock_source_t transport_get_clock_source(void);
+// A start waits for the first external Clock (PLAY or Start/Continue from the wire).
+// Takes the playback lock.
+bool transport_armed(void);
+// Playing, or armed: one read under the playback lock, so a start from the wire is
+// seen whole. PLAY stops (or disarms) when it is true.
+bool transport_running(void);
+// True when the VALUE knob sets the tempo: INT, or AUTO with no Clock followed or
+// present. Takes the playback lock.
+bool transport_tempo_is_internal(void);
+// Flash save and load: false unless stopped and not armed; then core 1 starts
+// nothing from the wire until sequencer_storage_end().
+bool sequencer_storage_begin(void);
+void sequencer_storage_end(void);
 void sequencer_panic(void);
 void sequencer_refresh_track_playback(uint8_t track, uint8_t pattern_index);
 void sequencer_get_jitter_stats(sequencer_jitter_stats_t *out);
@@ -288,7 +346,29 @@ void transport_clear_track_queue(uint8_t track);
 // the location, their queues are cancelled. Otherwise each one already on it
 // loses any queue and keeps playing, and each other one is queued to it
 // (selected at once while stopped). False for an invalid location or Song mode.
-bool transport_launch(uint8_t track_mask, uint8_t pattern_index);
+bool transport_launch(track_mask_t track_mask, uint8_t pattern_index);
+
+// MUTE changes, Core 0; each takes the locks itself: call with none held. A change
+// gives a track a target live mute (1 = muted), decided and published in one critical
+// section. It applies at once while the transport is not playing or under the STEP
+// launch quantization, and otherwise waits for the next launch point (TRACK LOOP is
+// the bar in Song mode), where the timer applies it before that step plays. While a
+// change to audible waits, the live bit keeps a track muted by its stored mute
+// silent; after the section the stored mute of every location of the track is cleared.
+//
+// A MUTE press: each track in `mask` with a waiting change loses it; each other track
+// in `mask` gets a change to the opposite of its state (seq_get_track_mutes()'s rule).
+void transport_toggle_mutes(track_mask_t mask);
+// A group's release: each track in `mask` loses its waiting change, and each one whose
+// bit of `target` differs from its state now gets a change to that bit. A track already
+// in its target state gets none: nothing waits, and its stored mutes stay.
+void transport_set_mutes(track_mask_t mask, track_mask_t target);
+// Cancels the waiting changes in `mask`. Returns the tracks that had one; when `target`
+// is not NULL, *target gets their target bits.
+track_mask_t transport_cancel_mutes(track_mask_t mask, track_mask_t *target);
+// The selector: cancels the waiting changes in `mask` and toggles those tracks at
+// once, whatever the transport state and the quantization.
+void transport_toggle_mutes_now(track_mask_t mask);
 
 typedef struct {
     transport_state_t state;
@@ -297,8 +377,15 @@ typedef struct {
     uint8_t           current[NUM_TRACKS];
     uint8_t           queued[NUM_TRACKS];
     uint8_t           track_step[NUM_TRACKS];
-    uint8_t           live_mutes;    // g_seq.track_mutes
-    uint8_t           stored_mutes;  // bit c: patterns[current[c]].tracks[c].muted
+    track_mask_t           live_mutes;    // g_seq.track_mutes
+    track_mask_t           stored_mutes;  // bit c: patterns[current[c]].tracks[c].muted
+    track_mask_t           mute_pending;  // g_seq.mute_pending
+    uint8_t           clock_source;  // clock_source_t
+    bool              ext_following; // the pulses come from the external Clock
+    bool              ext_armed;     // a start waits for the first Clock
+    bool              ext_present;   // Clocks arrive: two or more, the last within the timeout
+    uint32_t          ext_shown_x16; // the shown Clock interval, us x 16; 0 = not known
+    float             bpm;           // the internal tempo (transport.bpm)
 } transport_snapshot_t;
 
 // Consistent copy of the transport; takes the locks itself.
@@ -306,6 +393,7 @@ void sequencer_snapshot(transport_snapshot_t *out);
 
 // Bit (track * 8 + slot): location bank * 8 + slot has an active step within
 // the track's length (stored mutes ignored). Takes seq_lock: call with none held.
+uint64_t sequencer_page_clips(uint8_t bank, uint8_t page);
 uint64_t sequencer_clip_mask(uint8_t bank);
 
 // Track mutes (bitmask, instant)
@@ -321,16 +409,26 @@ bool seq_set_track_config(uint8_t track, const track_config_t *config);
 void seq_set_kit_config(uint8_t track, const kit_config_t *config);
 // Bit t set when track t is a kit in any location. Takes seq_lock: call with none
 // held.
-uint8_t seq_kit_tracks(void);
-// The MUTE button. A track that is muted (live, or stored at the location it
-// plays) becomes audible: the live bit and the stored mute of every location
-// are cleared and its prepared rows refreshed. An audible track gets the live
-// mute. Takes seq_lock: call with none held.
+track_mask_t seq_kit_tracks(void);
+// An immediate mute toggle, what the MUTE key did before its changes waited for
+// the launch point. Nothing in the firmware calls it now: a MUTE press goes
+// through transport_toggle_mutes() and the selector through
+// transport_toggle_mutes_now(); the host tests still use it. A track that is
+// muted (live, or stored at the location it plays) becomes audible: the live bit
+// and the stored mute of every location are cleared and its prepared rows
+// refreshed. An audible track gets the live mute. A waiting MUTE change is left
+// as it is. Takes seq_lock: call with none held.
 void seq_toggle_track_mute(uint8_t track);
 // The muted tracks, by the rule MUTE uses: bit c set when the live mute is set
 // or the location track c plays has its stored mute. Takes seq_lock: call with
 // none held.
-uint8_t seq_get_track_mutes(void);
+track_mask_t seq_get_track_mutes(void);
+// The same, for a caller that holds seq_lock.
+track_mask_t seq_track_mutes_locked(void);
+// Clears the stored mute of every location for the tracks in `mask`, one location
+// per lock section, then refreshes the prepared rows of each track that had one.
+// Takes seq_lock: call with none held.
+void seq_clear_stored_mutes(track_mask_t mask);
 
 // midi_out.c
 void midi_init(void);
@@ -413,7 +511,14 @@ void display_draw_track_config(const track_config_t *tc, uint8_t track,
 void display_draw_kit_config(const track_config_t *tc, const kit_config_t *kc,
                              uint8_t track, uint8_t param);
 void display_draw_song_view(const song_t *s, uint16_t pos, uint8_t track);
-void display_draw_bpm(float bpm);
+// The tempo at the top right. prefix NULL: as with INT ("%5.1f"); else the prefix
+// and the tempo, or "--.-" when it is not known (bpm <= 0).
+void display_draw_bpm(const char *prefix, float bpm);
+// The tempo the screens show (ui_render sets it every frame): prefix NULL shows bpm as
+// INT always did; else "EXT" or "INT" comes first and bpm <= 0 shows "--.-". The
+// Session view's tempo line, the roll's info column and the kit FLAM time use it;
+// bpm 0 with no prefix falls back to transport.bpm.
+void display_set_tempo(const char *prefix, float bpm);
 void display_draw_text(uint8_t x, uint8_t y, const char *text);
 
 // ui.c — Core 0

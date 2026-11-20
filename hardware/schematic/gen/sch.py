@@ -197,6 +197,7 @@ class Part:
         self.at, self.rot, self.mirror, self.unit = at, rot, mirror, unit
         self.conn, self.footprint, self.fields = conn, footprint, fields
         self.dnp, self.extra_props, self.in_bom = dnp, extra_props, in_bom
+        self.variants = {}
         self.uuid = uid(sheet.file, ref, unit)
 
     def pin_xy(self, number):
@@ -399,8 +400,16 @@ class Sheet:
             lines.append(self._field(k, v, (x, y), hide=True))
         for pin in p.sym.unit_pins(p.unit):
             lines.append("(pin %s (uuid %s))" % (q(pin.number), q(uid(p.uuid, "pin", pin.number))))
-        lines.append("(instances (project %s (path %s (reference %s) (unit %d))))"
-                     % (q(PROJECT), q(inst_path), q(p.ref), p.unit))
+        variants = []
+        for name, override in p.variants.items():
+            attributes = [f"(name {q(name)})"]
+            if "dnp" in override:
+                attributes.append("(dnp %s)" % ("yes" if override["dnp"] else "no"))
+            for field, value in override.get("fields", {}).items():
+                attributes.append(f"(field (name {q(field)}) (value {q(value)}))")
+            variants.append(" (variant " + " ".join(attributes) + ")")
+        lines.append("(instances (project %s (path %s (reference %s) (unit %d)%s)))"
+                     % (q(PROJECT), q(inst_path), q(p.ref), p.unit, "".join(variants)))
         return "  " + "\n    ".join(lines) + ")"
 
     def render(self, inst_path):

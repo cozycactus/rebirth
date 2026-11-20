@@ -6,9 +6,12 @@
 
 // ─── Track Names ───────────────────────────────────────────────
 
-static const char *track_names[NUM_TRACKS] = {
-    "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8",
-};
+// All callers render on Core 0 and use one track label per draw call.
+static const char *track_name(uint8_t track) {
+    static char label[5];
+    snprintf(label, sizeof(label), "T%u", (unsigned)track + 1u);
+    return label;
+}
 
 static void pattern_label(uint8_t pattern, char *buf, size_t len) {
     snprintf(buf, len, "%c%d",
@@ -53,10 +56,38 @@ void display_draw_text(uint8_t x, uint8_t y, const char *text) {
 
 // ─── BPM Display ───────────────────────────────────────────────
 
-void display_draw_bpm(float bpm) {
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%5.1f", (double)bpm);
-    ssd1309_draw_string(78, 0, buf, false);
+static const char *tempo_prefix;    // NULL: INT, shown as always
+static float tempo_bpm;             // 0: transport.bpm (no prefix) or not known
+
+void display_set_tempo(const char *prefix, float bpm) {
+    tempo_prefix = prefix;
+    tempo_bpm = bpm;
+}
+
+// The tempo the screens show; <= 0 when an external one is not known.
+static float shown_bpm(void) {
+    if (!tempo_prefix && tempo_bpm <= 0.0f) return g_seq.transport.bpm;
+    return tempo_bpm;
+}
+
+// "%5.1f", or with a prefix "EXT 145.0" / "EXT  --.-".
+static void format_tempo(char *buf, size_t size, const char *prefix, float bpm) {
+    if (!prefix) {
+        snprintf(buf, size, "%5.1f", (double)bpm);
+    } else if (bpm > 0.0f) {
+        snprintf(buf, size, "%s %5.1f", prefix, (double)bpm);
+    } else {
+        snprintf(buf, size, "%s  --.-", prefix);
+    }
+}
+
+void display_draw_bpm(const char *prefix, float bpm) {
+    char buf[12];
+    format_tempo(buf, sizeof(buf), prefix, bpm);
+    // Without a prefix at x 78 as always; with one it ends left of the transport
+    // symbol, clear of the header (at most 10 characters).
+    uint8_t x = prefix ? (uint8_t)(OLED_WIDTH - FONT_CHAR_W * 2 - FONT_CHAR_W * strlen(buf)) : 78;
+    ssd1309_draw_string(x, 0, buf, false);
 }
 
 // ─── Step Grid (shared by multiple views) ──────────────────────
@@ -235,6 +266,9 @@ void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mod
         snprintf(line, sizeof(line), "BANK %c  MIXED", 'A' + bank);
     }
     ssd1309_draw_string(0, 0, line, false);
+    unsigned first = (focus_track / PANEL_TRACKS) * PANEL_TRACKS + 1u;
+    snprintf(line, sizeof(line), "%u-%u", first, first + PANEL_TRACKS - 1u);
+    ssd1309_draw_string(13 * FONT_CHAR_W, 0, line, false);
     ssd1309_draw_string((FONT_COLS - 1) * FONT_CHAR_W, 0,
                         mode == PLAY_MODE_SONG ? "S" : "P", false);
 
@@ -243,15 +277,22 @@ void display_draw_session_view(uint8_t bank, uint8_t common_row, play_mode_t mod
     bool kit = kit_lane && kit_strip;
     if (kit) {
         snprintf(line, sizeof(line), "%s  %s  %s  LEN %u",
-                 track_names[focus_track], label, kit_lane, (unsigned)focus_length);
+                 track_name(focus_track), label, kit_lane, (unsigned)focus_length);
     } else {
         snprintf(line, sizeof(line), "%s  %s  LEN %u",
-                 track_names[focus_track], label, (unsigned)focus_length);
+                 track_name(focus_track), label, (unsigned)focus_length);
     }
     ssd1309_draw_string(0, 14, line, false);
 
-    snprintf(line, sizeof(line), "%5.1f BPM %s", (double)bpm,
-             display_launch_quant_name(quant));
+    if (tempo_prefix) {
+        // "EXT 145.0 1 BAR": the prefix takes the place of the word BPM.
+        char tempo[12];
+        format_tempo(tempo, sizeof(tempo), tempo_prefix, bpm);
+        snprintf(line, sizeof(line), "%s %s", tempo, display_launch_quant_name(quant));
+    } else {
+        snprintf(line, sizeof(line), "%5.1f BPM %s", (double)bpm,
+                 display_launch_quant_name(quant));
+    }
     ssd1309_draw_string(0, 28, line, false);
 
     uint8_t bar_y = BAR_Y, bar_h = BAR_H;
@@ -297,19 +338,19 @@ static void draw_transport_symbol(void) {
 
 // Mute line (y=44, the track underlined) and the track's queued location (y=56).
 static void draw_mutes_and_queue(uint8_t track) {
-    uint8_t mutes = seq_get_track_mutes();
+    uint8_t mutes = (uint8_t)(seq_get_track_mutes() >> (track / PANEL_TRACKS * PANEL_TRACKS));
     char mute_str[22];
     snprintf(mute_str, sizeof(mute_str), "M:");
-    for (int t = 0; t < NUM_TRACKS; t++) {
+    for (int t = 0; t < PANEL_TRACKS; t++) {
         char c = (mutes & (1 << t)) ? '_' : ('1' + t);
         mute_str[2 + t * 2] = c;
         mute_str[3 + t * 2] = ' ';
     }
-    mute_str[2 + NUM_TRACKS * 2] = '\0';
+    mute_str[2 + PANEL_TRACKS * 2] = '\0';
     ssd1309_draw_string(0, 44, mute_str, false);
 
     // Highlight current track in mute display
-    uint8_t mx = (2 + track * 2) * FONT_CHAR_W;
+    uint8_t mx = (2 + (track % PANEL_TRACKS) * 2) * FONT_CHAR_W;
     ssd1309_draw_hline(mx, mx + FONT_CHAR_W - 1, 52, true);
 
     // ── Pattern queue indicator ──
@@ -470,7 +511,12 @@ static void draw_piano_roll(const pattern_t *p, uint8_t track, uint8_t play_step
     char note_str[5];
     note_to_str((uint8_t)base, note_str);
     ssd1309_draw_string(0, 48, note_str, false);
-    snprintf(text, sizeof(text), "%d", (int)(g_seq.transport.bpm + 0.5f));
+    float bpm = shown_bpm();
+    if (bpm > 0.0f) {
+        snprintf(text, sizeof(text), "%d", (int)(bpm + 0.5f));
+    } else {
+        snprintf(text, sizeof(text), "--");
+    }
     ssd1309_draw_string(0, 56, text, false);
 
     // Held step marker in column 23, the spare column of the info column. It
@@ -493,7 +539,7 @@ void display_draw_pattern_view(const pattern_t *p, uint8_t track, uint8_t step, 
     pattern_label(g_seq.active_pattern[track], label, sizeof(label));
 
     char header[22];
-    snprintf(header, sizeof(header), "%-3s %-3s", label, track_names[track]);
+    snprintf(header, sizeof(header), "%-3s %-3s", label, track_name(track));
     ssd1309_draw_string(0, 0, header, false);
 
     // BPM is drawn separately (by display_draw_bpm or ui_render)
@@ -544,7 +590,7 @@ void display_draw_kit_lane_view(uint8_t track, uint8_t location, const char *lan
     char label[4];
     pattern_label(location, label, sizeof(label));
     char line[22];
-    snprintf(line, sizeof(line), "%-3s %-3s %s", label, track_names[track], lane ? lane : "");
+    snprintf(line, sizeof(line), "%-3s %-3s %s", label, track_name(track), lane ? lane : "");
     ssd1309_draw_string(0, 0, line, false);
     draw_transport_symbol();                // BPM is drawn by ui_render
 
@@ -569,7 +615,7 @@ void display_draw_step_edit(const pattern_t *p, uint8_t track, uint8_t step) {
     // Header
     char header[22];
     snprintf(header, sizeof(header), "EDIT %s Step %02d",
-             track_names[track], step + 1);
+             track_name(track), step + 1);
     ssd1309_draw_string(0, 0, header, false);
 
     // Note and velocity
@@ -629,7 +675,7 @@ void display_draw_kit_step_edit(uint8_t track, uint8_t step, uint32_t word, uint
     if (cursor_lane >= KIT_LANES) cursor_lane = KIT_LANE_AC;
 
     char line[22];
-    snprintf(line, sizeof(line), "KIT %s  STEP %02u", track_names[track], step + 1u);
+    snprintf(line, sizeof(line), "KIT %s  STEP %02u", track_name(track), step + 1u);
     ssd1309_draw_string(0, 0, line, false);
 
     for (uint8_t lane = 0; lane < KIT_LANES; lane++) {
@@ -675,6 +721,12 @@ void display_draw_pattern_select(uint8_t pattern,
     } else {
         ssd1309_draw_string(12, 30, "Queued: ---", false);
     }
+    // The clock source (step 15), right of the queue line.
+    static const char *const sources[CLOCK_SOURCE_COUNT] = {"INT", "EXT", "AUTO"};
+    char clk[9];
+    snprintf(clk, sizeof(clk), "CLK %s",
+             g_seq.clock_source < CLOCK_SOURCE_COUNT ? sources[g_seq.clock_source] : "?");
+    ssd1309_draw_string(OLED_WIDTH - FONT_CHAR_W * (uint8_t)strlen(clk), 30, clk, false);
 
     char len[22];
     snprintf(len, sizeof(len), "Len: %2d step", length);
@@ -682,12 +734,12 @@ void display_draw_pattern_select(uint8_t pattern,
 
     // Track mutes display
     char mute_line[24] = "Mutes: ";
-    for (int t = 0; t < NUM_TRACKS; t++) {
+    for (int t = 0; t < PANEL_TRACKS; t++) {
         char c = (mutes & (1 << t)) ? '_' : ('1' + t);
         mute_line[7 + t * 2] = c;
         mute_line[8 + t * 2] = ' ';
     }
-    mute_line[7 + NUM_TRACKS * 2] = '\0';
+    mute_line[7 + PANEL_TRACKS * 2] = '\0';
     ssd1309_draw_string(0, 44, mute_line, false);
 
     sequencer_jitter_stats_t jit;
@@ -699,60 +751,77 @@ void display_draw_pattern_select(uint8_t pattern,
         ssd1309_draw_string(0, 8, drops, false);
     }
     char jit_line[22];
-    snprintf(jit_line, sizeof(jit_line), "J:%ld P:%lu I:%lu",
-             (long)jit.max_irq_latency_us,
-             (unsigned long)jit.max_abs_period_error_us,
-             (unsigned long)jit.max_isr_duration_us);
+    if (g_seq.clock_source != CLOCK_SOURCE_INT) {
+        // The external clock: largest Clock deviation, losses, bursts caught up.
+        snprintf(jit_line, sizeof(jit_line), "X:%lu L:%lu C:%lu",
+                 (unsigned long)jit.ext_max_dev_us, (unsigned long)jit.ext_losses,
+                 (unsigned long)jit.ext_catchups);
+    } else {
+        snprintf(jit_line, sizeof(jit_line), "J:%ld P:%lu I:%lu",
+                 (long)jit.max_irq_latency_us,
+                 (unsigned long)jit.max_abs_period_error_us,
+                 (unsigned long)jit.max_isr_duration_us);
+    }
     ssd1309_draw_string(0, 56, jit_line, false);
 }
 
 // ─── Track Config View ─────────────────────────────────────────
 
+#define CONFIG_Y        12
+#define CONFIG_PITCH    10
+#define CONFIG_ROWS     5
+
+static void track_config_row(const track_config_t *tc, uint8_t param,
+                             char *line, size_t len) {
+    switch (param) {
+        case TRACK_PARAM_TYPE:
+            snprintf(line, len, " Type:   %s", tc->type == TRACK_TYPE_SYNTH ? "Synth" : "Drum");
+            break;
+        case TRACK_PARAM_CHANNEL:
+            snprintf(line, len, " MIDI Ch: %d", tc->midi_channel + 1);
+            break;
+        case TRACK_PARAM_OUTPUT: {
+            const char *out = "MIDI";
+            if (tc->output_mode == OUTPUT_CV_GATE) out = "CV/Gate";
+            if (tc->output_mode == OUTPUT_BOTH) out = "MIDI+CV";
+            snprintf(line, len, " Output: %s", out);
+            break;
+        }
+        case TRACK_PARAM_GATE:
+            snprintf(line, len, " Gate:   %d%%", tc->gate_length_pct);
+            break;
+        case TRACK_PARAM_NOTE:
+            if (tc->type == TRACK_TYPE_DRUM) {
+                char note[5];
+                note_to_str(tc->drum_note, note);
+                snprintf(line, len, " Note:   %s (%d)", note, tc->drum_note);
+                break;
+            }
+            // Falls through.
+        default:
+            snprintf(line, len, " CV/Gate: %d", tc->cv_channel + 1);
+            break;
+    }
+}
+
 void display_draw_track_config(const track_config_t *tc, uint8_t track,
                                 uint8_t param_cursor) {
-    // Title
-    char title[22];
-    snprintf(title, sizeof(title), "TRACK %d CONFIG", track + 1);
-    ssd1309_draw_string(0, 0, title, false);
+    char line[22];
+    snprintf(line, sizeof(line), "TRACK %d CONFIG", track + 1);
+    ssd1309_draw_string(0, 0, line, false);
 
-    // Type
-    const char *type_str = (tc->type == TRACK_TYPE_SYNTH) ? "Synth" : "Drum";
-    char line0[22];
-    snprintf(line0, sizeof(line0), " Type:   %s", type_str);
-    ssd1309_draw_string(0, 12, line0, param_cursor == 0);
-
-    // MIDI channel
-    char line1[22];
-    snprintf(line1, sizeof(line1), " MIDI Ch: %d", tc->midi_channel + 1);
-    ssd1309_draw_string(0, 22, line1, param_cursor == 1);
-
-    // Output mode
-    const char *out_str;
-    switch (tc->output_mode) {
-        case OUTPUT_CV_GATE: out_str = "CV/Gate"; break;
-        case OUTPUT_BOTH:    out_str = "MIDI+CV"; break;
-        default:             out_str = "MIDI"; break;
+    const uint8_t first = param_cursor == TRACK_PARAM_DRUM_CV ? 1 : 0;
+    for (uint8_t row = 0; row < CONFIG_ROWS; row++) {
+        uint8_t param = first + row;
+        uint8_t y = CONFIG_Y + row * CONFIG_PITCH;
+        track_config_row(tc, param, line, sizeof(line));
+        ssd1309_draw_string(0, y, line, param_cursor == param);
+        if (param_cursor == param) ssd1309_draw_char(0, y, '>', false);
     }
-    char line2[22];
-    snprintf(line2, sizeof(line2), " Output: %s", out_str);
-    ssd1309_draw_string(0, 32, line2, param_cursor == 2);
-
-    // Gate length
-    char line3[22];
-    snprintf(line3, sizeof(line3), " Gate:   %d%%", tc->gate_length_pct);
-    ssd1309_draw_string(0, 42, line3, param_cursor == 3);
-
-    // Drum note (only for drum tracks)
-    if (tc->type == TRACK_TYPE_DRUM) {
-        char note_str[5];
-        note_to_str(tc->drum_note, note_str);
-        char line4[22];
-        snprintf(line4, sizeof(line4), " Note:   %s (%d)", note_str, tc->drum_note);
-        ssd1309_draw_string(0, 52, line4, param_cursor == 4);
+    if (first) ssd1309_draw_char(OLED_WIDTH - FONT_CHAR_W, CONFIG_Y, '^', false);
+    else if (tc->type == TRACK_TYPE_DRUM) {
+        ssd1309_draw_char(OLED_WIDTH - FONT_CHAR_W, CONFIG_Y + (CONFIG_ROWS - 1) * CONFIG_PITCH, 'v', false);
     }
-
-    // Cursor arrow on selected param
-    ssd1309_draw_char(0, 12 + param_cursor * 10, '>', false);
 }
 
 // ─── Kit Config View ───────────────────────────────────────────
@@ -760,10 +829,6 @@ void display_draw_track_config(const track_config_t *tc, uint8_t track,
 // Title, then five of the KIT_PARAM_COUNT rows (y=12..52, 10 px apart),
 // scrolled to keep the cursor row in view; '^'/'v' at the right edge when rows
 // lie above/below.
-
-#define CONFIG_Y        12
-#define CONFIG_PITCH    10
-#define CONFIG_ROWS     5
 
 // One row of the kit list into `line`: label, then value.
 static void kit_config_row(const track_config_t *tc, const kit_config_t *kc, uint8_t param,
@@ -785,7 +850,7 @@ static void kit_config_row(const track_config_t *tc, const kit_config_t *kc, uin
             break;
         case KIT_PARAM_FLAM: {
             // Pulses, and their time at the current tempo.
-            float bpm = g_seq.transport.bpm;
+            float bpm = shown_bpm();
             float ms = bpm > 0.0f ? (float)kc->flam_pulses * 60000.0f / (bpm * (float)PPQN) : 0.0f;
             snprintf(label, sizeof(label), "FLAM");
             snprintf(value, sizeof(value), "%u %.1fms", (unsigned)kc->flam_pulses, (double)ms);

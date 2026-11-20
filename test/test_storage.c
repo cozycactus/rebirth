@@ -18,6 +18,14 @@ static bool all_inputs_resynced(unsigned times) {
     return resync_calls == times && mcp_resync_calls == times && encoder_resync_calls == times;
 }
 
+#define IMG (fake_flash + STORE_OFFSET)
+#define OLD_BYTES (128u * 1024)
+
+// No eight-track save: a load has only the current slot to go by.
+static void no_old_save(void) {
+    memset(fake_flash + OLD_STORE, 0xff, OLD_BYTES);
+}
+
 static void test_save_resyncs_panel_input(void) {
     resync_calls = mcp_resync_calls = encoder_resync_calls = 0;
     CHECK(flash_storage_save());
@@ -38,6 +46,7 @@ static void test_save_resyncs_panel_input(void) {
 }
 
 static void test_load_resyncs_panel_input(void) {
+    no_old_save();
     resync_calls = mcp_resync_calls = encoder_resync_calls = 0;
     CHECK(flash_storage_load());
     CHECK(all_inputs_resynced(1));
@@ -50,28 +59,48 @@ static void test_load_resyncs_panel_input(void) {
 
 // ─── Image helpers ─────────────────────────────────────────────
 
-#define IMG (fake_flash + STORE_OFFSET)
-
-// Serialize the RAM patterns and song as a version 4 or 5 image.
+// Serialize the RAM patterns and song as a version 4, 5 or 6 image.
 static void write_legacy_image(uint8_t version) {
-    memset(IMG, 0xFF, STORE_ERASE);
-    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
-        pattern_v5_t record;
-        memcpy(&record, &g_seq.patterns[pattern], sizeof(record));
-        memcpy(IMG + PAT_OFFSET + pattern * sizeof(record), &record, sizeof(record));
+    memset(IMG, 0xff, STORE_ERASE);
+    uint8_t *old = fake_flash + OLD_STORE;
+    memset(old, 0xff, OLD_BYTES);
+    for (uint8_t i = 0; i < MAX_PATTERNS; i++) {
+        const pattern_t *p = &g_seq.patterns[i];
+        pattern_v6_t record = {0};
+        memcpy(record.steps, p->steps, sizeof(record.steps));
+        memcpy(record.tracks, p->tracks, sizeof(record.tracks));
+        memcpy(record.track_length, p->track_length, sizeof(record.track_length));
+        memcpy(record.name, p->name, sizeof(record.name));
+        record.swing = p->swing;
+        record.length = p->length;
+        memcpy(record.kit_steps, p->kit_steps, sizeof(record.kit_steps));
+        size_t stride = version == 6 ? sizeof(record) : sizeof(pattern_v5_t);
+        memcpy(old + PAT_OFFSET + i * stride, &record, stride);
     }
-    memcpy(IMG + V5_SONG_OFFSET, &g_seq.song, sizeof(song_t));
-    store_header_t *header = (store_header_t *)IMG;
-    memset(header, 0xFF, sizeof(*header));
+    old_song_t song = {0};
+    song.length = g_seq.song.length;
+    song.end_mode = g_seq.song.end_mode;
+    memcpy(song.name, g_seq.song.name, sizeof(song.name));
+    for (unsigned i = 0; i < song.length; i++) {
+        memcpy(song.entries[i].pattern_index, g_seq.song.entries[i].pattern_index, OLD_TRACKS);
+        song.entries[i].repeats = g_seq.song.entries[i].repeats;
+    }
+    memcpy(old + (version == 6 ? V6_SONG_OFFSET : V5_SONG_OFFSET), &song, sizeof(song));
+    store_header_t *header = (store_header_t *)old;
     header->magic = MAGIC;
     header->version = version;
-    if (version == V5_VERSION) {
-        header->checksum = payload_checksum_v5(IMG + PAT_OFFSET, IMG + V5_SONG_OFFSET);
+    if (version == 5) header->checksum = payload_checksum_v5(old + PAT_OFFSET, &song);
+    if (version == 6) {
+        const size_t bytes = OLD_TRACKS * sizeof(kit_config_t);
+        memcpy(old + V6_KIT_OFFSET, g_seq.kit_config, bytes);
+        uint32_t crc = crc32_update(UINT32_MAX, old + PAT_OFFSET, V6_PAT_BYTES);
+        crc = crc32_update(crc, &song, sizeof(song));
+        header->checksum = ~crc32_update(crc, old + V6_KIT_OFFSET, bytes);
     }
 }
 
-// Recompute the version 6 checksum after a test edited the image.
-static void reseal_v6(void) {
+// Recompute the current checksum after a test edited the image.
+static void reseal_v7(void) {
     store_header_t *header = (store_header_t *)IMG;
     header->checksum = payload_checksum(IMG + PAT_OFFSET, IMG + SONG_OFFSET, IMG + KIT_OFFSET);
 }
@@ -102,6 +131,128 @@ static void ram_restore(void) {
     memcpy(g_seq.kit_config, snap.kits, sizeof(snap.kits));
 }
 
+// A project in which the saved fields vary with the location, the track and
+// the step, and stay off the values pattern_init, song_clear and
+// kit_config_defaults give: a save or a load that drops or moves one shows.
+// All 64 tracks are filled, so what an eight-track save cannot hold shows too.
+// With kits, tracks 1 and 4 are kits in every location.
+static void fill_project(bool with_kits) {
+    for (uint8_t i = 0; i < MAX_PATTERNS; i++) {
+        pattern_t *p = &g_seq.patterns[i];
+        pattern_init(p, i);
+        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+            track_config_t *tc = &p->tracks[t];
+            bool kit = with_kits && (t == 1 || t == 4);
+            tc->type = kit ? TRACK_TYPE_KIT : (i + t) % 2 ? TRACK_TYPE_DRUM : TRACK_TYPE_SYNTH;
+            tc->midi_channel = (uint8_t)((t + 1 + i % 15) % 16);
+            tc->drum_note = (uint8_t)((36 + t + 1 + i) % 128);
+            tc->output_mode = t < NUM_CV_CHANNELS ? (i % 2 ? OUTPUT_MIDI_ONLY : OUTPUT_CV_GATE)
+                                                  : (i % 2 ? OUTPUT_CV_GATE : OUTPUT_BOTH);
+            tc->cv_channel = t < NUM_CV_CHANNELS ? (uint8_t)((t + 1 + i % 3) % NUM_CV_CHANNELS)
+                                                 : (uint8_t)(1 + (t + i) % 3);
+            tc->gate_length_pct = (uint8_t)(10 + (t * 7 + i) % 40);
+            tc->muted = (t + i) % 2 == 0;
+            p->track_length[t] = (uint8_t)(1 + (t + i) % 15);
+            for (uint8_t s = 0; s < STEPS_PER_PATTERN; s++) {
+                pattern_set_step(p, t, s, (uint8_t)((i + t + s) % 128),
+                                 (uint8_t)(1 + (i + 3 * t + s) % 127), (uint8_t)(1 + (i + t + s) % 15));
+                if (t >= KIT_TRACK_SLOTS) continue;
+                p->kit_steps[t][s] = kit_set(kit_set(0, KIT_LANE_AC, (i + s) % 2),
+                                             (uint8_t)(1 + (t + s) % KIT_VOICES), (uint8_t)(1 + (i + t) % 3));
+            }
+        }
+        p->length = (uint8_t)(1 + i % 15);
+        p->swing = (uint8_t)(51 + i);
+        memcpy(p->name, "LOC-00..", sizeof(p->name));
+        p->name[4] = (char)('0' + i / 10);
+        p->name[5] = (char)('0' + i % 10);
+    }
+    song_clear();
+    for (uint8_t entry = 0; entry < 5; entry++) {
+        uint8_t locations[NUM_TRACKS];
+        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+            locations[t] = (uint8_t)((entry * 7 + t + 1) % MAX_PATTERNS);
+        }
+        CHECK(song_append_patterns(locations, (uint8_t)(2 + entry)));
+    }
+    song_set_end_mode(SONG_END_STOP);
+    memcpy(g_seq.song.name, "SONGNAME", sizeof(g_seq.song.name));
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        kit_config_t *c = &g_seq.kit_config[t];
+        for (uint8_t voice = 0; voice < KIT_VOICES; voice++) c->note[voice] = (uint8_t)(20 + t + voice);
+        c->vel_normal = (uint8_t)(30 + t);
+        c->vel_accent = (uint8_t)(31 + t);
+        c->vel_max = (uint8_t)(32 + t);
+        c->flam_pulses = (uint8_t)(KIT_FLAM_MIN + t % KIT_FLAM_MAX);
+    }
+}
+
+// Leaves nothing in RAM that a load could pass off as loaded.
+static void scribble_ram(void) {
+    memset(g_seq.patterns, 0x5a, sizeof(g_seq.patterns));
+    memset(&g_seq.song, 0x5a, sizeof(g_seq.song));
+    memset(g_seq.kit_config, 0x5a, sizeof(g_seq.kit_config));
+}
+
+// Field by field: a record that was not copied whole has its own padding.
+static bool patterns_equal(const pattern_t *a, const pattern_t *b) {
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        const track_config_t *x = &a->tracks[t], *y = &b->tracks[t];
+        if (x->type != y->type || x->midi_channel != y->midi_channel ||
+            x->drum_note != y->drum_note || x->output_mode != y->output_mode ||
+            x->cv_channel != y->cv_channel || x->gate_length_pct != y->gate_length_pct ||
+            x->muted != y->muted) return false;
+    }
+    return memcmp(a->steps, b->steps, sizeof(a->steps)) == 0 &&
+           memcmp(a->track_length, b->track_length, sizeof(a->track_length)) == 0 &&
+           memcmp(a->kit_steps, b->kit_steps, sizeof(a->kit_steps)) == 0 &&
+           a->length == b->length && a->swing == b->swing && strcmp(a->name, b->name) == 0;
+}
+
+static bool songs_equal(const song_t *a, const song_t *b) {
+    if (a->length != b->length || a->end_mode != b->end_mode || strcmp(a->name, b->name)) return false;
+    for (unsigned i = 0; i < a->length; i++) {
+        if (a->entries[i].repeats != b->entries[i].repeats ||
+            memcmp(a->entries[i].pattern_index, b->entries[i].pattern_index, NUM_TRACKS)) return false;
+    }
+    return true;
+}
+
+// What loading an eight-track save of the snapshot must leave in RAM: the
+// first eight tracks as saved and the other 56 as new, in the locations and
+// in the song. Kit steps and kit settings are in a version 6 save only.
+static void check_migrated(uint8_t version) {
+    static pattern_t want;
+    for (uint8_t i = 0; i < MAX_PATTERNS; i++) {
+        const pattern_t *saved = &snap.patterns[i];
+        pattern_init(&want, i);
+        memcpy(want.steps, saved->steps, sizeof(want.steps[0]) * OLD_TRACKS);
+        memcpy(want.tracks, saved->tracks, sizeof(want.tracks[0]) * OLD_TRACKS);
+        memcpy(want.track_length, saved->track_length, OLD_TRACKS);
+        memcpy(want.name, saved->name, sizeof(want.name));
+        want.length = saved->length;
+        want.swing = saved->swing;
+        if (version == 6) memcpy(want.kit_steps, saved->kit_steps, sizeof(want.kit_steps));
+        CHECK(patterns_equal(&g_seq.patterns[i], &want));
+    }
+    static song_t song;
+    memset(&song, 0, sizeof(song));
+    song.length = snap.song.length;
+    song.end_mode = snap.song.end_mode;
+    memcpy(song.name, snap.song.name, sizeof(song.name));
+    for (unsigned i = 0; i < song.length; i++) {
+        memcpy(song.entries[i].pattern_index, snap.song.entries[i].pattern_index, OLD_TRACKS);
+        song.entries[i].repeats = snap.song.entries[i].repeats;
+    }
+    CHECK(songs_equal(&g_seq.song, &song));
+    kit_config_t defaults;
+    kit_config_defaults(&defaults);
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        const kit_config_t *kit = version == 6 && t < OLD_TRACKS ? &snap.kits[t] : &defaults;
+        CHECK(memcmp(&g_seq.kit_config[t], kit, sizeof(*kit)) == 0);
+    }
+}
+
 static void set_kit_tracks(uint8_t track_a, uint8_t track_b) {
     for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
         g_seq.patterns[pattern].tracks[track_a].type = TRACK_TYPE_KIT;
@@ -109,7 +260,7 @@ static void set_kit_tracks(uint8_t track_a, uint8_t track_b) {
     }
 }
 
-static void test_v6_round_trip(void) {
+static void test_v7_round_trip(void) {
     set_kit_tracks(1, 4);
     g_seq.patterns[5].kit_steps[1][3] = kit_set(0, 2, 3);
     g_seq.patterns[31].kit_steps[4][15] = kit_set(kit_set(0, 0, 1), 7, 2);
@@ -119,12 +270,12 @@ static void test_v6_round_trip(void) {
     cfg.vel_normal = 70;
     cfg.flam_pulses = 5;
     seq_set_kit_config(1, &cfg);
+    pattern_set_step(&g_seq.patterns[23], 63, 15, 74, 99, STEP_FLAG_ACTIVE);
+    g_seq.song.entries[0].pattern_index[63] = 23;
     CHECK(flash_storage_save());
     CHECK(((store_header_t *)IMG)->version == VERSION);
     ram_take();
-    memset(g_seq.patterns, 0, sizeof(g_seq.patterns));
-    memset(g_seq.kit_config, 0, sizeof(g_seq.kit_config));
-    song_clear();
+    scribble_ram();
     CHECK(flash_storage_load());
     CHECK(g_seq.patterns[5].kit_steps[1][3] == kit_set(0, 2, 3));
     CHECK(g_seq.patterns[5].tracks[1].type == TRACK_TYPE_KIT);
@@ -132,80 +283,126 @@ static void test_v6_round_trip(void) {
     CHECK(g_seq.kit_config[1].note[0] == 40);
     CHECK(g_seq.kit_config[1].vel_normal == 70);
     CHECK(g_seq.kit_config[1].flam_pulses == 5);
-    snap.song = g_seq.song;     // song_clear above changed it; only compare patterns and kits
-    CHECK(memcmp(snap.patterns, g_seq.patterns, sizeof(snap.patterns)) == 0);
-    CHECK(memcmp(snap.kits, g_seq.kit_config, sizeof(snap.kits)) == 0);
+    CHECK(g_seq.song.entries[0].pattern_index[63] == 23);
+    CHECK(g_seq.patterns[23].steps[63][15].note == 74);
+    CHECK(ram_unchanged());
+
+    // And a project with every field of all 64 tracks in use.
+    fill_project(true);
+    CHECK(flash_storage_save());
+    ram_take();
+    scribble_ram();
+    CHECK(flash_storage_load());
+    CHECK(ram_unchanged());
 }
 
+// An eight-track save of a full project loads as check_migrated() says.
 static void expect_legacy_load(uint8_t version) {
-    // Start from a kit-free state with a recognizable song and steps.
-    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
-        for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-            g_seq.patterns[pattern].tracks[track].type =
-                track == 5 ? TRACK_TYPE_DRUM : TRACK_TYPE_SYNTH;
-            memset(g_seq.patterns[pattern].kit_steps[track], 0,
-                   sizeof(g_seq.patterns[pattern].kit_steps[track]));
-        }
-    }
-    pattern_set_step(&g_seq.patterns[9], 3, 4, 61, 99, STEP_FLAG_ACTIVE);
-    g_seq.patterns[9].swing = 40;
-    song_clear();
-    CHECK(song_append(9, 3));
-    CHECK(song_append(2, 1));
+    fill_project(version == 6);
     ram_take();
     write_legacy_image(version);
-    // Garbage the kit data in RAM so the load must replace it.
-    set_kit_tracks(0, 1);
-    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
-        g_seq.patterns[pattern].kit_steps[0][0] = 0x55;
-        g_seq.patterns[pattern].tracks[0].type = TRACK_TYPE_SYNTH;
-        g_seq.patterns[pattern].tracks[1].type = TRACK_TYPE_SYNTH;
-    }
-    memset(g_seq.kit_config, 0, sizeof(g_seq.kit_config));
+    scribble_ram();
     CHECK(flash_storage_is_valid());
     CHECK(flash_storage_load());
-    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
-        CHECK(memcmp(&g_seq.patterns[pattern], &snap.patterns[pattern],
-                     sizeof(pattern_v5_t)) == 0);
-        for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-            for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
-                CHECK(g_seq.patterns[pattern].kit_steps[track][step] == 0);
-            }
-        }
-    }
-    CHECK(g_seq.patterns[9].steps[3][4].note == 61);
-    CHECK(memcmp(&g_seq.song, &snap.song, sizeof(song_t)) == 0);
-    kit_config_t defaults;
-    kit_config_defaults(&defaults);
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
-        CHECK(memcmp(&g_seq.kit_config[track], &defaults, sizeof(defaults)) == 0);
-    }
+    check_migrated(version);
 }
 
 static void test_legacy_images(void) {
+    set_kit_tracks(1, 4);
+    g_seq.patterns[31].kit_steps[4][15] = kit_set(0, 7, 2);
+    g_seq.kit_config[1].note[0] = 42;
+    write_legacy_image(6);
+    g_seq.patterns[31].kit_steps[4][15] = 0;
+    g_seq.kit_config[1].note[0] = 0;
+    CHECK(flash_storage_load());
+    CHECK(g_seq.patterns[31].tracks[4].type == TRACK_TYPE_KIT);
+    CHECK(g_seq.patterns[31].kit_steps[4][15] == kit_set(0, 7, 2));
+    CHECK(g_seq.kit_config[1].note[0] == 42);
+    CHECK(!(g_seq.patterns[23].steps[63][15].flags & STEP_FLAG_ACTIVE));
+    (fake_flash + OLD_STORE)[V6_KIT_OFFSET] ^= 1;
+    CHECK(!flash_storage_load());
+    expect_legacy_load(6);
     expect_legacy_load(V5_VERSION);
     // A flipped byte fails the v5 checksum.
     write_legacy_image(V5_VERSION);
-    IMG[PAT_OFFSET + 3 * sizeof(pattern_v5_t)] ^= 1;
+    (fake_flash + OLD_STORE)[PAT_OFFSET + 3 * sizeof(pattern_v5_t)] ^= 1;
     ram_take();
     CHECK(!flash_storage_is_valid());
     CHECK(!flash_storage_load());
     CHECK(ram_unchanged());
     // A v4 image has no checksum: any checksum field loads.
     write_legacy_image(LEGACY_VERSION);
-    ((store_header_t *)IMG)->checksum = 0x12345678u;
+    ((store_header_t *)(fake_flash + OLD_STORE))->checksum = 0x12345678u;
     CHECK(flash_storage_load());
     expect_legacy_load(LEGACY_VERSION);
     // A kit type is not valid in a legacy image.
     write_legacy_image(V5_VERSION);
-    ((pattern_v5_t *)(IMG + PAT_OFFSET))[2].tracks[1].type = TRACK_TYPE_KIT;
-    ((store_header_t *)IMG)->checksum =
-        payload_checksum_v5(IMG + PAT_OFFSET, IMG + V5_SONG_OFFSET);
+    ((pattern_v5_t *)((fake_flash + OLD_STORE) + PAT_OFFSET))[2].tracks[1].type = TRACK_TYPE_KIT;
+    ((store_header_t *)(fake_flash + OLD_STORE))->checksum =
+        payload_checksum_v5((fake_flash + OLD_STORE) + PAT_OFFSET, (fake_flash + OLD_STORE) + V5_SONG_OFFSET);
     CHECK(!flash_storage_is_valid());
     // A song past the limit in a v4 image is rejected.
     write_legacy_image(LEGACY_VERSION);
-    ((song_t *)(IMG + V5_SONG_OFFSET))->length = MAX_SONG_ENTRIES + 1;
+    ((old_song_t *)((fake_flash + OLD_STORE) + V5_SONG_OFFSET))->length = MAX_SONG_ENTRIES + 1;
     CHECK(!flash_storage_load());
+}
+
+// ─── A current slot with no valid save, next to an old save ────
+// A save cut short leaves the current slot looking exactly like one that was
+// never written, so the two cannot be told apart. Whenever the current slot
+// holds no valid save the load gives the eight-track one, and its result says
+// which save it gave.
+static void test_load_falls_back_on_the_old_save(void) {
+    fill_project(true);
+    ram_take();
+    fake_flash_programs = 0;
+    CHECK(flash_storage_save());
+    unsigned calls = fake_flash_programs;
+    write_legacy_image(6);                  // the old save; the current slot is blank again
+
+    // Never saved in the current format.
+    scribble_ram();
+    CHECK(flash_storage_load() == FLASH_LOAD_OLD_SAVE);
+    check_migrated(6);
+
+    // A save cut short with only its header missing.
+    ram_restore();
+    fake_flash_programs = 0;
+    fake_flash_program_limit = calls - 1;
+    CHECK(!flash_storage_save());
+    fake_flash_program_limit = UINT32_MAX;
+    CHECK(((store_header_t *)IMG)->magic != MAGIC);
+    scribble_ram();
+    CHECK(flash_storage_is_valid());
+    CHECK(flash_storage_load() == FLASH_LOAD_OLD_SAVE);
+    check_migrated(6);
+
+    // The header landed, part of the payload did not. The save must not pass
+    // for done because an old save is there.
+    ram_restore();
+    fake_flash_programs = 0;
+    fake_flash_program_skip = 0;
+    CHECK(!flash_storage_save());
+    fake_flash_program_skip = UINT32_MAX;
+    CHECK(((store_header_t *)IMG)->magic == MAGIC);
+    scribble_ram();
+    CHECK(flash_storage_is_valid());
+    CHECK(flash_storage_load() == FLASH_LOAD_OLD_SAVE);
+    check_migrated(6);
+
+    // A valid current save wins over the old one.
+    ram_restore();
+    CHECK(flash_storage_save());
+    scribble_ram();
+    CHECK(flash_storage_load() == FLASH_LOAD_OK);
+    CHECK(ram_unchanged());
+
+    // Neither is valid: nothing is loaded.
+    IMG[PAT_OFFSET] ^= 1;
+    (fake_flash + OLD_STORE)[V6_KIT_OFFSET] ^= 1;
+    CHECK(!flash_storage_is_valid());
+    CHECK(flash_storage_load() == FLASH_LOAD_FAILED);
+    CHECK(ram_unchanged());
 }
 
 enum { BAD_BIT24, BAD_AC2, BAD_NOTE, BAD_VEL0, BAD_FLAM13, BAD_THREE_KITS, BAD_COUNT };
@@ -226,6 +423,7 @@ static void apply_bad(int which, pattern_t *patterns, kit_config_t *kits) {
 }
 
 static void test_v6_rejections(void) {
+    no_old_save();
     for (int which = 0; which < BAD_COUNT; which++) {
         // Kits on tracks 1 and 4 in all 32 locations, except the three-kit case.
         set_kit_tracks(1, 4);
@@ -237,7 +435,7 @@ static void test_v6_rejections(void) {
         CHECK(flash_storage_save());
         ram_take();
         apply_bad(which, img_patterns(), img_kits());
-        reseal_v6();
+        reseal_v7();
         CHECK(!flash_storage_is_valid());
         CHECK(!flash_storage_load());
         CHECK(ram_unchanged());
@@ -258,10 +456,13 @@ static void test_v6_rejections(void) {
 }
 
 // ─── Short lock sections ───────────────────────────────────────
-// seq_lock() keeps Core 0's interrupts off, the UART TX interrupt with them. The save
-// and the load copy one pattern per section, and only once MIDI output is idle. Every
-// spin lock taken marks a section boundary here: between two, at most one of the
-// MAX_PATTERNS records watched may change.
+// seq_lock() keeps Core 0's interrupts off, the UART TX interrupt with them. The load
+// copies one pattern per section, and only once MIDI output is idle. Every seq_lock
+// taken marks a section boundary here: between two, at most one of the MAX_PATTERNS
+// records watched may change. (The playback lock that keeps the external clock from
+// starting anything during a save or a load is no boundary.) The save copies nothing:
+// it programs flash straight from RAM, which it must leave as it was, and it too
+// starts only once MIDI output is idle (the fake's flash_range_erase asserts that).
 
 static uint8_t *watched;
 static uint8_t watched_before[PAT_BYTES];
@@ -271,9 +472,8 @@ static unsigned seq_sections_midi_pending;  // seq_lock sections entered with MI
 
 static void watch_lock(spin_lock_t *lock) {
     fake_uart_writable = true;              // the wire frees up while the caller waits
-    if (lock == spin_lock_instance(g_seq.spinlock_num) && fake_uart_tx_irq) {
-        seq_sections_midi_pending++;
-    }
+    if (lock != spin_lock_instance(g_seq.spinlock_num)) return;
+    if (fake_uart_tx_irq) seq_sections_midi_pending++;
     if (watch_started) {
         unsigned changed = 0;
         for (unsigned p = 0; p < MAX_PATTERNS; p++) {
@@ -316,11 +516,11 @@ static void test_copies_one_pattern_per_lock_section(void) {
     song_clear();
     CHECK(song_append(3, 2));
 
-    watch(pattern_buf);
-    CHECK(flash_storage_save());
-    CHECK(most_changed == 1);
-    CHECK(seq_sections_midi_pending == 0);
     ram_take();
+    watch(g_seq.patterns);
+    CHECK(flash_storage_save());
+    CHECK(ram_unchanged());
+    CHECK(seq_sections_midi_pending == 0);
 
     change_every_location();
     watch(g_seq.patterns);
@@ -335,12 +535,30 @@ static void test_copies_one_pattern_per_lock_section(void) {
     CHECK(flash_storage_load());
     CHECK(most_changed == 1);
     CHECK(seq_sections_midi_pending == 0);
-    CHECK(memcmp(&g_seq.song, &snap.song, sizeof(song_t)) == 0);
-    for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
-        CHECK(memcmp(&g_seq.patterns[pattern], &snap.patterns[pattern], sizeof(pattern_v5_t)) == 0);
-        CHECK(g_seq.patterns[pattern].kit_steps[7][15] == 0);
-    }
+    check_migrated(V5_VERSION);
     fake_before_lock = NULL;
+}
+
+// Power lost during a save: after any number of the program calls a whole save
+// makes, down to the header alone missing, there is no save and a load leaves
+// RAM alone.
+static void test_save_cut_short_is_no_save(void) {
+    no_old_save();
+    fake_flash_programs = 0;
+    CHECK(flash_storage_save());
+    unsigned calls = fake_flash_programs;
+    CHECK(calls >= 4);                      // locations, song, kit settings, header
+    ram_take();
+    for (unsigned done = 0; done < calls; done++) {
+        fake_flash_programs = 0;
+        fake_flash_program_limit = done;
+        CHECK(!flash_storage_save());
+        CHECK(!flash_storage_is_valid());
+        CHECK(!flash_storage_load());
+        CHECK(ram_unchanged());
+    }
+    fake_flash_program_limit = UINT32_MAX;
+    CHECK(flash_storage_save());
 }
 
 // Core 1's timer ISR clears a MIDI overflow with a panic even while stopped.
@@ -386,7 +604,7 @@ int main(void) {
     store_header_t *header = (store_header_t *)(fake_flash + STORE_OFFSET);
     write_legacy_image(LEGACY_VERSION);
     CHECK(flash_storage_load());
-    song_t *saved_song = (song_t *)(fake_flash + STORE_OFFSET + V5_SONG_OFFSET);
+    old_song_t *saved_song = (old_song_t *)(fake_flash + OLD_STORE + V5_SONG_OFFSET);
     saved_song->length = MAX_SONG_ENTRIES + 1;
     CHECK(!flash_storage_load());
     CHECK(g_seq.song.length == 1);
@@ -394,14 +612,7 @@ int main(void) {
     saved_song->entries[0].pattern_index[0] = MAX_PATTERNS;
     CHECK(!flash_storage_load());
 
-    // Simulate interruption after payload pages, before the commit header.
-    fake_flash_programs = 0;
-    fake_flash_program_limit = 2;
-    CHECK(!flash_storage_save());
-    CHECK(!flash_storage_is_valid());
-    CHECK(!flash_storage_load());
-    fake_flash_program_limit = UINT32_MAX;
-    CHECK(flash_storage_save());
+    test_save_cut_short_is_no_save();
     CHECK(header->version == VERSION);
 
     // MIDI queued by Core 1 just before the lockout is sent before the erase.
@@ -410,12 +621,14 @@ int main(void) {
     fake_before_lockout = NULL;
     test_save_resyncs_panel_input();
     test_load_resyncs_panel_input();
-    test_v6_round_trip();
+    test_v7_round_trip();
     test_legacy_images();
+    test_load_falls_back_on_the_old_save();
     test_v6_rejections();
     test_copies_one_pattern_per_lock_section();
     puts("PASS storage round-trip, playback guard, checksum, legacy validation, "
          "interrupted save, late MIDI before erase, resync after save and load, "
-         "v6 kits, v4/v5 migration, v6 rejections, one pattern per lock section");
+         "v6 kits, v4/v5/v6 migration, fallback on the old save, v6 rejections, "
+         "one pattern per lock section");
     return 0;
 }

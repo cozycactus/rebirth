@@ -1,6 +1,6 @@
 # Hardware Status
 
-Last updated: 2026-11-17 (MIDI keyboard input added)
+Last updated: 2026-11-19 (Rev B board targets added; external MIDI clock added)
 
 ## Migrating An Existing Build
 
@@ -28,7 +28,10 @@ retried every 100 ms); without the LED chain GPIO 27 drives nothing.
 ## Verified In This Repo
 
 - Host unit tests build and pass.
-- RP2040 firmware target builds with Pico SDK 2.2.0.
+- The RP2040 firmware target and the Pico 2 target (RP2350, Arm, preset `pico2-release`)
+  build with Pico SDK 2.2.0, and so do the Rev B targets (presets `revb-rp2354b` and
+  `revb-rp2350b`, DAC gain 2x). The Rev B firmware keeps the Pico pin map; its only Rev B
+  specific code is the CV/Gate level shifter enable on GPIO 38, covered by `sync_gain2_tests`.
 - DIN MIDI UART output code is compiled into the firmware target.
 - CV/Gate, OLED, encoder, MCP23017, step LED, flash storage, and UI modules compile into the firmware target,
   as do the Session view (`session.c`), the LED frame builder (`led_frame.c`), the RGB LED chain
@@ -118,9 +121,21 @@ retried every 100 ms); without the LED chain GPIO 27 drives nothing.
   interrupt enables, and the keys in the UI over a fake UART (pass-through with
   capped sends, step and Step Edit writes, gaps, flash save/load, panic). The
   fake UART models a queue, not the PL011's one-byte holding register.
+- External MIDI clock (host tests, the simulator and the firmware build):
+  `test_clock` runs the production sequencer, UART interrupt and clock path
+  with the fakes (tempo, Start/Stop/Continue/SPP, jitter, bursts, loss, AUTO,
+  the storage inhibit), and `sim/test/clock_check.js` the whole device with a
+  145 BPM Clock on its DIN input. Neither measures the RP2040's latency.
 
 ## Needs Bench Verification
 
+- Everything on Rev B ([hardware/rev-b](hardware/rev-b/README.md)). No Rev B board exists
+  yet, so nothing about it is verified on hardware: not the board, the rear panel fit,
+  the RP2354B/RP2350B boot, MIDI OUT B-D (no firmware yet), microSD (no firmware yet) or
+  the VBUS-powered CV/Gate outputs.
+- Everything on a Pico 2. Its firmware builds and links, and nothing more is known: it has
+  not run on a board. The items below apply to it separately, the timer ISR jitter and the
+  flash save/load first.
 - Timer ISR jitter under dense MIDI/CV output using GPIO 7 and on-device stats.
 - Compare jitter stats before/after UART TX queue and prepared playback events on physical hardware.
 - Gate alignment across all four CV/Gate channels.
@@ -199,6 +214,31 @@ circuit (J402, an H11L1 opto, GPIO 1) has not been validated.
 - `NOT VERIFIED` The 320 us deadline of the receive interrupt against the
   transmit drain and the display's interrupts-off sections.
 
+### External MIDI clock
+
+None of these has been run on hardware; every item is `NOT VERIFIED`. The DIN
+input circuit is the MIDI keyboard's (above).
+
+- `NOT VERIFIED` Following a hardware master on DIN (a drum machine) and a DAW
+  through a USB-MIDI interface at 20, 145 and 300 BPM: the shown tempo, Start,
+  Stop, Continue and SPP, and no drift against the master over ten minutes.
+- `NOT VERIFIED` The latency from a received Clock (its stop bit on GPIO 1) to
+  the step it starts (gate edge, MIDI Note On on GPIO 0) and to the Clock sent
+  on, and the jitter that adds to the master's, under two dense kits.
+- `NOT VERIFIED` The doorbell: `TIMER_IRQ_1` forced through `timer_hw->intf`
+  from core 0 reaches core 1 at the timer ISR's priority, and alarm 1 is unused
+  by the SDK in this build.
+- `NOT VERIFIED` The external clock path is in RAM in the map file: the UART
+  handler's `clock_in_rx_byte()`, the doorbell ISR, `ext_take_clock()`,
+  `ext_run_due()` and `clock_est_tick()`.
+- `NOT VERIFIED` A lost Clock: a byte lost in the UART receiver (overrun) is not
+  detected and leaves the device a Clock behind the master until its next
+  Start. Measure core 0's longest interrupts-off section while a set plays
+  against the 320 us of a byte.
+- `NOT VERIFIED` A USB-MIDI master that stalls: the catch-up of a bunch of late
+  Clocks sounds acceptable, and AUTO's hand-over to the internal timer on a lost
+  clock and back is musically usable.
+
 ### Session panel
 
 - Press-to-event latency, for single keys and for chords (target 15 ms;
@@ -225,6 +265,11 @@ circuit (J402, an H11L1 opto, GPIO 1) has not been validated.
 - A pad, a step button and PLAY held through a flash save/load, and through a
   panic, do nothing once released.
 - PLAY debounce (20 ms) on the real switch: one press, one start or stop.
+- `NOT VERIFIED` Quantised MUTE on the real panel: how the white flash of a
+  waiting change (white on odd sixteenths) and the steady white of a collected
+  group read against the track colours and the bank blinks, and holding one
+  MUTE key while pressing another on the real matrix (both reported, the held
+  key's release after the other's press).
 
 ## Known Follow-Ups
 
@@ -234,6 +279,6 @@ circuit (J402, an H11L1 opto, GPIO 1) has not been validated.
 
 ## Not Implemented Yet
 
-- External MIDI clock sync input. The DIN input takes notes only; Clock, Start, Stop and Continue are ignored.
+- Forwarding a received Song Position Pointer, and honouring one while playing.
 - Swing timing in playback. Pattern data stores the swing value, but the sequencer still runs straight timing.
 - Preservation of the previous save across power loss (storage is a single region).

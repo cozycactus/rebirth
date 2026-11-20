@@ -104,6 +104,23 @@ static void set_length(uint8_t pattern, uint8_t track, uint8_t length) {
     sequencer_refresh_track_playback(track, pattern);
 }
 
+static void test_all_64_native_tracks(void) {
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+        g_seq.patterns[0].tracks[t].type = TRACK_TYPE_SYNTH;
+        g_seq.patterns[0].tracks[t].output_mode = OUTPUT_MIDI_ONLY;
+        set_note(0, t, 0, 32 + t, 0);
+    }
+    transport_start();
+    tick();
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) CHECK(count_note_on(t % 16, 32 + t) == 1);
+    CHECK(!midi_output_overflowed());
+    seq_set_track_mute(63, true);
+    CHECK(seq_get_track_mutes() == TRACK_BIT(63));
+    transport_stop();
+    CHECK(transport_queue_pattern(31));
+    for (uint8_t t = 0; t < NUM_TRACKS; t++) CHECK(g_seq.transport.current_pattern[t] == 31);
+}
+
 static void test_clock_rate_and_start_order(void) {
     set_note(0, 0, 0, 60, 0);
     transport_start();
@@ -607,11 +624,12 @@ static void test_midi_in_ring_wraps_over_several_rounds(void) {
     uint8_t next_in = 0, next_out = 0, byte = 0;
     for (unsigned round = 0; round < 7; round++) {
         uint8_t chunk[MIDI_IN_RING_SIZE - 5 + (round % 3)];
-        for (unsigned i = 0; i < sizeof(chunk); i++) chunk[i] = next_in++;
+        // Data bytes only: Clock, Start, Continue and Stop go to the external clock.
+        for (unsigned i = 0; i < sizeof(chunk); i++) chunk[i] = (uint8_t)(next_in++ & 0x7F);
         rx_push(chunk, sizeof(chunk));
         for (unsigned i = 0; i < sizeof(chunk); i++) {
             CHECK(midi_in_read(&byte));
-            CHECK(byte == next_out++);
+            CHECK(byte == (uint8_t)(next_out++ & 0x7F));
         }
         CHECK(!midi_in_read(&byte));
     }
@@ -654,11 +672,17 @@ static void test_midi_in_does_not_change_what_is_transmitted(void) {
     CHECK(fake_midi_length == sizeof(sent));
     CHECK(memcmp(fake_midi, sent, sizeof(sent)) == 0);
     CHECK(fake_uart_rx_pending() == 0);
+    // The Clock went to the external clock, the rest to the note ring.
     uint8_t byte = 0;
     for (unsigned i = 0; i < sizeof(input); i++) {
+        if (input[i] == MIDI_CLOCK) continue;
         CHECK(midi_in_read(&byte));
         CHECK(byte == input[i]);
     }
+    CHECK(!midi_in_read(&byte));
+    clock_in_event_t ev;
+    CHECK(clock_in_pop(&ev) && ev.kind == CLOCK_IN_TICK);
+    CHECK(!clock_in_pop(&ev));
 }
 
 static void play_song_entries(unsigned entries) {
@@ -721,9 +745,9 @@ static void test_moving_song_entry_keeps_playing_entry_anchor(void) {
 }
 
 static void test_staging_overflow_never_sends_partial_message(void) {
-    for (unsigned note = 0; note < 54; note++) midi_buf_note_on(0, note, 100);
+    for (unsigned note = 0; note <= MIDI_STEP_BUFFER_BYTES / 3; note++) midi_buf_note_on(0, note % 128, 100);
     midi_buf_flush();
-    CHECK(fake_midi_count(MIDI_NOTE_ON) == 53);
+    CHECK(fake_midi_count(MIDI_NOTE_ON) == MIDI_STEP_BUFFER_BYTES / 3);
     CHECK(message_boundary(fake_midi_length));
     CHECK(midi_output_overflowed());
 }
@@ -1237,7 +1261,7 @@ static void test_scene_queue_skips_tracks_already_there(void) {
     CHECK(g_seq.transport.current_pattern[1] == 9);
     CHECK(transport_queue_track_pattern(1, 4));
     CHECK(transport_queue_track_pattern(3, 2));
-    CHECK(transport_launch(UINT8_MAX, 9));
+    CHECK(transport_launch(ALL_TRACKS, 9));
     CHECK(g_seq.transport.queued_pattern[1] == NO_QUEUED_PATTERN);
     CHECK(g_seq.transport.queued_pattern[3] == 9);
     CHECK(g_seq.transport.queued_pattern[0] == 9);
@@ -1249,7 +1273,7 @@ static void test_empty_scene_silences_all_tracks(void) {
     transport_set_launch_quant(LAUNCH_QUANT_BAR);
     transport_start();
     run_through_step(3);
-    CHECK(transport_launch(UINT8_MAX, 5));
+    CHECK(transport_launch(ALL_TRACKS, 5));
     run_through_step(16);
     for (uint8_t track = 0; track < NUM_TRACKS; track++)
         CHECK(g_seq.transport.current_pattern[track] == 5);
@@ -1259,7 +1283,7 @@ static void test_empty_scene_silences_all_tracks(void) {
 }
 
 static void test_scene_selects_at_once_when_stopped(void) {
-    CHECK(transport_launch(UINT8_MAX, 4));
+    CHECK(transport_launch(ALL_TRACKS, 4));
     for (uint8_t track = 0; track < NUM_TRACKS; track++) {
         CHECK(g_seq.transport.current_pattern[track] == 4);
         CHECK(g_seq.transport.queued_pattern[track] == NO_QUEUED_PATTERN);
@@ -1268,7 +1292,7 @@ static void test_scene_selects_at_once_when_stopped(void) {
 
 static void test_scene_rejected_in_song_mode(void) {
     transport_set_mode(PLAY_MODE_SONG);
-    CHECK(!transport_launch(UINT8_MAX, 4));
+    CHECK(!transport_launch(ALL_TRACKS, 4));
 }
 
 static void test_snapshot_reports_queues_and_mutes(void) {
@@ -1979,7 +2003,7 @@ typedef struct {
 static void play_restart(const restart_case_t *c) {
     fake_uart_run_until(0);                 // wire-time mode
     transport_set_bpm(c->bpm);
-    for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+    for (uint8_t t = 0; t < PANEL_TRACKS; t++) {
         bool kit = t == 0 || t == 4;
         if (kit) make_kit(t, t == 0 ? 10 : 9);
         else g_seq.patterns[0].tracks[t].type = TRACK_TYPE_SYNTH;
@@ -2040,7 +2064,7 @@ static void test_restart_sweep_never_overflows(void) {
     for (unsigned n = 0; n < RESTART_SWEEP_CASES; n++) {
         restart_case_t c;
         c.bpm = (float)sweep_between(140, 300);
-        for (uint8_t t = 0; t < NUM_TRACKS; t++) c.gates[t] = (uint8_t)sweep_between(10, 100);
+        for (uint8_t t = 0; t < PANEL_TRACKS; t++) c.gates[t] = (uint8_t)sweep_between(10, 100);
         c.flam_pulses[0] = (uint8_t)sweep_between(KIT_FLAM_MIN, KIT_FLAM_MAX);
         c.flam_pulses[1] = (uint8_t)sweep_between(KIT_FLAM_MIN, KIT_FLAM_MAX);
         c.restart_pulse = sweep_between(24, 480);
@@ -2076,13 +2100,13 @@ static uint32_t play_load(const load_case_t *c) {
             g_seq.patterns[0].kit_steps[kit][step] = word;
         }
     }
-    for (uint8_t track = 2; track < NUM_TRACKS; track++) {
+    for (uint8_t track = 2; track < PANEL_TRACKS; track++) {
         g_seq.patterns[0].tracks[track].type = TRACK_TYPE_SYNTH;
         for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) {
             pattern_set_step(&g_seq.patterns[0], track, step, 60, 100, STEP_FLAG_ACTIVE);
         }
     }
-    for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+    for (uint8_t track = 0; track < PANEL_TRACKS; track++) {
         set_gate(track, track < 2 ? c->kit_gate_pct : 100);
     }
     transport_start();
@@ -2488,9 +2512,629 @@ static void test_kit_config_clamps_and_refreshes(void) {
     CHECK(prepared_patterns[5][1].kit.flam_pulses == 12);
 }
 
+// ─── Quantised mutes ────────────────────────────────────────────
+
+#define BAR_PULSE (16u * PULSES_PER_STEP)
+
+// Runs the timer until `pulse` is the next pulse to run.
+static void run_to(uint32_t pulse) {
+    while (g_seq.transport.pulse_count < pulse) tick();
+}
+
+// `note` on every step of location 0 for `track` (MIDI channel = track).
+static void notes_on_every_step(uint8_t track, uint8_t note, uint8_t flags) {
+    for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) set_note(0, track, step, note, flags);
+}
+
+static void start_under(launch_quant_t q) {
+    transport_set_launch_quant(q);
+    transport_start();
+}
+
+// Note Ons on `channel` for `note` with a velocity above 0: hits, not kit releases.
+static unsigned count_note_hits(uint8_t channel, uint8_t note) {
+    unsigned count = 0;
+    unsigned decoded = decode_midi();
+    for (unsigned i = 0; i < decoded; i++) {
+        count += midi_msgs[i].status == (MIDI_NOTE_ON | channel) &&
+                 midi_msgs[i].data1 == note && midi_msgs[i].data2 > 0;
+    }
+    return count;
+}
+
+static void test_mute_waits_for_the_bar(void) {
+    notes_on_every_step(0, 60, 0);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1);
+    CHECK(g_seq.track_mutes == 0);
+    CHECK(g_seq.mute_pending == 1);
+    run_to(BAR_PULSE);                      // the pulse before the bar ran
+    CHECK(g_seq.track_mutes == 0);
+    CHECK(count_note_hits(0, 60) == 16);    // step 15's note was sent
+    tick();                                 // the bar
+    CHECK(g_seq.track_mutes == 1);
+    CHECK(g_seq.mute_pending == 0);
+    CHECK(count_note_hits(0, 60) == 16);    // none for step 0 of bar 2
+}
+
+static void test_unmute_lands_with_the_downbeat_note(void) {
+    notes_on_every_step(0, 60, 0);
+    seq_set_track_mute(0, true);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1);
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 1);
+    run_to(BAR_PULSE);
+    CHECK(count_note_hits(0, 60) == 0);
+    tick();
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+    CHECK(count_note_hits(0, 60) == 1);
+    CHECK(msg_is(last_msg(0), MIDI_NOTE_ON, 60, 100));
+}
+
+// Every step tied to the same pitch: one note sounds from step 0 on.
+static void test_mute_cuts_sounding_note_on_the_boundary(void) {
+    notes_on_every_step(0, 60, STEP_FLAG_TIE);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1);
+    run_to(BAR_PULSE);
+    CHECK(note_is_on[0] && fake_gates == 1);
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 0);
+    tick();
+    CHECK(fake_midi_count(MIDI_NOTE_OFF) == 1);
+    CHECK(!note_is_on[0] && fake_gates == 0);
+}
+
+static void test_mute_waits_for_the_beat(void) {
+    start_under(LAUNCH_QUANT_BEAT);
+    run_through_step(5);
+    transport_toggle_mutes(1);
+    run_to(8 * PULSES_PER_STEP);            // steps 6 and 7 ran
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 1);
+    tick();
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
+}
+
+static void test_mute_track_loop_lands_at_loop_end(void) {
+    set_length(0, 0, 12);
+    transport_start();
+    run_through_step(3);
+    transport_toggle_mutes(0x03);
+    run_to(12 * PULSES_PER_STEP);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0x03);
+    tick();
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0x02);
+    run_to(BAR_PULSE);
+    CHECK(g_seq.track_mutes == 0x01);
+    tick();
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+}
+
+// A group's release under TRACK LOOP: track 0 (length 12) and track 1 (16) to muted,
+// track 2 (length 8, live-muted) to audible; each lands at its own loop end.
+static void test_set_mutes_track_loop_lands_at_each_loop_end(void) {
+    set_length(0, 0, 12);
+    set_length(0, 2, 8);
+    seq_set_track_mute(2, true);
+    transport_start();                      // TRACK LOOP
+    run_through_step(3);
+    transport_set_mutes(0x07, 0x03);
+    CHECK(g_seq.mute_pending == 0x07 && (g_seq.mute_target & 0x07) == 0x03);
+    run_to(8 * PULSES_PER_STEP);
+    CHECK(g_seq.track_mutes == 0x04 && g_seq.mute_pending == 0x07);
+    tick();                                 // track 2's loop end
+    CHECK(g_seq.track_mutes == 0x00 && g_seq.mute_pending == 0x03);
+    run_to(12 * PULSES_PER_STEP);
+    CHECK(g_seq.track_mutes == 0x00);
+    tick();                                 // track 0's loop end
+    CHECK(g_seq.track_mutes == 0x01 && g_seq.mute_pending == 0x02);
+    run_to(BAR_PULSE);
+    CHECK(g_seq.track_mutes == 0x01);
+    tick();                                 // track 1's loop end
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+}
+
+static void test_mute_track_loop_after_shortening(void) {
+    transport_start();
+    run_through_step(9);
+    transport_toggle_mutes(1);
+    set_length(0, 0, 8);                    // below the playhead: the loop ends at step 10
+    run_to(10 * PULSES_PER_STEP);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 1);
+    tick();
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
+}
+
+// Track 0 plays location 0 (length 12) and is queued to location 1 (note 62 on step 0),
+// with an unmute, then a mute, waiting for the same loop end.
+static void test_mute_and_pad_same_loop_end(void) {
+    for (uint8_t mute = 0; mute < 2; mute++) {
+        reset();
+        set_length(0, 0, 12);
+        set_note(1, 0, 0, 62, 0);
+        if (!mute) seq_set_track_mute(0, true);
+        transport_start();
+        run_through_step(3);
+        CHECK(transport_queue_track_pattern(0, 1));
+        transport_toggle_mutes(1);
+        CHECK(g_seq.mute_pending == 1);
+        run_to(12 * PULSES_PER_STEP);
+        CHECK(g_seq.transport.current_pattern[0] == 0);
+        tick();
+        CHECK(g_seq.transport.current_pattern[0] == 1);
+        CHECK(g_seq.transport.current_track_step[0] == 0);
+        CHECK(g_seq.track_mutes == mute && g_seq.mute_pending == 0);
+        CHECK(count_note_hits(0, 62) == (mute ? 0u : 1u));
+    }
+}
+
+// Core 0 publishes a shorter row inside the boundary pulse, after the waiting mute's due
+// check loaded the row: the first shared-lock section once the step has begun.
+static void shorten_track_0_in_phase_1(spin_lock_t *lock) {
+    if (lock != spin_lock_instance(g_seq.spinlock_num) || !g_seq.transport.step_triggered) return;
+    fake_before_lock = NULL;                // one-shot: the edit takes the shared lock too
+    set_length(0, 0, 8);
+}
+
+// Track 0 (length 16) is queued to location 1 (note 62 on step 0) with a mute waiting;
+// the mute and the queued pad decide on the same row, so they land together.
+static void test_mute_and_pad_decide_on_one_row(void) {
+    set_note(1, 0, 0, 62, 0);
+    transport_start();                      // TRACK LOOP
+    run_through_step(9);
+    CHECK(transport_queue_track_pattern(0, 1));
+    transport_toggle_mutes(1);
+    run_to(10 * PULSES_PER_STEP);
+    g_seq.transport.step_triggered = false;
+    fake_before_lock = shorten_track_0_in_phase_1;
+    tick();                                 // step 10: length 16 decides both
+    CHECK(fake_before_lock == NULL);        // the edit ran inside the pulse
+    CHECK(g_seq.transport.current_pattern[0] == 0 && g_seq.mute_pending == 1);
+    next_step();                            // step 11: length 8 ends the loop for both
+    CHECK(g_seq.transport.current_pattern[0] == 1 && g_seq.mute_pending == 0);
+    CHECK(g_seq.track_mutes == 1);
+    CHECK(count_note_hits(0, 62) == 0);
+}
+
+static void test_mute_now_when_stopped(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_toggle_mutes(1u << 3);
+    CHECK(g_seq.track_mutes == 1u << 3 && g_seq.mute_pending == 0);
+    transport_toggle_mutes(1u << 3);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+static void test_mute_now_under_next_step(void) {
+    start_under(LAUNCH_QUANT_STEP);
+    run_through_step(2);
+    transport_toggle_mutes(1);
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
+}
+
+static void test_set_mutes_now_when_stopped_or_next_step(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_set_mutes(0x06, 0x02);        // stopped: 1 muted, 2 stays audible
+    CHECK(g_seq.track_mutes == 0x02 && g_seq.mute_pending == 0);
+    start_under(LAUNCH_QUANT_STEP);
+    run_through_step(2);
+    transport_set_mutes(0x06, 0x04);        // NEXT STEP: 1 audible, 2 muted
+    CHECK(g_seq.track_mutes == 0x04 && g_seq.mute_pending == 0);
+}
+
+static void test_second_toggle_cancels(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1);
+    transport_toggle_mutes(1);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0);
+}
+
+static void test_toggle_mixes_cancel_and_new_change(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(0x01);           // 0 waits
+    transport_toggle_mutes(0x03);           // 0 cancelled, 1 waits
+    CHECK(g_seq.mute_pending == 0x02 && g_seq.track_mutes == 0);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0x02 && g_seq.mute_pending == 0);
+}
+
+static void test_toggle_after_landing_is_a_new_change(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
+    transport_toggle_mutes(1);
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 1);
+    run_to(2 * BAR_PULSE);
+    CHECK(g_seq.track_mutes == 1);
+    tick();
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+static void test_toggles_in_one_call_land_on_one_pulse(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(0x06);
+    run_to(BAR_PULSE);
+    CHECK(g_seq.track_mutes == 0);
+    tick();
+    CHECK(g_seq.track_mutes == 0x06 && g_seq.mute_pending == 0);
+}
+
+static void test_set_mutes_writes_targets(void) {
+    seq_set_track_mute(2, true);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_set_mutes(0x0C, 0x04);        // 2 stays muted, 3 stays audible: nothing waits
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0x04);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0x04 && g_seq.mute_pending == 0);
+    transport_set_mutes(0x08, 0x08);
+    CHECK(g_seq.mute_pending == 0x08 && g_seq.track_mutes == 0x04);
+    run_through_step(32);
+    CHECK(g_seq.track_mutes == 0x0C && g_seq.mute_pending == 0);
+    transport_toggle_mutes(0x10);           // 4 waits, to muted
+    transport_set_mutes(0x18, 0x10);        // replaces 4's change; 3 to audible
+    CHECK(g_seq.mute_pending == 0x18 && (g_seq.mute_target & 0x18) == 0x10);
+    run_through_step(48);
+    CHECK(g_seq.track_mutes == 0x14 && g_seq.mute_pending == 0);
+}
+
+// Track 2 live-muted, track 3 muted by its stored mute where it plays: set to muted,
+// neither waits nor changes, and the stored mute stays.
+static void test_set_mutes_skips_muted_tracks_set_to_muted(void) {
+    seq_set_track_mute(2, true);
+    g_seq.patterns[0].tracks[3].muted = true;
+    sequencer_refresh_track_playback(3, 0);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_set_mutes(0x0C, 0x0C);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0x04);
+    CHECK(muted_locations(3) == 1 && g_seq.patterns[0].tracks[3].muted);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0x04 && g_seq.patterns[0].tracks[3].muted);
+}
+
+// Track 5 audible, with a stored mute at location 7, which it does not play.
+static void test_set_mutes_skips_audible_track_set_to_audible(void) {
+    g_seq.patterns[7].tracks[5].muted = true;
+    sequencer_refresh_track_playback(5, 7);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_set_mutes(1u << 5, 0);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    CHECK(muted_locations(5) == 1 && g_seq.patterns[7].tracks[5].muted);
+}
+
+static void test_set_mutes_to_state_now_cancels_waiting_change(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1u << 4);        // waits, to muted
+    transport_set_mutes(1u << 4, 0);        // audible, as it is now
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+static void test_cancel_mutes_returns_waiting_and_targets(void) {
+    seq_set_track_mute(5, true);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(2);
+    transport_toggle_mutes(0x70);           // 4 and 6 to muted, 5 to audible
+    track_mask_t target = 0xFF;
+    CHECK(transport_cancel_mutes(0x30, &target) == 0x30);
+    CHECK(target == 0x10);
+    CHECK(g_seq.mute_pending == 0x40);      // outside the mask: still waits
+    target = 0xFF;
+    CHECK(transport_cancel_mutes(0x30, &target) == 0);
+    CHECK(target == 0);
+    CHECK(transport_cancel_mutes(0x40, NULL) == 0x40);
+    CHECK(g_seq.mute_pending == 0);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 1u << 5);    // nothing landed
+}
+
+static void test_toggle_mutes_now_cancels_and_toggles(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(2);
+    transport_toggle_mutes(1u << 4);
+    CHECK(g_seq.mute_pending == 1u << 4 && g_seq.track_mutes == 0);
+    transport_toggle_mutes_now(1u << 4);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 1u << 4);
+    transport_toggle_mutes_now(1u << 4);
+    CHECK(g_seq.mute_pending == 0 && g_seq.track_mutes == 0);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0);
+}
+
+static void test_toggle_mutes_now_when_stopped(void) {
+    transport_set_launch_quant(LAUNCH_QUANT_BAR);
+    transport_toggle_mutes_now(1u << 6);
+    CHECK(g_seq.track_mutes == 1u << 6 && g_seq.mute_pending == 0);
+    transport_toggle_mutes_now(1u << 6);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+// Each call on track 0 (stored-muted where it plays, nothing waiting) leaves the other
+// tracks' live, waiting and target bits and their stored mutes as they were: tracks 1, 3,
+// 5 and 7 live-muted, 4-7 waiting (targets 0x50), a stored mute of track 2 at location 3.
+static void test_mute_calls_leave_other_tracks(void) {
+    for (unsigned call = 0; call < 4; call++) {
+        reset();
+        for (uint8_t track = 1; track < PANEL_TRACKS; track += 2) seq_set_track_mute(track, true);
+        g_seq.patterns[0].tracks[0].muted = true;
+        g_seq.patterns[3].tracks[2].muted = true;
+        sequencer_refresh_track_playback(0, 0);
+        sequencer_refresh_track_playback(2, 3);
+        start_under(LAUNCH_QUANT_BAR);
+        run_through_step(2);
+        transport_toggle_mutes(0xF0);
+        track_mask_t live = g_seq.track_mutes, pending = g_seq.mute_pending, target = g_seq.mute_target;
+        CHECK(live == 0xAA && pending == 0xF0 && (target & 0xF0) == 0x50);
+        switch (call) {
+            case 0:  transport_toggle_mutes(0x01); break;
+            case 1:  transport_set_mutes(0x01, 0xFE); break;
+            case 2:  CHECK(transport_cancel_mutes(0x01, NULL) == 0); break;
+            default: transport_toggle_mutes_now(0x01); break;
+        }
+        CHECK(((g_seq.track_mutes ^ live) & 0xFE) == 0);
+        CHECK(((g_seq.mute_pending ^ pending) & 0xFE) == 0);
+        CHECK(((g_seq.mute_target ^ target) & 0xFE) == 0);
+        CHECK(muted_locations(2) == 1 && g_seq.patterns[3].tracks[2].muted);
+    }
+}
+
+static void test_waiting_mute_follows_quant_change(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(2);
+    transport_toggle_mutes(1);
+    transport_set_launch_quant(LAUNCH_QUANT_STEP);
+    run_to(3 * PULSES_PER_STEP);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 1);
+    tick();
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
+}
+
+// The timer runs through the bar just before the press takes the playback lock.
+static void bar_before_playback_lock(spin_lock_t *lock) {
+    if (lock != spin_lock_instance(playback_spinlock_num)) return;
+    fake_before_lock = NULL;                // the timer takes the locks too
+    while (g_seq.transport.pulse_count <= BAR_PULSE) tick();
+}
+
+static void test_press_after_boundary_waits_for_next(void) {
+    notes_on_every_step(0, 60, 0);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(15);
+    fake_before_lock = bar_before_playback_lock;
+    transport_toggle_mutes(1);
+    CHECK(fake_before_lock == NULL);        // the bar ran first
+    CHECK(g_seq.transport.pulse_count == BAR_PULSE + 1);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 1);
+    run_to(2 * BAR_PULSE);
+    CHECK(g_seq.track_mutes == 0);
+    CHECK(count_note_hits(0, 60) == 32);    // bar 2 played in full
+    tick();
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
+}
+
+// A second press handled after the first change landed is a new change, not a
+// cancel: the timer runs through the bar just before the press takes its lock.
+static void test_second_press_races_with_landing(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1);              // waits, to muted
+    run_to(BAR_PULSE);                      // the pulse before the bar ran
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 1);
+    fake_before_lock = bar_before_playback_lock;
+    transport_toggle_mutes(1);
+    CHECK(fake_before_lock == NULL);        // the bar ran first
+    CHECK(g_seq.transport.pulse_count == BAR_PULSE + 1);
+    CHECK(g_seq.track_mutes == 1);          // the first change landed
+    CHECK(g_seq.mute_pending == 1 && (g_seq.mute_target & 1) == 0);    // an unmute waits
+    run_to(2 * BAR_PULSE);
+    CHECK(g_seq.track_mutes == 1);
+    tick();
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+// Each path cancels a waiting change; the next run's first bar changes nothing. Song
+// mode plays location 0 as Pattern mode does.
+static void test_stop_start_mode_panic_cancel_waiting_mutes(void) {
+    for (unsigned path = 0; path < 4; path++) {
+        reset();
+        CHECK(song_append(0, 4));
+        start_under(LAUNCH_QUANT_BAR);
+        run_through_step(5);
+        transport_toggle_mutes(1);
+        CHECK(g_seq.mute_pending == 1);
+        switch (path) {
+            case 0:  transport_stop(); break;
+            case 1:  transport_start(); break;          // while playing
+            case 2:  transport_set_mode(PLAY_MODE_SONG); break;
+            default: sequencer_panic(); break;
+        }
+        CHECK(g_seq.mute_pending == 0);
+        if (path != 1) transport_start();
+        CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+        pulses(BAR_PULSE + 1);              // steps 0-16
+        CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+    }
+}
+
+static void test_overflow_panic_cancels_waiting_mutes(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1);
+    fake_uart_writable = false;
+    for (unsigned note = 0; note <= FULL_NOTES; note++) midi_send_note_on(0, note & 0x7F, 100);
+    tick();                                 // the timer raises the panic
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    CHECK(g_seq.mute_pending == 0);
+    fake_uart_writable = true;
+    fake_irq_handlers[UART0_IRQ]();
+    transport_start();
+    pulses(BAR_PULSE + 1);
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+}
+
+static void test_clear_queue_keeps_waiting_mutes(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    CHECK(transport_queue_track_pattern(0, 1));
+    transport_toggle_mutes(0x03);
+    transport_clear_track_queue(0);
+    transport_clear_queue();
+    CHECK(g_seq.transport.queued_pattern[0] == NO_QUEUED_PATTERN);
+    CHECK(g_seq.mute_pending == 0x03);
+    run_through_step(16);
+    CHECK(g_seq.track_mutes == 0x03 && g_seq.mute_pending == 0);
+}
+
+// Through the API nothing waits while stopped, and a Start while playing clears the
+// masks before it gets here: set directly to reach the empty song's early return.
+static void test_empty_song_start_clears_waiting_mutes(void) {
+    transport_set_mode(PLAY_MODE_SONG);
+    g_seq.mute_pending = 1;
+    g_seq.mute_target = 1;
+    transport_start();
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    CHECK(g_seq.mute_pending == 0);
+}
+
+static void test_song_end_boundary_lands_due_mute(void) {
+    CHECK(song_append(0, 1));
+    song_set_end_mode(SONG_END_STOP);
+    transport_set_mode(PLAY_MODE_SONG);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1);
+    run_to(BAR_PULSE);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING && g_seq.mute_pending == 1);
+    tick();                                 // the end of the song
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
+}
+
+static void test_song_mode_track_loop_uses_bar(void) {
+    set_length(0, 0, 12);
+    CHECK(song_append(0, 4));
+    transport_set_mode(PLAY_MODE_SONG);
+    transport_start();                      // TRACK LOOP
+    run_through_step(3);
+    transport_toggle_mutes(1);
+    run_through_step(12);                   // track 0's loop end
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 1);
+    run_to(BAR_PULSE);
+    tick();
+    CHECK(g_seq.track_mutes == 1 && g_seq.mute_pending == 0);
+}
+
+static void test_queued_mute_releases_kit_voices(void) {
+    make_kit(1, KIT_CHANNEL);
+    set_gate(1, 100);
+    for (uint8_t step = 0; step < STEPS_PER_PATTERN; step++) set_kit(0, 1, step, KIT_LANE_BD, KIT_NOTE);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+    transport_toggle_mutes(1u << 1);
+    run_to(BAR_PULSE);
+    CHECK(kit_runtime[1].sounding);
+    unsigned before = msgs();
+    tick();                                 // the bar: the release, no hit
+    CHECK(msgs() == before + 1);
+    CHECK(msg_is(msg[before], KIT_STATUS, 36, 0));
+    CHECK(kit_runtime[1].sounding == 0);
+    pulses(PPQN);
+    CHECK(msgs() == before + 1);
+}
+
+// Track 2 plays note 61 on every step of location 0; locations 0 and 5 have its stored
+// mute. Under 1 BAR, playing, step 5 played.
+static void start_stored_mute(void) {
+    notes_on_every_step(2, 61, 0);
+    g_seq.patterns[0].tracks[2].muted = true;
+    g_seq.patterns[5].tracks[2].muted = true;
+    sequencer_refresh_track_playback(2, 0);
+    sequencer_refresh_track_playback(2, 5);
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(5);
+}
+
+static void test_stored_unmute_waits_silently(void) {
+    start_stored_mute();
+    transport_toggle_mutes(1u << 2);
+    CHECK(g_seq.track_mutes == 1u << 2);    // silent by its live bit now
+    CHECK(g_seq.mute_pending == 1u << 2);
+    CHECK(muted_locations(2) == 0);
+    run_to(BAR_PULSE);
+    CHECK(count_note_hits(2, 61) == 0);
+    tick();
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+    CHECK(count_note_hits(2, 61) == 1);
+}
+
+static void test_cancelled_stored_unmute_stays_muted(void) {
+    start_stored_mute();
+    transport_toggle_mutes(1u << 2);
+    transport_toggle_mutes(1u << 2);
+    CHECK(g_seq.mute_pending == 0);
+    CHECK(g_seq.track_mutes == 1u << 2);
+    CHECK(muted_locations(2) == 0);
+    CHECK(seq_get_track_mutes() & (1u << 2));
+    run_through_step(16);
+    CHECK(count_note_hits(2, 61) == 0);
+}
+
+// The timer runs through the bar at the first shared-lock section after the change
+// was published: the stored-mute clearing, with no lock held.
+static void bar_inside_stored_refresh(spin_lock_t *lock) {
+    if (lock != spin_lock_instance(g_seq.spinlock_num) || !g_seq.mute_pending) return;
+    fake_before_lock = NULL;                // the timer takes the locks too
+    while (g_seq.transport.pulse_count <= BAR_PULSE) tick();
+}
+
+static void test_bar_inside_stored_refresh(void) {
+    start_stored_mute();
+    fake_before_lock = bar_inside_stored_refresh;
+    transport_toggle_mutes(1u << 2);
+    CHECK(fake_before_lock == NULL);        // the bar ran inside the clearing
+    CHECK(g_seq.track_mutes == 0 && g_seq.mute_pending == 0);
+    CHECK(muted_locations(2) == 0);
+    // The bar's step may be silent (its row was not refreshed yet); the next ones play.
+    unsigned before = count_note_hits(2, 61);
+    next_step();
+    CHECK(count_note_hits(2, 61) == before + 1);
+    next_step();
+    CHECK(count_note_hits(2, 61) == before + 2);
+}
+
+static void test_snapshot_reports_waiting_mutes(void) {
+    start_under(LAUNCH_QUANT_BAR);
+    run_through_step(2);
+    transport_toggle_mutes(0x22);
+    transport_snapshot_t snap;
+    sequencer_snapshot(&snap);
+    CHECK(snap.mute_pending == 0x22);
+    CHECK(snap.live_mutes == 0);
+}
+
+static void test_init_clears_mute_masks(void) {
+    g_seq.mute_pending = 0x81;
+    g_seq.mute_target = 0x81;
+    sequencer_init();
+    CHECK(g_seq.mute_pending == 0 && g_seq.mute_target == 0);
+}
+
 int main(void) {
     unsigned tests = 0;
     seq_lock_init();
+    RUN(test_all_64_native_tracks);
     RUN(test_clock_rate_and_start_order);
     RUN(test_midi_in_irq_stays_enabled);
     RUN(test_midi_in_bytes_come_out_in_order);
@@ -2608,6 +3252,45 @@ int main(void) {
     RUN(test_drum_to_kit_releases_note);
     RUN(test_type_change_keeps_both_step_arrays);
     RUN(test_kit_config_clamps_and_refreshes);
+    RUN(test_mute_waits_for_the_bar);
+    RUN(test_unmute_lands_with_the_downbeat_note);
+    RUN(test_mute_cuts_sounding_note_on_the_boundary);
+    RUN(test_mute_waits_for_the_beat);
+    RUN(test_mute_track_loop_lands_at_loop_end);
+    RUN(test_set_mutes_track_loop_lands_at_each_loop_end);
+    RUN(test_mute_track_loop_after_shortening);
+    RUN(test_mute_and_pad_same_loop_end);
+    RUN(test_mute_and_pad_decide_on_one_row);
+    RUN(test_mute_now_when_stopped);
+    RUN(test_mute_now_under_next_step);
+    RUN(test_set_mutes_now_when_stopped_or_next_step);
+    RUN(test_second_toggle_cancels);
+    RUN(test_toggle_mixes_cancel_and_new_change);
+    RUN(test_toggle_after_landing_is_a_new_change);
+    RUN(test_toggles_in_one_call_land_on_one_pulse);
+    RUN(test_set_mutes_writes_targets);
+    RUN(test_set_mutes_skips_muted_tracks_set_to_muted);
+    RUN(test_set_mutes_skips_audible_track_set_to_audible);
+    RUN(test_set_mutes_to_state_now_cancels_waiting_change);
+    RUN(test_cancel_mutes_returns_waiting_and_targets);
+    RUN(test_toggle_mutes_now_cancels_and_toggles);
+    RUN(test_toggle_mutes_now_when_stopped);
+    RUN(test_mute_calls_leave_other_tracks);
+    RUN(test_waiting_mute_follows_quant_change);
+    RUN(test_press_after_boundary_waits_for_next);
+    RUN(test_second_press_races_with_landing);
+    RUN(test_stop_start_mode_panic_cancel_waiting_mutes);
+    RUN(test_overflow_panic_cancels_waiting_mutes);
+    RUN(test_clear_queue_keeps_waiting_mutes);
+    RUN(test_empty_song_start_clears_waiting_mutes);
+    RUN(test_song_end_boundary_lands_due_mute);
+    RUN(test_song_mode_track_loop_uses_bar);
+    RUN(test_queued_mute_releases_kit_voices);
+    RUN(test_stored_unmute_waits_silently);
+    RUN(test_cancelled_stored_unmute_stays_muted);
+    RUN(test_bar_inside_stored_refresh);
+    RUN(test_snapshot_reports_waiting_mutes);
+    RUN(test_init_clears_mute_masks);
 #ifdef REBIRTH_THREADED_TEST
     RUN(test_stop_during_pending_gate_commit);
     RUN(test_panic_during_pending_gate_commit);

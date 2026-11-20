@@ -9,6 +9,8 @@
 
   const T = { KICK: 0, KIT: 1, BASS: 2, ACID1: 3, ACID2: 4, LEAD: 5, ARP: 6, FX: 7 };
   const TRACK_NAME = ['KICK', '909', 'BASS', 'ACID 1', 'ACID 2', 'LEAD', 'ARP', 'FX'];
+  const CV_TRACKS = [T.BASS, T.LEAD, T.ARP, T.FX];
+  const PAD_CHANNEL = 8; // MIDI channel 9, independent of the eight hardware tracks.
   const LANE = { AC: 0, BD: 1, SD: 2, LT: 3, MT: 4, HT: 5, RS: 6, CP: 7, CH: 8, OH: 9, CC: 10, RC: 11 };
   const LANE_NAME = ['AC', 'BD', 'SD', 'LT', 'MT', 'HT', 'RS', 'CP', 'CH', 'OH', 'CC', 'RC'];
 
@@ -76,7 +78,7 @@
   // Drum-type clips: steps only; 'a' needs the Pattern view.
   const DRUM_CLIPS = [
     { track: T.KICK, row: 4, from: 1, name: 'бочка для пика', steps: [[1, ''], [5, ''], [9, ''], [13, '']] },
-    { track: T.FX, row: 3, name: 'удар с тарелкой на сильную долю', steps: [[1, '']] },
+    { track: T.FX, row: 3, name: 'нисходящий свип на первой доле', steps: [[1, '']] },
     { track: T.FX, row: 5, name: 'подъём (райзер) для брейка', steps: [[1, 'a']] },
   ];
 
@@ -160,9 +162,14 @@
     if (root === undefined || !scale) throw new Error('artist: song "' + d.id + '": unknown root or scale');
     const clip = (track, row, text) => {
       const tokens = text.trim().split(/\s+/), notes = [];
+      // RANGE 2′ on the SH-101 restores the lead and ARP registers.
+      const octave = OCTAVE[track] - (d.cv && (track === T.LEAD || track === T.ARP) ? 3 : 0);
       tokens.forEach((token, i) => {
         if (token === '-') return;
-        const p = pitch(root, scale, OCTAVE[track], token);
+        const p = pitch(root, scale, octave, token);
+        if (d.cv && CV_TRACKS.includes(track) && (p.note < 24 || p.note > 48)) {
+          throw new Error('artist: ' + d.id + ' ' + TRACK_NAME[track] + ' row ' + row + ' cannot output note ' + p.note + ' on CV');
+        }
         notes.push([i + 1, p.note, p.flags]);
       });
       const c = { track, row, name: CLIP_NAMES[track][row], notes };
@@ -175,8 +182,14 @@
     };
     const lanes = list => list.map(([name, steps]) => [LANE[name], steps]);
     const [base, fill, full] = d.kit;
+    let drum = d.sweeps ? DRUM_CLIPS.map(c => c.track === T.FX && c.row === 3
+      ? { ...c, name: 'нисходящие свипы · шаги ' + d.sweeps.join(', '), steps: d.sweeps.map(step => [step, '']) }
+      : c) : DRUM_CLIPS;
+    if (d.cv) drum = drum.map(c => c.track === T.FX ? cvSweep(c) : c);
     return {
       id: d.id, title: d.title, style: d.style, bpm: d.bpm, key: d.key,
+      cv: d.cv,
+      padNotes: d.pad?.map(token => pitch(root, scale, 2, token).note),
       synth: [
         ...d.bass.map((text, i) => clip(T.BASS, i + 1, text)),
         ...d.acid1.map((text, i) => clip(T.ACID1, i + 1, text)),
@@ -184,7 +197,7 @@
         ...d.lead.map((text, i) => clip(T.LEAD, i + 3, text)),
         clip(T.ARP, 2, d.arp[0]), clip(T.ARP, 4, d.arp[1]),
       ],
-      drum: DRUM_CLIPS,
+      drum,
       kit: [
         { row: 2, name: KIT_NAMES[2], lanes: lanes(base) },
         { row: 3, from: 2, name: KIT_NAMES[3], lanes: lanes(base.concat(fill)), added: lanes(fill) },
@@ -192,7 +205,19 @@
       ],
       edits: d.edits.map(([step, token]) => [step - 1, pitch(root, scale, OCTAVE[T.ACID1], token).note]),
       sound: sound(d.sound),
+      sh101: d.sh101,
     };
+  }
+
+  // CV4 sweeps the actual pitch input. Each contour holds Gate through its
+  // slide steps and fits in the board's 0–2 V span at one volt per octave.
+  function cvSweep(clip) {
+    const up = clip.row === 5;
+    const pitches = up ? [24, 25, 26, 27, 28, 30, 32, 33, 35, 36, 38, 40, 42, 44, 46, 48]
+      : [48, 41, 32, 24];
+    const notes = clip.steps.flatMap(([start]) => pitches.map((note, i) =>
+      [start + i, note, i < pitches.length - 1 ? 's' : '']));
+    return { ...clip, notes, name: up ? 'восходящий CV-свип на один такт' : clip.name };
   }
 
   // The synth settings of the four styles.
@@ -418,6 +443,106 @@
       kit: [[['SD', [5, 13]], ...HATS], [['CP', [5, 13]], ['LT', [16]]], [['AC', BEATS], ['RC', BEATS], ['CP', [5, 13]]]],
       edits: [[3, "3'"], [6, "5"], [9, "7"]],
       sound: Object.assign({}, HYPNOTIC, { acid1: Object.assign({}, HYPNOTIC.acid1, { env: 0.55, decay: 0.55, res: 0.8 }) }) },
+
+    { id: 'livewire', title: 'Под током', style: 'гоа-транс с октавным басом', root: 'C#', scale: 'phrygian',
+      key: 'до-диез фригийский', bpm: 144, cv: true, pad: ['1', '5,', '2', '7,'],
+      bass: ["- 1 1 -  - 1 1, 1  - 1 5, -  - 1 1 2",
+             "- 1 1, -  - 1 3 1  - 1 7, -  - 1 5 2",
+             "- 2 2 -  - 2 6, 2  - 2 2, -  - 2 1 7,",
+             "- 1 1, -  - 1 5 1,  - 1 1, -  - 3 2 7,"],
+      acid1: ["1 - - 2a  - - 1 -  1 - - 5  - - 2s 1",
+              "1a - 2s 3  1' 5 - 1  7,a - 1 5s  6 5 3s 2",
+              "1'a 5 7, 1  2a 1' 5 4  5 3 2s 1",
+              "1a 2s 3 1'  5a 1 7, 1  2a 3 5s 6  1'a 7 5s 1",
+              "1 - - -  2s 1 - -  5a - - -  3 2s 1 -"],
+      acid2: ["- - 5 -  4a - - 5  - - 6s 5  - 4 3a -",
+              "5a - - 3  - 4 5 -  7a 6 - 5  4 3s 2 -",
+              "5a - 5' 6  - 7 1' -  5a - 4 3  - 5s 6 2"],
+      lead: ["1, - 3, -  5, - - 4,  2, - 1, -  7, - 2, -",
+             "1,a 3, 5, -  1a 7, 5, 4,  2,a 4, 6, -  2 1 7, 5,",
+             "1, - - -  3, - - -  5, - - -  2, - - -"],
+      arp: ["1,, 5,, 1, 5,,  2,, 6,, 2, 6,,  3,, 7,, 3, 7,,  2,, 5,, 1, 5,,", "1,, 5,, 3,, 7,, 2,, 5,,"],
+      kit: [[['CP', [5, 13]], ...HATS, ['RS', [4, 12, 16]]],
+            [['LT', [14]], ['MT', [15]], ['HT', [16]]], [['AC', BEATS], ['RC', [1, 7, 9, 15]]]],
+      edits: [[1, "3'"], [6, "7"], [9, "6"]],
+      sweeps: [1, 9], sound: TWISTED,
+      sh101: { 'bass.cutoff': 0.52, 'bass.sub': 0.67, 'bass.pulse': 0.1, 'lead.lfoRate': 0.32, 'lead.release': 0.44,
+        'arp.cutoff': 0.63, 'arp.decay': 0.3, 'fx.saw': 0.72, 'fx.noise': 0.63, 'fx.resonance': 0.61 } },
+
+    { id: 'afterglow', title: 'После света', style: 'мелодический гоа-транс', root: 'A', scale: 'harmonic',
+      key: 'ля гармонический минор', bpm: 138, cv: true, pad: ['3', '1', '6,', '5,'],
+      bass: ["- - 1 1  - 1 - 5  - - 1 1'  - 1 - 7,",
+             "- - 1 1  - 1 - 3  - - 6, 6,  - 6, - 7,",
+             "- - 4 4  - 4 - 6  - - 5 5  - 5 - 7",
+             "- - 1 1'  - 1 - 5  - - 6, 6  - 5 - 7,"],
+      acid1: ["1 - - -  - 5 - -  6 - - -  - 7, - -",
+              "1a - 3s 5  - 6 5 -  3a - 2 7,  1 - 2s 3",
+              "3a - 5 6s  5 3 2 7,  1a - 3 5s  6 2",
+              "1a 3 5 1'  6a 1' 6 5  4a 6 5s 3  5a 4 2s 1",
+              "1 - - -  - 3 - -  6a - - -  - 7,s 1 -"],
+      acid2: ["- - - 5  - - 6 -  - 3 - -  2a - 7, -",
+              "5a - 6 -  1' - 6 5  - 4a - 3  2 - 3s 5",
+              "- 1' - 3'a  2' - 1' 7  - 6a - 5  6 - 7s 1'"],
+      lead: ["1 - - 3  5 - 6 5  3 - - 2  7,a - 1 -",
+             "3a 5 6 5  7a 1' 7 5  6a 5 3 2  7,a 2 3 5",
+             "1 - - -  - 5 - -  6 - - -  - 7, - -"],
+      arp: ["1, 3, 5, 3,  6, 1, 3, 1,  4, 6, 1 6,  7,, 2, 5, 2,", "1, 5, 3, 1 6,"],
+      kit: [[['CP', [5, 13]], ['CH', [2, 3, 4, 6, 8, 10, 11, 12, 14, 16]], ['OH', [7, 15]], ['RS', [4, 12]]],
+            [SNARE_ROLL], [['AC', BEATS], ['RC', OFFBEATS]]],
+      edits: [[1, "4"], [9, "2"], [13, "7"]],
+      sweeps: [5], sound: MELODIC,
+      sh101: { 'bass.cutoff': 0.43, 'bass.sub': 0.46, 'bass.pulse': 0.23, 'lead.lfoRate': 0.27, 'lead.release': 0.56,
+        'arp.cutoff': 0.61, 'arp.decay': 0.43, 'fx.saw': 0.36, 'fx.noise': 0.87, 'fx.resonance': 0.45 } },
+
+    { id: 'phase-shift', title: 'Сдвиг фазы', style: 'гоа-транс с семишаговым арпеджио', root: 'G', scale: 'minor',
+      key: 'соль минор', bpm: 142, cv: true, pad: ['5', '3', '6,', '4'],
+      bass: ["- 1 - 1  - 1 1 -  - 1 - 1  - 1 1 -",
+             "- 1 - 1'  - 1 5 -  - 1 - 7,  - 1 3 -",
+             "- 6, - 6  - 6, 6, -  - 7, - 7  - 7, 7, -",
+             "- 1 - 1'  - 1 3 -  - 1 - 1'  - 5 2 -"],
+      acid1: ["- - 1 -  - 1a - -  1 - - 3  - - 1 -",
+              "1a 1' - 3s  2 - 1 7,  1a - 5 6s  5 - 3 2",
+              "1a 1' 3 2s  1 5 - 7,  1'a 5 4s 3  2",
+              "1a 3 1' 5  1a 7, 1 2  3a 5s 6 5  4a 3 2s 1",
+              "1a - - -  3 - - -  - 2s 1 -  7, - 1 -"],
+      acid2: ["- 5 - -  6 - 5a -  - 2 - -  4 - 3a -",
+              "3a - - 4  5 - - 7  6a - 5 4  - 3s 2 -",
+              "1'a - 7 5  - 6s 5 -  1'a - 4 3  - 5 7s 1'"],
+      lead: ["5, - - 1  - 3 - -  2a - 7, -  - 4, - -",
+             "1a 5, 7, 2  3a 1 5, 7,  4a 2 6, 1  2a 7, 5, 4,",
+             "5, - - -  - 7, - -  1 - - -  3 - - -"],
+      arp: ["1, 5, 2 3  6, 4 5, 2  7, 3 5, 1  4 6, 2 5,", "1, 5, 2 3 6, 4 5,"],
+      kit: [[['SD', [5, 13]], ['CH', [1, 4, 6, 9, 10, 12, 14, 16]], ['OH', OFFBEATS], ['RS', [2, 8, 12]]],
+            [['CP', [13, 16]], ['HT', [14, 15]]], [['AC', BEATS], ['RC', [3, 8, 11, 16]]]],
+      edits: [[2, "7"], [6, "6"], [9, "3'"]],
+      sweeps: [3, 12], sound: HYPNOTIC,
+      sh101: { 'bass.cutoff': 0.48, 'bass.sub': 0.55, 'bass.pulse': 0.17, 'lead.lfoRate': 0.36, 'lead.release': 0.4,
+        'arp.cutoff': 0.7, 'arp.decay': 0.33, 'fx.saw': 0.55, 'fx.noise': 0.68, 'fx.resonance': 0.68 } },
+
+    { id: 'ion-front', title: 'Ионный фронт', style: 'гоа-транс с райзером и свипами', root: 'F', scale: 'double',
+      key: 'фа двойной гармонический', bpm: 148, cv: true, pad: ['1', '3', '2', '7,'],
+      bass: ["- 1 1 1  - 1 - 7,  - 1 1 1  - 1 - 2",
+             "- 1 1 1'  - 1 - 7,  - 1 1 3  - 1 - 5,",
+             "- 2 2 2  - 2 - 6,  - 7, 7, 7,  - 7, - 5,",
+             "- 1 1' 1  - 1' - 5  - 1 1' 1  - 3 - 2"],
+      acid1: ["1 - - 7,  - - 1a -  2 - - 1  - - 4 -",
+              "1a 7, 1 -  2a 3s 4 1  7,a - 1' 6  5s 6 3 2",
+              "1'a 7 6s 5  4a 3 1 2  3a 5 7s 1'  2' 7",
+              "1a 7, 1' 5  6a 5 3s 4  7a 1' 2' 1'  6a 5s 4 2",
+              "1 - - -  7, - - -  2 - - -  3s 4 - -"],
+      acid2: ["- - 4a -  - 5 - 6  - - 3a -  2s 1 - -",
+              "5a - 6 7  - 1' - 6  5a 4 - 3  - 2s 1 -",
+              "3'a 2' - 1'  7a 6s 5 -  4a - 5 6  - 7s 1' 5"],
+      lead: ["1 - - 2  3 - 4 -  7,a - 1 -  5, - 6, -",
+             "1a 7, 1 3  4a 3 2 1  7,a 2 3 5  6a 5 4 3",
+             "7, - - -  1 - - -  - 2 - -  3 - - -"],
+      arp: ["1, 3, 7, 5,  2, 4, 6, 4,  1, 3, 5, 1  7,, 2, 5, 7,", "7,, 1, 3, 5, 2, 1, 6,"],
+      kit: [[['SD', [5, 13]], ...HATS, ['MT', [8, 16]]],
+            [['LT', [13, 15]], ['HT', [14, 16, 16]]], [['AC', BEATS], ['RC', OFFBEATS], ['CC', [1]]]],
+      edits: [[1, "3'"], [6, "5"], [10, "6"]],
+      sweeps: [1, 10], sound: DARK,
+      sh101: { 'bass.cutoff': 0.5, 'bass.sub': 0.59, 'bass.pulse': 0.12, 'lead.lfoRate': 0.4, 'lead.release': 0.47,
+        'arp.cutoff': 0.66, 'arp.decay': 0.37, 'fx.saw': 0.49, 'fx.noise': 0.98, 'fx.resonance': 0.7 } },
   ].map(compose));
 
   // A song the set cannot play is a mistake in this file: say so at once.
@@ -465,6 +590,7 @@
       this.len = {};        // "loc/track" -> length
       this.types = {};      // track -> 0 synth, 1 drum, 2 kit
       this.gate = {};
+      this.cv = {};
       this.last = {};       // track -> the pitch last entered (newer firmware)
     }
     // What a clip copy does: one track's steps, kit steps and length.
@@ -513,6 +639,10 @@
       this.keys = this.fw2 && !!(options && options.keys);
       // pads: while a step is held the pads are a four-octave keyboard.
       this.pads = this.fw2 && !!(options && options.pads);
+      // quantMutes: a MUTE press waits for the launch point, as a pad does, and
+      // a MUTE held half a second collects the MUTE keys pressed meanwhile into
+      // a group that changes after its release.
+      this.quantMutes = !!(options && options.quantMutes);
       // song: an index into SONGS or a song's id.
       const pick = options && options.song;
       this.song = SONGS.find(x => x.id === pick) || SONGS[pick | 0] || SONGS[0];
@@ -608,12 +738,14 @@
     s.wait(300);
   }
 
-  // Tracks 5-7 come up as DRUM; the selector's long press opens their config.
+  // Tracks 5–8 come up as DRUM; the selector's long press opens their config.
   function configureTracks(s) {
     s.say('device', 'VALUE долго → селектор; удержание кнопки шага 5 → настройка дорожки 5');
     s.long(VALUE_SW);
     s.long(STEP(5));
-    for (const track of [T.ACID2, T.LEAD, T.ARP]) {
+    const synths = s.song.cv ? [T.ACID2, T.LEAD, T.ARP, T.FX] : [T.ACID2, T.LEAD, T.ARP];
+    for (const track of synths) {
+      if (track !== T.ACID2) s.tap(TRACK_SW, 80, 160);    // next track, first row
       s.say('device', 'Дорожка ' + (track + 1) + ' (' + TRACK_NAME[track] + '): TYPE DRUM → SYNTH');
       s.turnChoice(VALUE_ENC, -1);
       s.model.types[track] = 0;
@@ -623,10 +755,37 @@
         s.turnNumber(VALUE_ENC, 30);
         s.model.gate[track] = 80;
       }
-      if (track !== T.ARP) s.tap(TRACK_SW, 80, 160);      // TRACK press: next track, first row
     }
+    if (s.song.cv) configureCV(s);
     s.tap(VALUE_SW, 80, 200);                             // back to the selector
     s.long(VALUE_SW);                                     // back to the Session view
+  }
+
+  // Start at FX. KICK and ACID 1 ship with MIDI+CV and release their CV pairs
+  // to the four SH-101s in these songs. The KIT's MIDI routing is unchanged.
+  function configureCV(s) {
+    let current = T.FX;
+    for (const track of [T.FX, T.KICK, T.BASS, T.ACID1, T.LEAD, T.ARP]) {
+      if (current > track) {
+        s.tap(VALUE_SW, 80, 160);                         // selector
+        s.long(STEP(track + 1));                          // address the column directly
+        current = track;
+      }
+      while (current !== track) {
+        s.tap(TRACK_SW, 80, 160);
+        current++;
+      }
+      const channel = CV_TRACKS.indexOf(track);
+      const native = channel >= 0;
+      s.say('device', TRACK_NAME[track] + (native ? ' → CV/Gate ' + (channel + 1) : ' → MIDI'));
+      s.turnChoice(TRACK_ENC, 2);                        // OUTPUT
+      s.turnChoice(VALUE_ENC, track === T.BASS ? -1 : 1);
+      if (native) {
+        s.turnChoice(TRACK_ENC, 2);                      // GATE, then CV/Gate on a SYNTH
+        s.turnNumber(VALUE_ENC, channel - (track === T.BASS ? 2 : 0));
+        s.model.cv[track] = channel;
+      }
+    }
   }
 
   // Holds up to four steps with one hand and edits them with the other.
@@ -818,6 +977,7 @@
       s.rig(id + '.accent', snd[id].acc);
     }
     s.rig('lead.cutoff', snd.lead.cut);
+    for (const [id, value] of Object.entries(song.sh101 || {})) s.rig(id, value);
     s.rig('delay.feedback', snd.delay);
     s.rig('reverb.level', snd.reverb);
     s.rig('fx.riserBars', 8);
@@ -830,14 +990,18 @@
     for (const clip of song.drum.filter(c => c.track === T.KICK)) programDrum(s, clip);
     for (const clip of song.kit) programKit(s, clip);
     for (const clip of song.synth.filter(c => c.track !== T.BASS)) programSynth(s, clip);
-    for (const clip of song.drum.filter(c => c.track === T.FX)) programDrum(s, clip);
+    for (const clip of song.drum.filter(c => c.track === T.FX)) {
+      if (clip.notes) programSynth(s, clip);
+      else programDrum(s, clip);
+    }
     saveToFlash(s);
 
     const start = s.form.start;
     s.say('device', 'Исходная расстановка для аранжировки «' + s.form.title + '»: ' +
       start.rows.map((row, track) => TRACK_NAME[track] + ' — ряд ' + row).join(', ') + ' (ряд 8 пуст)');
     for (let track = 0; track < 8; track++) s.tap(PAD(track, start.rows[track]), 70, 110);
-    s.say('device', 'MUTE на дорожках ' + start.muted.map(track => TRACK_NAME[track]).join(', ') + ': ' + start.text);
+    s.say('device', 'MUTE на дорожках ' + start.muted.map(track => TRACK_NAME[track]).join(', ') +
+      (s.quantMutes ? ' (прибор стоит, поэтому MUTE срабатывает сразу)' : '') + ': ' + start.text);
     for (const track of start.muted) s.tap(MUTE(track), 70, 110);
     s.wait(600);
   }
@@ -861,9 +1025,10 @@
     let muted = form.start.muted.reduce((bits, track) => bits | (1 << track), 0);
     const st = { s, song, snd };
 
-    // Moves the cursor to a moment in the set.
+    // A moment in the set, and the cursor moved there.
+    st.time = (bar, beat, offsetMs) => t0 + Math.round(((bar - 1) * 16 + (beat - 1) * 4) * STEP_US + (offsetMs || 0) * 1000);
     st.at = (bar, beat, offsetMs) => {
-      const t = t0 + Math.round(((bar - 1) * 16 + (beat - 1) * 4) * STEP_US + (offsetMs || 0) * 1000);
+      const t = st.time(bar, beat, offsetMs);
       if (t < s.t) throw new Error('artist: ' + form.id + ': bar ' + bar + ' beat ' + beat + ' is in the past by ' + (s.t - t) / 1000 + ' ms');
       s.t = t;
     };
@@ -871,14 +1036,36 @@
     // (launchEarly: its second, when more than two pads have to go down).
     st.launchFor = bar => st.at(bar - 1, 3, 40 + 120 * s.rnd());
     st.launchEarly = bar => st.at(bar - 1, 2, 40 + 120 * s.rnd());
-    // A mute hit just ahead of the downbeat of `bar`.
-    st.onDownbeat = bar => st.at(bar, 1, -70 - 20 * s.rnd());
+    // A mute hit just ahead of the downbeat of `bar`. When MUTE waits for the
+    // launch point, only the bar is noted: mute() and mutePair() move the
+    // cursor themselves, as a group starts two bars before it.
+    st.onDownbeat = bar => {
+      if (!s.quantMutes) return st.at(bar, 1, -70 - 20 * s.rnd());
+      if (st.downbeat) throw new Error('artist: ' + form.id + ': bar ' + st.downbeat + ' has no MUTE');
+      st.downbeat = bar;
+    };
+    const downbeat = () => {
+      const bar = st.downbeat;
+      if (!bar) throw new Error('artist: ' + form.id + ': a MUTE with no onDownbeat');
+      st.downbeat = 0;
+      return bar;
+    };
+    // For the check, with quantMutes: the mutes alone just before and just
+    // after the downbeat of `bar`. An immediate MUTE fails the first, one that
+    // lands a bar late the second. A pair's second key is handled as late as
+    // about 38 ms before the downbeat.
+    const aroundDownbeat = (bar, before, after) => {
+      const t = st.time(bar, 1);
+      out.expected.push({ t: t - 25000, bar, ms: -25, mutesOnly: true, map: { muted: before } });
+      out.expected.push({ t: t + 40000, bar, ms: 40, mutesOnly: true, map: { muted: after } });
+    };
     st.sweepBars = bars => bars * BAR_US / 1e6;
     st.clipName = (track, row) => track === T.KIT ? song.kit.find(c => c.row === row).name
-      : song.synth.find(c => c.track === track && c.row === row).name;
+      : (track === T.KICK || track === T.FX ? song.drum : song.synth).find(c => c.track === track && c.row === row).name;
 
     st.pad = (track, row, why) => {
-      s.say('device', 'Пэд ' + TRACK_NAME[track] + ', ряд ' + row + ': ' + (why || st.clipName(track, row)));
+      const name = track === T.FX && row === 5 && song.cv ? st.clipName(track, row) : why || st.clipName(track, row);
+      s.say('device', 'Пэд ' + TRACK_NAME[track] + ', ряд ' + row + ': ' + name);
       s.tap(PAD(track, row), 80, 120);
       state[track] = row;
     };
@@ -888,18 +1075,59 @@
       for (let track = 0; track < 8; track++) state[track] = row;
     };
     st.mute = (track, why) => {
-      s.say('device', 'MUTE ' + TRACK_NAME[track] + ': ' + why);
+      const before = muted, bar = s.quantMutes ? downbeat() : 0;
+      if (bar) st.at(bar, 1, -70 - 20 * s.rnd());
+      s.say('device', 'MUTE ' + TRACK_NAME[track] + (bar ? ' чуть раньше такта, сработает с его началом' : '') + ': ' + why);
       s.tap(MUTE(track), 80, 100);
       muted ^= 1 << track;
+      if (bar) aroundDownbeat(bar, before, muted);
     };
     // Two MUTE keys with two fingers, so both land ahead of the downbeat.
+    // When MUTE waits for the launch point and the two bars before the
+    // downbeat are free, a group instead: the first key is held from beat 2
+    // of the bar before the last, the second pressed after the half second
+    // that makes the hold a group, and the first let go just before the
+    // downbeat. The first key's change, still waiting for the next bar when
+    // the second joins, is withdrawn into the group.
     st.mutePair = (a, b, why) => {
-      s.say('device', 'MUTE ' + TRACK_NAME[a] + ' и ' + TRACK_NAME[b] + ' двумя пальцами: ' + why);
+      const before = muted, bar = s.quantMutes ? downbeat() : 0;
+      muted ^= (1 << a) | (1 << b);
+      if (bar) {
+        const offset = -70 - 20 * s.rnd();
+        if (s.t > st.time(bar - 2, 2)) st.at(bar, 1, offset);
+        else {
+          st.at(bar - 2, 2);
+          s.say('device', 'MUTE ' + TRACK_NAME[a] + ' держит, ' + TRACK_NAME[b] + ' добавляет в группу (обе горят белым): ' + why);
+          s.down(MUTE(a));
+          s.wait(650);
+          s.down(MUTE(b));
+          // Both lights white in the middle of two sixteenths in a row, the
+          // first starting at least 100 ms after the second key's press: one
+          // of them is an even sixteenth, where a change that only waits shows
+          // its normal light and a collected key alone stays white. The middle,
+          // as the lights reach the chain up to a frame (about 33 ms) late.
+          const lit = t0 + (Math.ceil((s.t + 100000 - t0) / STEP_US) + 0.5) * STEP_US;
+          out.expected.push({ t: Math.round(lit), bar: bar - 2, lights: [a, b] });
+          out.expected.push({ t: Math.round(lit + STEP_US), bar: bar - 2, lights: [a, b], later: true });
+          s.wait(s.human(80));
+          s.up(MUTE(b));
+          // Nothing changes on the downbeat the hold crosses.
+          out.expected.push({ t: st.time(bar - 1, 1, 40), bar: bar - 1, ms: 40, mutesOnly: true, map: { muted: before } });
+          st.at(bar, 1, -120);
+          s.say('device', 'Отпускает MUTE ' + TRACK_NAME[a] + ': группа сработает с началом такта');
+          s.up(MUTE(a));
+          s.wait(s.human(100));
+          aroundDownbeat(bar, before, muted);
+          return;
+        }
+      }
+      s.say('device', 'MUTE ' + TRACK_NAME[a] + ' и ' + TRACK_NAME[b] + ' двумя пальцами' +
+        (bar ? ', сработают с началом такта' : '') + ': ' + why);
       s.down(MUTE(a)); s.wait(12); s.down(MUTE(b));
       s.wait(s.human(80));
       s.up(MUTE(a)); s.wait(10); s.up(MUTE(b));
       s.wait(s.human(100));
-      muted ^= (1 << a) | (1 << b);
+      if (bar) aroundDownbeat(bar, before, muted);
     };
     st.rig = (text, moves) => {
       if (text) s.say('rig', text);
@@ -978,13 +1206,14 @@
       s.say('device', 'VALUE нажать три раза: NEXT STEP, TRACK LOOP и снова 1 BAR');
       for (let i = 0; i < 3; i++) s.tap(VALUE_SW, 80, 260);
     };
-    // One crash: the FX clip for a single bar, then the track is parked.
+    // The descending FX clip plays for a bar, then the track is parked.
     st.crash = bar => {
-      st.launchFor(bar); st.pad(T.FX, 3, 'удар с тарелкой на один такт');
+      st.launchFor(bar); st.pad(T.FX, 3);
       st.launchFor(bar + 1); st.pad(T.FX, 8, 'пустой клип: дорожка снова молчит');
     };
     st.stop = bar => {
-      st.onDownbeat(bar);
+      if (st.downbeat) throw new Error('artist: ' + form.id + ': bar ' + st.downbeat + ' has no MUTE');
+      st.at(bar, 1, -70 - 20 * s.rnd());
       s.say('device', 'PLAY: стоп');
       s.tap(PLAY, 80, 100);
       s.wait(1500);
@@ -1051,7 +1280,7 @@
     heard(50, [T.BASS, 4], [T.ACID1, 4], [T.ACID2, 4], [T.LEAD, 4]);
 
     // One crash: launch the FX clip for a single bar, then park the track.
-    launchFor(53); pad(T.FX, 3, 'удар с тарелкой на один такт');
+    launchFor(53); pad(T.FX, 3);
     snapshot(53);
     launchFor(54); pad(T.FX, 8, 'пустой клип: дорожка снова молчит');
     snapshot(54);
@@ -1077,7 +1306,7 @@
     rig('На синтезаторах: реверберация и задержка обратно',
       [['reverb.level', snd.reverb, 0.5], ['delay.feedback', snd.delay, 1], ['acid1.cutoff', snd.acid1.back, 1]]);
     snapshot(74);
-    launchFor(77); pad(T.FX, 3, 'удар с тарелкой');
+    launchFor(77); pad(T.FX, 3);
     launchFor(78); pad(T.FX, 8, 'пустой клип');
     launchFor(81); pad(T.ACID1, 2, 'кислотная линия A вместо плотной');
     pad(T.ARP, 2, 'длинное арпеджио');
@@ -1320,10 +1549,13 @@
     launchFor(45); pad(T.BASS, 2, 'бас возвращается');
 
     // The one drop: two bars without the kick and the bass.
+    if (st.song.cv) { launchFor(47); pad(T.FX, 5); }
     onDownbeat(47); mutePair(T.KICK, T.BASS, 'бочка и бас уходят на два такта');
-    snapshot(47); snapshot(48);
+    snapshot(47);
     at(47, 2);
     rig('На синтезаторе: срез ACID 1 вверх до упора за два такта', [['acid1.cutoff', snd.acid1.top, 1.8]]);
+    if (st.song.cv) { launchFor(48); pad(T.FX, 8, 'после райзера дорожка FX замолкает'); }
+    snapshot(48);
     launchFor(49); pad(T.LEAD, 3, 'мелодия, впервые за сет'); pad(T.KIT, 4);
     onDownbeat(49); mutePair(T.KICK, T.BASS, 'и возвращаются на сильную долю');
     at(49, 2);
@@ -1387,17 +1619,35 @@
   ];
   // The form each song was written for.
   const SONG_FORM = { set: 'classic', garden: 'twopeaks', spiral: 'classic', mercury: 'twopeaks', transit: 'sunrise', beacon: 'sunrise',
-                      desert: 'classic', penumbra: 'hypnotic', farside: 'twopeaks', tape: 'hypnotic', loop: 'hypnotic' };
+                      desert: 'classic', penumbra: 'hypnotic', farside: 'twopeaks', tape: 'hypnotic', loop: 'hypnotic',
+                      livewire: 'twopeaks', afterglow: 'sunrise', 'phase-shift': 'hypnotic', 'ion-front': 'classic' };
   for (const song of SONGS) song.form = SONG_FORM[song.id];
+
+  // Bar numbers where an eight-bar pad phrase starts in each arrangement.
+  const PAD_BARS = { classic: [25, 65, 81], sunrise: [3, 49, 81], twopeaks: [25, 61, 77], hypnotic: [25, 45, 65] };
+
+  function arrangePad(s, timing) {
+    const { padNotes } = s.song;
+    if (!padNotes) return;
+    for (const bar of PAD_BARS[s.form.id]) {
+      padNotes.forEach((d1, i) => {
+        const t = timing.t0 + (bar - 1 + i * 2) * timing.barUs;
+        s.actions.push({ op: 'pad-midi', t, status: 0x90 | PAD_CHANNEL, d1, d2: 92 });
+        s.actions.push({ op: 'pad-midi', t: t + timing.barUs * 31 / 16, status: 0x80 | PAD_CHANNEL, d1, d2: 0 });
+      });
+    }
+  }
 
   function perform(s) {
     const song = s.song, form = s.form;
     s.say('info', 'ЖИВОЙ СЕТ «' + song.title + '», ' + song.bpm + ' BPM, ' + song.key + '. Аранжировка «' + form.title + '»: ' +
-      form.about + '. Запуски пэдов ждут границы такта (1 BAR).');
+      form.about + (s.quantMutes ? '. Запуски пэдов и нажатия MUTE ждут границы такта (1 BAR); пока MUTE ждёт, его кнопка мигает белым.'
+        : '. Запуски пэдов ждут границы такта (1 BAR).'));
     const st = stage(s, form);
     s.say('device', 'PLAY');
     s.tap(PLAY, 80, 100);
     form.play(st);
+    arrangePad(s, st.out);
     return st.out;
   }
 
@@ -1452,11 +1702,12 @@
       if (!io) continue;
       if (action.op === 'rig') { if (io.rig) hands.at(action.t, () => io.rig(action.id, action.value, action.ramp)); }
       else if (action.op === 'say') { if (io.say) hands.at(action.t, () => io.say(action.kind, action.text)); }
+      else if (action.op === 'pad-midi') { if (io.padMidi) hands.at(action.t, () => io.padMidi(action)); }
       else if (io.touch) hands.at(action.t, () => io.touch(action));
     }
   }
 
-  const api = { buildShow, schedule, TRACK_NAME, LANE_NAME, SONGS, FORMS };
+  const api = { buildShow, schedule, TRACK_NAME, LANE_NAME, CV_TRACKS, PAD_CHANNEL, SONGS, FORMS };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.Artist = api;
 })(typeof window !== 'undefined' ? window : globalThis);

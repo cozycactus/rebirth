@@ -44,6 +44,7 @@ uint32_t sim_leds_skipped(void);                // frames refused (previous stil
 uint32_t sim_step_leds(void);                   // MCP23017 0x21 output latches driving LEDs
 uint32_t sim_gpio_levels(void);                 // bit per GPIO: gates 14-17, tempo LED 25
 const uint16_t *sim_dac(void);                  // 4 MCP4822 codes
+int sim_dac_full_scale_mv(void);                // nominal reference times configured gain
 
 // Timestamped output events since the last sim_events_clear().
 // Events are listed in the order the firmware produced them. A MIDI byte is
@@ -66,12 +67,16 @@ void sim_i2c_fault(int addr, int mode);
 void sim_chip_reset(int addr);                  // brown-out: registers back to power-on values
 
 // Bit mask of what the firmware this core was built from can do, read from its
-// source by sim/build.sh: 1 last note and clip copy, 2 MIDI input, 4 pad keyboard.
+// source by sim/build.sh: 1 last note and clip copy, 2 MIDI input, 4 pad keyboard,
+// 8 MUTE waits for the launch point, 16 it follows an external MIDI clock.
 int sim_features(void);
 
 // ─── Flash image (last 128 KiB of the 2 MiB), for keeping a save ─
 uint8_t *sim_flash_store(void);
 int sim_flash_store_size(void);
+uint8_t *sim_midi_song_slot(void);
+int sim_midi_song_capacity(void);
+int sim_midi_song_open(void);                   // enter the hardware player's screen
 
 // ─── Inspection: for checks and the on-screen meters only. The scripted
 // artist must not read these; it sees the OLED and the lights. ──
@@ -83,12 +88,16 @@ int sim_dbg_queued(int track);
 uint32_t sim_dbg_step(int location, int track, int step);   // note | velocity<<8 | flags<<16
 uint32_t sim_dbg_kit_step(int location, int track, int step);
 int sim_dbg_track_length(int location, int track);
-uint32_t sim_dbg_track_config(int track);       // type | channel<<8 | gate%<<16 | output<<24
+uint32_t sim_dbg_track_config(int track);       // type | MIDI ch<<8 | gate%<<16 | output<<24 | CV pair<<26
 int sim_dbg_mutes(void);
 uint32_t sim_dbg_overruns(void);
 int sim_dbg_midi_overflow(void);
 uint32_t sim_dbg_midi_in_overruns(void);         // bytes lost in the UART's one-byte receiver
 uint32_t sim_dbg_lock_errors(void);
+int sim_dbg_clock_source(void);                 // 0 INT, 1 EXT, 2 AUTO
+int sim_dbg_clock_state(void);                  // bit 0 following the Clock, 1 armed, 2 Clocks present
+int sim_dbg_ext_tenths(void);                   // the measured external tempo in 0.1 BPM, 0 = none
+uint32_t sim_dbg_ext_losses(void);              // followed clocks lost
 const char *sim_dbg_fatal(void);                // NULL while healthy
 
 #endif

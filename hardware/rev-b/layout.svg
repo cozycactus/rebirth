@@ -1,0 +1,97 @@
+<?xml version='1.0' encoding='utf-8'?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1040 758">
+  <rect x="0" y="0" width="1040" height="758" rx="0" fill="#faf9f4" stroke="none" />
+  <text x="48" y="52" fill="#24382f" font-family="Arial, sans-serif" font-size="34" font-weight="700" text-anchor="start">ReBirth  /  Rev B</text>
+  <text x="48" y="83" fill="#24382f" font-family="Arial, sans-serif" font-size="19" font-weight="400" text-anchor="start">Все разъёмы и слот microSD выходят на заднюю стенку.</text>
+  <text x="48" y="121" fill="#24382f" font-family="Arial, sans-serif" font-size="14" font-weight="700" text-anchor="start">ВЕРХНЯЯ ПАНЕЛЬ</text>
+  <rect x="49.39999999999998" y="140.0" width="941.2" height="255.02900000000002" rx="5" fill="#e7e8df" stroke="#738374" />
+  <circle cx="375.2" cy="203.16899999999995" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="375.2" cy="203.16899999999995" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="925.44" cy="376.929" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="925.44" cy="376.929" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="646.7" cy="203.16899999999995" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="646.7" cy="203.16899999999995" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="520.0" cy="340.7289999999999" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="520.0" cy="340.7289999999999" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="664.8" cy="340.7289999999999" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="664.8" cy="340.7289999999999" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="85.59999999999997" cy="369.68899999999996" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="85.59999999999997" cy="369.68899999999996" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="950.78" cy="203.16899999999995" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="950.78" cy="203.16899999999995" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <rect x="57.54499999999996" y="155.20399999999995" width="300.46000000000004" height="197.29" rx="1.5" fill="#28483e" stroke="#172f28" />
+  <text x="207.77499999999998" y="250.84899999999996" fill="#f3f4e9" font-family="Arial, sans-serif" font-size="27" font-weight="700" text-anchor="middle">3,5″ TFT</text>
+  <text x="207.77499999999998" y="277.84899999999993" fill="#c4d9c7" font-family="Arial, sans-serif" font-size="18" font-weight="400" text-anchor="middle">480 × 320</text>
+  <circle cx="429.5" cy="268.32899999999995" r="36.2" fill="#6a716b" stroke="#414941" />
+  <text x="429.5" y="273.32899999999995" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">TRACK</text>
+  <circle cx="574.3" cy="268.32899999999995" r="36.2" fill="#6a716b" stroke="#414941" />
+  <text x="574.3" y="273.32899999999995" fill="white" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">VALUE</text>
+  <rect x="713.6700000000001" y="237.55899999999997" width="61.54" height="61.54" rx="3" fill="#c5d9c0" stroke="#68786d" />
+  <text x="744.44" y="315.32899999999995" fill="#24382f" font-family="Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle">PLAY</text>
+  <rect x="653.94" y="253.84899999999996" width="28.96" height="28.96" rx="3" fill="#d4a993" stroke="#68786d" />
+  <text x="668.4200000000001" y="315.32899999999995" fill="#24382f" font-family="Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle">REC</text>
+  <rect x="795.12" y="253.84899999999996" width="28.96" height="28.96" rx="3" fill="#bfcfd8" stroke="#68786d" />
+  <text x="809.6" y="315.32899999999995" fill="#24382f" font-family="Arial, sans-serif" font-size="13" font-weight="700" text-anchor="middle">CYCLE</text>
+  <circle cx="845.8" cy="253.84899999999996" r="5" fill="#91af8f" stroke="#6d866b" />
+  <rect x="200.53499999999997" y="373.30899999999997" width="61.54" height="13" rx="2" fill="#cbd1c6" stroke="#97a195" />
+  <rect x="271.125" y="373.30899999999997" width="61.54" height="13" rx="2" fill="#cbd1c6" stroke="#97a195" />
+  <rect x="341.71500000000003" y="373.30899999999997" width="61.54" height="13" rx="2" fill="#cbd1c6" stroke="#97a195" />
+  <rect x="412.305" y="373.30899999999997" width="61.54" height="13" rx="2" fill="#cbd1c6" stroke="#97a195" />
+  <rect x="482.895" y="373.30899999999997" width="61.54" height="13" rx="2" fill="#cbd1c6" stroke="#97a195" />
+  <rect x="553.485" y="373.30899999999997" width="61.54" height="13" rx="2" fill="#cbd1c6" stroke="#97a195" />
+  <rect x="624.075" y="373.30899999999997" width="61.54" height="13" rx="2" fill="#cbd1c6" stroke="#97a195" />
+  <rect x="694.665" y="373.30899999999997" width="61.54" height="13" rx="2" fill="#cbd1c6" stroke="#97a195" />
+  <rect x="777.925" y="373.30899999999997" width="61.54" height="13" rx="2" fill="#cbd1c6" stroke="#97a195" />
+  <text x="48" y="437" fill="#24382f" font-family="Arial, sans-serif" font-size="14" font-weight="700" text-anchor="start">ОСНОВНАЯ ПЛАТА</text>
+  <text x="48" y="464" fill="#24382f" font-family="Arial, sans-serif" font-size="16" font-weight="400" text-anchor="start">Вид сверху. Разъёмы направлены к задней стенке.</text>
+  <rect x="78.36000000000001" y="486.0" width="883.28" height="208.15" rx="7" fill="#edf0e7" stroke="#6e8876" />
+  <circle cx="947.1600000000001" cy="657.95" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="947.1600000000001" cy="657.95" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="92.83999999999997" cy="657.95" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="92.83999999999997" cy="657.95" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="483.8" cy="657.95" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="483.8" cy="657.95" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="353.48" cy="505.91" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="353.48" cy="505.91" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="945.35" cy="596.41" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="945.35" cy="596.41" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="92.83999999999997" cy="502.29" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="92.83999999999997" cy="502.29" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <circle cx="737.2" cy="657.95" r="12.67" fill="#e4dfcd" stroke="#948761" />
+  <circle cx="737.2" cy="657.95" r="5.792000000000001" fill="#fffdf6" stroke="#948761" />
+  <rect x="107.04849999999999" y="484.02709999999996" width="76.34580000000001" height="61.1418" rx="2" fill="#afc8b9" stroke="#66756d" />
+  <text x="145.2214" y="518.598" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">OUT D</text>
+  <rect x="184.9871" y="484.02709999999996" width="76.34580000000001" height="61.1418" rx="2" fill="#afc8b9" stroke="#66756d" />
+  <text x="223.16" y="518.598" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">OUT C</text>
+  <rect x="262.9257" y="484.02709999999996" width="76.34580000000001" height="61.1418" rx="2" fill="#afc8b9" stroke="#66756d" />
+  <text x="301.09860000000003" y="518.598" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">OUT B</text>
+  <rect x="368.7021" y="484.02709999999996" width="76.34579999999997" height="61.1418" rx="2" fill="#afc8b9" stroke="#66756d" />
+  <text x="406.87499999999994" y="518.598" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">OUT A</text>
+  <rect x="447.43710000000004" y="484.02709999999996" width="76.34579999999991" height="61.1418" rx="2" fill="#afc8b9" stroke="#66756d" />
+  <text x="485.61" y="518.598" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">IN</text>
+  <rect x="525.6291" y="479.3211" width="39.421799999999955" height="26.751800000000003" rx="2" fill="#d7c4a5" stroke="#66756d" />
+  <text x="545.3399999999999" y="496.697" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">USB</text>
+  <rect x="574.5715" y="485.63800000000003" width="57.159800000000075" height="64.3998" rx="2" fill="#d7c4a5" stroke="#66756d" />
+  <text x="603.1514000000001" y="521.8379" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">SD</text>
+  <rect x="634.2291" y="469.54709637999997" width="33.629799999999975" height="69.10579999999999" rx="2" fill="#c5cfdb" stroke="#66756d" />
+  <text x="651.044" y="508.09999638" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">G4</text>
+  <rect x="675.4971" y="469.54709637999997" width="33.629799999999975" height="69.10579999999999" rx="2" fill="#c5cfdb" stroke="#66756d" />
+  <text x="692.312" y="508.09999638" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">G3</text>
+  <rect x="716.7651" y="469.54709637999997" width="33.629800000000074" height="69.10579999999999" rx="2" fill="#c5cfdb" stroke="#66756d" />
+  <text x="733.58" y="508.09999638" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">G2</text>
+  <rect x="758.0331" y="469.54709637999997" width="33.629799999999975" height="69.10579999999999" rx="2" fill="#c5cfdb" stroke="#66756d" />
+  <text x="774.848" y="508.09999638" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">G1</text>
+  <rect x="799.3011" y="469.54709637999997" width="33.629799999999975" height="69.10579999999999" rx="2" fill="#c5cfdb" stroke="#66756d" />
+  <text x="816.116" y="508.09999638" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">CV4</text>
+  <rect x="840.5691" y="469.54709637999997" width="33.629799999999975" height="69.10579999999999" rx="2" fill="#c5cfdb" stroke="#66756d" />
+  <text x="857.384" y="508.09999638" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">CV3</text>
+  <rect x="881.8371000000001" y="469.54709637999997" width="33.629799999999975" height="69.10579999999999" rx="2" fill="#c5cfdb" stroke="#66756d" />
+  <text x="898.652" y="508.09999638" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">CV2</text>
+  <rect x="923.1050963800001" y="469.54709637999997" width="33.62979999999987" height="69.10579999999999" rx="2" fill="#c5cfdb" stroke="#66756d" />
+  <text x="939.91999638" y="508.09999638" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">CV1</text>
+  <rect x="512.7419" y="571.0519" width="36.23619999999997" height="36.23620000000002" rx="1" fill="#d7dfd1" stroke="#7e8b79" />
+  <text x="530.86" y="622.2881000000001" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">RP2350B</text>
+  <rect x="219.9563" y="606.6727000000001" width="151.20740000000004" height="55.096400000000024" rx="1" fill="#d7dfd1" stroke="#7e8b79" />
+  <text x="295.56" y="676.7691000000001" fill="#24382f" font-family="Arial, sans-serif" font-size="12" font-weight="700" text-anchor="middle">IDC</text>
+  <text x="48" y="732" fill="#24382f" font-family="Arial, sans-serif" font-size="16" font-weight="400" text-anchor="start">244 × 57,5 мм  ·  7 креплений основной платы  ·  17 креплений панели</text>
+</svg>

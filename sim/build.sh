@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the simulator.
 #   sim/build.sh native   - native core + smoke test (needs only a C compiler)
-#   sim/build.sh web      - WebAssembly core for sim/web (needs sim/emsdk), and
+#   sim/build.sh web      - WebAssembly cores for sim/web (needs sim/emsdk), and
 #                           sim/web/version.js, which names the commit it was built from
 #   sim/build.sh          - both
 # Neither output is kept in git: CI builds them for the public page.
@@ -16,13 +16,16 @@ INCLUDES="-Iinclude -Itest/fakes -Isim/core"
 
 # What the firmware being built can do, for the page to pick a fitting score:
 # 1 new steps start at the last note and clips copy, 2 it reads its MIDI input,
-# 4 the pads are a keyboard while a step is held.
+# 4 the pads are a keyboard while a step is held, 8 MUTE waits for the launch
+# point, 16 it follows an external clock.
 FEATURES=0
 grep -q 'last_note' src/ui.c && FEATURES=$((FEATURES | 1))
 [ -f src/midi_in.c ] && FEATURES=$((FEATURES | 2))
 grep -q 'pad_key_note' include/led_frame.h && FEATURES=$((FEATURES | 4))
+grep -q 'transport_toggle_mutes' include/sequencer.h && FEATURES=$((FEATURES | 8))
+[ -f src/clock_in.c ] && FEATURES=$((FEATURES | 16))
 INCLUDES="$INCLUDES -DSIM_FEATURES=$FEATURES"
-echo "firmware features: $FEATURES (1 last note and clip copy, 2 MIDI input, 4 pad keyboard)"
+echo "firmware features: $FEATURES (1 last note and clip copy, 2 MIDI input, 4 pad keyboard, 8 MUTE waits for the launch point, 16 external clock)"
 mkdir -p sim/build
 
 # The Emscripten release the public page is built with (.github/workflows/ci.yml).
@@ -53,6 +56,12 @@ web() {
         -sENVIRONMENT=web,node -sALLOW_MEMORY_GROWTH=0 -sINITIAL_MEMORY=33554432 \
         -o sim/web/core.js
     echo "built sim/web/core.js"
+    SH101_EXPORTS=$(grep -o 'sh101_[a-z0-9_]*(' sim/sh101/board.h | sort -u | sed 's/(//; s/^/_/' | paste -sd, -)
+    emcc -std=c11 -O2 sim/sh101/board.c \
+        -sEXPORTED_FUNCTIONS="$SH101_EXPORTS" -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPU32 \
+        -sMODULARIZE=1 -sEXPORT_NAME=SH101Core -sSINGLE_FILE=1 \
+        -sENVIRONMENT=web,node -o sim/web/sh101_cpu.js
+    echo "built sim/web/sh101_cpu.js"
     # What the page shows as its firmware: the commit, and whether the
     # firmware or the simulator had changes not yet committed.
     COMMIT=$(git rev-parse HEAD 2>/dev/null || echo unknown)

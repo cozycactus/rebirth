@@ -3,6 +3,8 @@
 #include "hardware/uart.h"
 #include "hardware/irq.h"
 #include "hardware/sync.h"
+#include "hardware/timer.h"
+#include "clock_in.h"
 #else
 #include <stdint.h>
 void uart_putc_raw(void *uart, uint8_t c);
@@ -20,12 +22,12 @@ void uart_putc_raw(void *uart, uint8_t c);
 // ─── UART output buffer ─────────────────────────────────────────
 // Buffer MIDI messages during step processing, flush all at once.
 
-#define MIDI_BUF_SIZE   160
+
 #define MIDI_TX_QUEUED_MAX (MIDI_TX_QUEUE_SIZE - 1u)   // bytes the TX queue can hold
 #define MIDI_RT_QUEUE_SIZE 4
 
-static uint8_t midi_buf[MIDI_BUF_SIZE];
-static uint8_t midi_buf_len = 0;
+static uint8_t midi_buf[MIDI_STEP_BUFFER_BYTES];
+static uint16_t midi_buf_len = 0;
 static volatile bool midi_overflow;
 
 #ifndef MOCK_HARDWARE
@@ -169,7 +171,14 @@ static void __not_in_flash_func(midi_in_push)(uint8_t byte) {
 static void __isr __not_in_flash_func(midi_uart_irq_handler)(void) {
     // Read first, and without the TX lock: with the FIFO off the receive interrupt stays
     // asserted until the data register is read, also when the ring has no room for the byte.
-    while (uart_is_readable(MIDI_UART)) midi_in_push(uart_getc(MIDI_UART));
+    // Each byte is stamped as it is read: a Clock's stamp is the time the external clock
+    // follows. Clock, Start, Continue and Stop go to core 1, not to the note ring.
+    while (uart_is_readable(MIDI_UART)) {
+        uint8_t byte = (uint8_t)uart_getc(MIDI_UART);
+        if (!clock_in_rx_byte(byte, timer_hw->timerawl)) midi_in_push(byte);
+    }
+    // The doorbell: core 1 handles the events in its forced TIMER_IRQ_1.
+    if (clock_in_take_pushed()) hw_set_bits(&timer_hw->intf, 1u << CLOCK_IN_ALARM);
     uint32_t lock_state = midi_tx_lock();
     midi_tx_drain_locked();
     midi_tx_unlock(lock_state);
@@ -188,6 +197,7 @@ void midi_init(void) {
     midi_in_head = 0;
     midi_in_tail = 0;
     midi_in_dropped_bytes = 0;
+    clock_in_reset();
 
     uart_init(MIDI_UART, MIDI_BAUD);
     gpio_set_function(MIDI_TX_PIN, GPIO_FUNC_UART);
@@ -293,7 +303,7 @@ static void midi_send_realtime(uint8_t byte, bool cancel_clock) {
 // ─── Buffered output ────────────────────────────────────────────
 
 static void midi_buf_message(uint8_t status, uint8_t data1, uint8_t data2) {
-    if (midi_buf_len + 3u <= MIDI_BUF_SIZE) {
+    if (midi_buf_len + 3u <= MIDI_STEP_BUFFER_BYTES) {
         midi_buf[midi_buf_len++] = status;
         midi_buf[midi_buf_len++] = data1;
         midi_buf[midi_buf_len++] = data2;

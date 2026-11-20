@@ -166,11 +166,11 @@ static void test_scene_rules(void) {
 }
 
 static void test_mute_rules(void) {
-    for (int focus = 0; focus < NUM_TRACKS; focus++) {
+    for (int focus = 0; focus < PANEL_TRACKS; focus++) {
         led_state_t s = base_state();
         s.focus_track = (uint8_t)focus;
         s.muted = 0x40;                                           // track 6 muted
-        for (int t = 0; t < NUM_TRACKS; t++) {
+        for (int t = 0; t < PANEL_TRACKS; t++) {
             rgb_t want;
             if (t == focus) want = (t == 6) ? white(LED_LEVEL_DIM) : scaled(HUE[t], LED_LEVEL_FULL);
             else            want = (t == 6) ? BLACK : scaled(HUE[t], LED_LEVEL_HALF);
@@ -239,23 +239,23 @@ static bool is_black(rgb_t c) { return same(c, BLACK); }
 
 // Pads of all eight tracks at one level: a stored clip (dim), the current clip
 // while stopped (half) or while playing (full).
-static void track_pads_at(int level_index, rgb_t out[NUM_TRACKS]) {
+static void track_pads_at(int level_index, rgb_t out[PANEL_TRACKS]) {
     led_state_t s = base_state();
-    for (int t = 0; t < NUM_TRACKS; t++) {
+    for (int t = 0; t < PANEL_TRACKS; t++) {
         set_clip(&s, t, 0);
         s.current[t] = level_index == 0 ? 1 : 0;
     }
     s.playing = level_index == 2;
-    for (int t = 0; t < NUM_TRACKS; t++) out[t] = light(&s, LED_PAD(t, 0));
+    for (int t = 0; t < PANEL_TRACKS; t++) out[t] = light(&s, LED_PAD(t, 0));
 }
 
 static void test_track_hues_stay_distinct_at_every_level(void) {
     for (int level = 0; level < 3; level++) {
-        rgb_t pads[NUM_TRACKS];
+        rgb_t pads[PANEL_TRACKS];
         track_pads_at(level, pads);
-        for (int a = 0; a < NUM_TRACKS; a++) {
+        for (int a = 0; a < PANEL_TRACKS; a++) {
             CHECK(!is_black(pads[a]));
-            for (int b = a + 1; b < NUM_TRACKS; b++) CHECK(!same(pads[a], pads[b]));
+            for (int b = a + 1; b < PANEL_TRACKS; b++) CHECK(!same(pads[a], pads[b]));
         }
     }
     // Dim track green (a stored clip of track 3) is not dim scene green (a row
@@ -418,6 +418,94 @@ static void test_keys_frame_fits_the_budget(void) {
     CHECK(led_frame_estimate_ma(frame) <= LED_RGB_BUDGET_MA);
 }
 
+// ---- Quantised mutes and mute groups ---------------------------------------------
+
+static void test_mute_group_is_steady_white(void) {
+    for (int focused = 0; focused < 2; focused++) {
+        for (int muted = 0; muted < 2; muted++) {
+            led_state_t s = base_state();
+            s.focus_track = focused ? 3 : 0;
+            s.muted = muted ? 1 << 3 : 0;
+            s.mute_group = 1 << 3;
+            for (uint32_t pulse = 0; pulse < PPQN * 4; pulse++) {
+                s.pulse = pulse;
+                CHECK(same(light(&s, LED_MUTE(3)), white(LED_LEVEL_FULL)));
+            }
+        }
+    }
+}
+
+static void test_mute_pending_flashes_white_on_odd_sixteenths(void) {
+    led_state_t s = base_state();
+    s.focus_track = 3;
+    s.mute_pending = 1 << 3;
+    rgb_t normal = scaled(HUE[3], LED_LEVEL_FULL);
+    for (uint32_t pulse = 0; pulse < 24; pulse++) {
+        s.pulse = pulse;
+        CHECK(same(light(&s, LED_MUTE(3)), normal));
+    }
+    for (uint32_t pulse = 24; pulse < 48; pulse++) {
+        s.pulse = pulse;
+        CHECK(same(light(&s, LED_MUTE(3)), white(LED_LEVEL_FULL)));
+    }
+    s.pulse = PPQN * 4 - 1;                                       // the bar's last sixteenth
+    CHECK(same(light(&s, LED_MUTE(3)), white(LED_LEVEL_FULL)));
+    s.muted = 1 << 3;                                             // a muted focused track: dim white
+    s.pulse = 0;
+    CHECK(same(light(&s, LED_MUTE(3)), white(LED_LEVEL_DIM)));
+    s.pulse = 24;
+    CHECK(same(light(&s, LED_MUTE(3)), white(LED_LEVEL_FULL)));
+    s.mute_pending = 1 << 5;                                      // another track's bit changes nothing here
+    s.pulse = 24;
+    CHECK(same(light(&s, LED_MUTE(3)), white(LED_LEVEL_DIM)));
+}
+
+static void test_mute_pending_shows_on_dark_track(void) {
+    led_state_t s = base_state();
+    s.muted = 1 << 2;                                             // unfocused and muted: normally off
+    s.mute_pending = 1 << 2;
+    for (uint32_t pulse = 0; pulse < PPQN * 4; pulse++) {
+        s.pulse = pulse;
+        bool odd = (pulse / 24) % 2 == 1;
+        CHECK(same(light(&s, LED_MUTE(2)), odd ? white(LED_LEVEL_FULL) : BLACK));
+    }
+}
+
+static void test_mute_pending_outranks_bank_blinks(void) {
+    led_state_t s = base_state();
+    s.current[4] = 9;                                             // both outside the shown bank 0
+    s.queued[4] = 17;
+    s.mute_pending = 1 << 4;
+    for (uint32_t pulse = 0; pulse < PPQN * 4; pulse++) {
+        s.pulse = pulse;
+        bool odd = (pulse / 24) % 2 == 1;
+        CHECK(same(light(&s, LED_MUTE(4)), odd ? white(LED_LEVEL_FULL) : scaled(HUE[4], LED_LEVEL_HALF)));
+    }
+}
+
+static void test_mute_group_outranks_pending(void) {
+    led_state_t s = base_state();
+    s.current[1] = 9;
+    s.mute_pending = 1 << 1;
+    s.mute_group = 1 << 1;
+    for (uint32_t pulse = 0; pulse < PPQN * 4; pulse++) {
+        s.pulse = pulse;
+        CHECK(same(light(&s, LED_MUTE(1)), white(LED_LEVEL_FULL)));
+    }
+}
+
+static void test_mute_white_survives_budget(void) {
+    led_state_t s = busiest_state();
+    s.mute_group = 0xFF;
+    rgb_t frame[LED_COUNT];
+    led_frame_build(&s, frame);
+    led_frame_apply_budget(frame, LED_RGB_BUDGET_MA);
+    for (int t = 0; t < PANEL_TRACKS; t++) {
+        rgb_t c = frame[LED_MUTE(t)];
+        CHECK(c.r > 0 && c.r == c.g && c.g == c.b);
+    }
+}
+
 int main(void) {
     RUN(test_empty_pad_is_off);
     RUN(test_stored_clip_is_dim_hue);
@@ -439,5 +527,11 @@ int main(void) {
     RUN(test_keys_note_marks_every_pad_with_it);
     RUN(test_keys_hide_the_clip_grid_and_keep_the_rest);
     RUN(test_keys_frame_fits_the_budget);
+    RUN(test_mute_group_is_steady_white);
+    RUN(test_mute_pending_flashes_white_on_odd_sixteenths);
+    RUN(test_mute_pending_shows_on_dark_track);
+    RUN(test_mute_pending_outranks_bank_blinks);
+    RUN(test_mute_group_outranks_pending);
+    RUN(test_mute_white_survives_budget);
     return 0;
 }

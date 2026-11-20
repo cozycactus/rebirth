@@ -147,7 +147,7 @@ static void test_glyphs(void) {
 static void test_pattern_helpers_move_kit_steps(void) {
     static pattern_t p;
     pattern_init(&p, 0);
-    for (int t = 0; t < NUM_TRACKS; t++) {
+    for (int t = 0; t < KIT_TRACK_SLOTS; t++) {
         p.kit_steps[t][0] = 0x10u + t;
         p.kit_steps[t][15] = 0x20u + t;
     }
@@ -156,25 +156,25 @@ static void test_pattern_helpers_move_kit_steps(void) {
     CHECK(p.kit_steps[0][0] == 0x10u);
 
     pattern_init(&p, 0);
-    for (int t = 0; t < NUM_TRACKS; t++) p.kit_steps[t][0] = 0x10u + t;
+    for (int t = 0; t < KIT_TRACK_SLOTS; t++) p.kit_steps[t][0] = 0x10u + t;
     pattern_shift(&p, -1);
-    for (int t = 0; t < NUM_TRACKS; t++) {
+    for (int t = 0; t < KIT_TRACK_SLOTS; t++) {
         CHECK(p.kit_steps[t][15] == 0x10u + t);
         CHECK(p.kit_steps[t][0] == 0);
     }
 
-    for (int t = 0; t < NUM_TRACKS; t++) p.kit_steps[t][4] = 7;
+    for (int t = 0; t < KIT_TRACK_SLOTS; t++) p.kit_steps[t][4] = 7;
     pattern_clear_step(&p, 2, 4);
     CHECK(p.kit_steps[2][4] == 0 && p.kit_steps[3][4] == 7);
     pattern_clear_track(&p, 3);
     CHECK(p.kit_steps[3][4] == 0 && p.kit_steps[3][15] == 0 && p.kit_steps[4][4] == 7);
     pattern_clear(&p);
-    for (int t = 0; t < NUM_TRACKS; t++)
+    for (int t = 0; t < KIT_TRACK_SLOTS; t++)
         for (int s = 0; s < STEPS_PER_PATTERN; s++) CHECK(p.kit_steps[t][s] == 0);
 
     memset(p.kit_steps, 0xFF, sizeof(p.kit_steps));
     pattern_init(&p, 0);
-    for (int t = 0; t < NUM_TRACKS; t++)
+    for (int t = 0; t < KIT_TRACK_SLOTS; t++)
         for (int s = 0; s < STEPS_PER_PATTERN; s++) CHECK(p.kit_steps[t][s] == 0);
 }
 

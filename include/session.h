@@ -23,7 +23,7 @@ session_focus_t session_get_focus(void);
 // Walks `detents` stops: a track whose bit is clear in kit_mask is one stop
 // (lane 0), a kit track KIT_LANES stops (AC..RC). Entering a kit moving right
 // lands on AC, moving left on RC. Clamped at (0, first stop) and (7, last stop).
-void session_walk_stops(uint8_t *track, uint8_t *lane, int8_t detents, uint8_t kit_mask);
+void session_walk_stops(uint8_t *track, uint8_t *lane, int8_t detents, track_mask_t kit_mask);
 
 // The lane each kit track last had focused (UI RAM, not saved). The focus and
 // the Pattern view both read and move this one record.
