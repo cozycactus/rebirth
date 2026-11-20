@@ -1,16 +1,19 @@
 # Four MIDI Outputs — Design
 
-Date: 2026-11-20. Status: the routing model (a port per track, default by page,
-saved in the project), Clock and transport on every output, the fold to output A
+Date: 2026-11-20. Status: the routing model (a port per track, default by 16-track
+group, saved in the project), Clock and transport on every output, the fold to output A
 on one-output boards, the overload rule (skip notes, keep playing, lower tracks
 first) and the density promise (the whole wire, by the table) were chosen by the
 project owner in conversation. The owner then approved three sections as
 presented: "Behaviour"; "How it is built"; and "Simulator", "Tests" and "Not
 verifiable without a board" together. Details added or corrected inside them
 after reading the code, and everything else that is the designer's call, are
-marked **(call)** inline or listed in "Left to the builder". No assembled board exists:
-nothing here was run on hardware. Statements about today's code refer to
-`origin/master` f8a8737.
+marked **(call)** inline or listed in "Left to the builder". The admission guard,
+the skipped-note state, the reservation, the cross-port retrigger and the PIO
+interrupt were corrected after an independent review and a byte-level model of
+the rule. No assembled board exists: nothing here was run on hardware.
+Statements about today's code refer to `origin/master` 9d9562d; the firmware
+sources are unchanged since f8a8737, on which the measurements were made.
 
 ## Intent
 
@@ -22,14 +25,15 @@ outputs give four times the wire, and separate instruments per socket.
 
 ## Goals
 
-1. Every track has a port A-D, saved in the project; default by page: T1-16 A,
-   T17-32 B, T33-48 C, T49-64 D.
+1. Every track has a port A-D, saved in the project; default by 16-track group,
+   two 8-track panel pages per output: T1-16 A, T17-32 B, T33-48 C, T49-64 D.
 2. Clock, Start, Stop and Continue on every output.
 3. One-output boards (Pico, Pico 2) play every track through A and keep the
    stored port.
 4. No stop on MIDI load in Pattern and Song mode: an overloaded output skips
    Note Ons, lower tracks first, and no other output is affected.
-5. A port skips nothing while its load fits its wire (the density table).
+5. At a steady tempo a port skips nothing while its load fits its wire (the
+   density table) **(call)**.
 
 ## Non-goals
 
@@ -61,8 +65,10 @@ outputs give four times the wire, and separate instruments per socket.
 - A Note Off always goes to the port and channel its Note On went to, also when
   the setting changes while the note sounds: today's rule for the channel
   (`active_note_state`, `kit_runtime`, `thru_channel`), extended to the port.
-  The same-route test in `prepare_trigger` includes the port, so a tie or slide
-  never joins notes on two ports and a change never strands a note.
+  The same-route test in `prepare_trigger` includes the port, compared under the
+  same condition as the channel (tracks that send MIDI), so a tie or slide never
+  joins notes on two ports, a change never strands a note, and a CV-only track's
+  tie is not broken by a port change **(call)**.
 - Stop releases notes per port and sends Stop on every output. Panic clears all
   queues and sends All Sound Off / All Notes Off on every output.
 
@@ -73,7 +79,7 @@ VBUS sense, VSYS ADC), so these boards have output A only and every track plays
 through it. The stored port stays untouched through load and save, and the row
 shows it with the output used: `Port:   B (A)`.
 
-Old saves get the port by page: a v7 project loaded on Rev B spreads over four
+Old saves get the port by 16-track group **(call)**: a v7 project loaded on Rev B spreads over four
 outputs (on a Pico nothing changes); eight-track saves (v4-v6) hold T1-8 only,
 so they stay on A.
 
@@ -88,7 +94,13 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
   Internal clock: `pulse_interval_us`, the truncated interval (at 187.5 BPM D is
   249 bytes, where 46,875 / BPM gives 250). Following an external clock:
   `ext_sub_us()`, a quarter of the Clock interval estimate, and the internal
-  period until two Clocks have been seen. So D always exists.
+  period until two Clocks have been seen. So D always exists. Playback is
+  straight today (swing is stored, not played), so every step has the same D;
+  if swing is ever played, D must follow each step's real length **(call)**.
+- **Catch-up (call).** In a catch-up burst (`ext_catchup_us()`) steps come up to
+  four times as fast as D assumes. The guard holds the queue, lower tracks keep
+  priority, and a port loaded near the table skips notes until the burst ends.
+  Goal 5 and the density promise are for a steady tempo.
 - **Step budget** D - 6: six Clock bytes go out every step. Unused budget is not
   carried over.
 - **Charges.** A SYNTH or DRUM Note On charges 6 (itself and its Note Off,
@@ -99,26 +111,54 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
   bytes. A flammed voice reserves 4 more for its second hit, and the first
   flammed voice of a kit step 1 more: the second hits are a send of their own
   with their own status byte **(call; the measurement below needs it)**. A flam
-  without room plays as a plain hit and counts in `flam_drops`.
+  without room for its second hit at admission plays as a plain hit with the
+  plain gate (unless another voice of the step keeps its flam: one countdown per
+  kit) and counts in `flam_drops` **(call)**. A second hit dropped later at the
+  flam cap (319) comes after the gate was extended, as today.
 - **Order.** Tracks in track order (T1 first); kit voices in `kit_voice_order`
   (BD, SD, CP, CH, OH, RS, LT, MT, HT, CC, RC).
-- **Admission.** A Note On is admitted when its charge fits the remaining budget
-  and the real queue passes the guard: bytes waiting in that port's TX queue
-  when the step began, plus the Note On bytes already admitted for the port in
-  this step, plus the message, must not exceed the guard limit
-  `G = min(D + 32, MIDI_TX_QUEUED_MAX - MIDI_MANDATORY_MAX)`. The room under the
-  guard is reserved when the fill is read (see "No overflow by construction").
-- **A skipped Note On.** The track's previous note is released as on an
-  inactive step. CV and gate of the track fire as usual (a MIDI+CV track keeps
-  its CV note). No MIDI Note Off is sent later for it. The port's drop counter
-  goes up by one per skipped note or kit voice.
-- **Lag.** An admitted Note On waits behind at most D + 32 queued bytes plus the
-  real-time bytes put ahead of it: about one step plus 10 ms. Releases are never
-  refused: from playback alone a Note Off waits behind at most D + 32 + 258
-  bytes (143 ms at 300 BPM), and behind 1,023 bytes (327 ms) at the very most.
-- **Last line.** The overflow flag and `panic_playback()` stay, as the MIDI Song
-  player's rule and as a safety net; the host tests show that Pattern and Song
-  playback cannot reach them (see "No overflow by construction").
+- **Admission (call).** The budget and the guard count different things: the
+  budget counts charges, the wire bytes of a note and its release; the guard
+  counts bytes in the queue, 3 a message (running status is applied in the
+  drain). At the start of phase 1, after the releases due at the step boundary
+  have been queued, one TX lock section reads each port's fill F0 and sets
+  `reserved = min(max(0, G - F0), 516)`, with `G = min(D + 72, 765)`. 516 is
+  the most one step can put on one port: 258 bytes of Note Ons, 258 of
+  releases. The margin of 72: 40 bytes because two full kits take 3 bytes a
+  message in the queue and 2 on the wire, and 32 of slack. S is every byte the
+  step has put on the port since the read: direct releases (kit leftovers in
+  `play_kit_step()`, a kind change in `load_prepared_track()`), Note Offs in
+  the batch, admitted Note Ons. A Note On is admitted when its charge fits the
+  remaining budget and S plus the bytes it adds (a Note Off sent with it, as in
+  a slide, included) stays within `reserved`. Releases are never refused. The
+  flush queues the batch and clears the reservation in one lock section.
+- **A skipped Note On (call).** `active_note_state_t` gains, beside the port, a
+  "MIDI sounding" bit. The three places that send a track's MIDI Note Off,
+  `prepare_note_off()`, `send_note_off_if_active()` and the slide's Note Off in
+  `prepare_trigger()`, send it only when the bit is set and clear it; Stop
+  (`stop_playback_outputs()`), mutes, countdowns and a kind change go through
+  the first two, and `clear_runtime_note_state()` clears it. A skipped Note On
+  advances the track's state exactly as an admitted one would (`note_is_on`,
+  the countdown, CV and gate on a CV or MIDI+CV track); only the bit stays
+  clear, so no MIDI Note Off is ever owed for it. The previous note is released
+  as it would have been with the new one; in a slide its Note Off goes alone.
+  After a skip, a tie on the same pitch stays silent on MIDI and charges 0; a
+  slide to another pitch sends no Note Off for the skipped note and asks
+  admission for the new Note On (charge 6). A skipped kit voice enters neither
+  `sounding` nor `flam`. The port's drop counter goes up by one per skipped note
+  or kit voice.
+- **Lag (call).** An admitted Note On waits behind at most G (D + 72) queued
+  bytes plus the keys passed in the window and the real-time bytes put ahead of
+  it: about one step plus 23 ms. From playback alone a Note Off waits behind at
+  most D + 72 + 258 bytes (156 ms at 300 BPM), and behind 1,023 bytes (327 ms)
+  at the very most.
+- **Last line (call).** The overflow flag and `panic_playback()` stay, as the
+  MIDI Song player's rule and as a safety net. Admission makes a TX-queue
+  overflow impossible in Pattern and Song playback (see "No overflow by
+  construction"). The 4-entry real-time queue per port is unchanged and can
+  still set the flag: it takes five transport bytes inside one message
+  boundary, which the panel cannot produce (a press sends at most Stop and
+  Start).
 
 ### The density promise
 
@@ -135,7 +175,8 @@ floor((floor(46,875 / BPM) - 6) / 6):
 | 240 | 195 | 189 | 31 |
 | 300 | 156 | 150 | 25 |
 
-Running status and shared channels only lower the load. Corollaries:
+Running status and shared channels only lower the load. The promise holds at a
+steady tempo, not in a catch-up burst **(call)**. Corollaries:
 
 - **Default layout, SYNTH and DRUM tracks:** 16 per output, 102 bytes a step
   (measured) against 156.25 at 300 BPM. Nothing skips at any tempo.
@@ -168,9 +209,18 @@ Family D survived above the wire's capacity only because today's flam cap
 and overflowed later; loads just below held 64 bars. Every surviving run put all
 768 Clocks on the wire, the latest 1,276 us after its pulse (bound 1,280 us).
 
+**Checked by a byte-level model** of the admission rule above **(call)**: a model
+of the rule, not firmware and not the host measurements above. No overflow in
+any family tried (pass-through prefill, keys hammered inside phase 1, slides,
+catch-up bursts, tempo jumps, random patterns, 40-300 BPM), the peak of fill +
+3 x owed 1,017; no skip at any row of the table at gate 10, 50 and 100 %, with
+all tracks tied and with slides every step.
+
 ### Drop counters
 
-`sequencer_jitter_stats_t` gains `note_drops[4]`, one per output. On Pattern
+`sequencer_jitter_stats_t` gains `note_drops[4]`, one per output, counted by
+physical port, after the fold: on a one-output board every drop counts under A
+**(call)**. On Pattern
 Select the only free text line is y = 8, which today holds `FLAM DROP n`
 between the title (y = 0) and the big pattern label (y = 16); the lines at 30,
 37, 44 and 56 are taken. Proposal **(call)**: `DROP A12 B3`, only outputs with
@@ -184,6 +234,11 @@ A key from MIDI IN, or a pad shown as a key, goes to the port and channel of the
 track being edited (`midi_in_cell()`), the port resolved as for playback. The
 table remembers port and channel per note (`thru_channel` becomes a route), so
 the Note Off follows its Note On. The queue caps apply to that port's queue.
+A retrigger whose old note sounds on another port is one capped send over two
+queues in a single TX lock section **(call)**: the Note Off on the old port and
+the Note On on the new one both go, or neither does and the table keeps the old
+route, as for today's one batch. Each queue passes the checks of a capped send
+with the Note On cap (511), as today's batch does.
 
 ### MIDI Song player
 
@@ -235,7 +290,7 @@ PL011's holding register, and a Clock still waits at most four byte times
 .program midi_tx
 .side_set 1 opt
     pull       side 1 [6]   ; idle and stop bit high; stalls here when empty
-    irq nowait 0 rel side 1 ; flag n for state machine n: feed the next byte
+    irq nowait 0 side 1     ; one flag for B-D: feed the next byte
     set x, 7   side 0 [7]   ; start bit
 bitloop:
     out pins, 1             ; LSB first, autopull off
@@ -245,16 +300,21 @@ bitloop:
 Ten bits of eight cycles; the stop bit is high through the pull, its delay and
 the irq. Divider clk_sys / (8 x 31,250): 600 at the RP2350's default 150 MHz,
 exact (the firmware never changes the system clock). "Writable" for a PIO port
-means its TX FIFO is empty. The handler clears each set flag
-(`pio_interrupt_clear`) and drains that port. Pin hand-over, so the line never
-glitches low: `pio_sm_set_pins_with_mask` (high), `pio_sm_set_pindirs_with_mask`
-(output), then `pio_gpio_init`, then configure and enable the state machine.
-`ws2812_program_init` uses the opposite order and is not copied.
+means its TX FIFO is empty. The three state machines share flag 0 **(call)**:
+the handler clears it first (`pio_interrupt_clear`), then feeds every port that
+is writable and has a byte. Clearing first matters: write-then-clear can lose a
+wake-up, when a state machine pulls the byte and raises the flag before the
+clear. Pin hand-over, so the line never glitches low: pulls off on the three
+pins (`gpio_disable_pulls`) **(call)**, `pio_sm_set_pins_with_mask` (high),
+`pio_sm_set_pindirs_with_mask` (output), then `pio_gpio_init`, which releases
+the pad, then configure and enable the state machine. `ws2812_program_init`
+uses the opposite order and is not copied.
 
 ### Backend seam
 
 Under the queue a port is four operations: writable, put one byte, TX interrupt
-enable (the UART's TX enable, the PIO flag's source enable), transmitter idle.
+enable (the UART's TX enable; for PIO the shared flag's source enable, one for
+B-D **(call)**), transmitter idle.
 The firmware implements them for the PL011 and for PIO. The host fakes and the
 simulator implement A as today's UART and B-D as byte pipes (320 us a byte, one
 byte waiting), not as PIO registers.
@@ -281,7 +341,8 @@ step buffer is split by port and flushed as one batch per port.
 | `midi_send_all_notes_off()` | unchanged: every present port |
 | `midi_clear_output_queue()`, `midi_wait_output_idle()` | every present port |
 | `midi_output_overflowed()` | true when any port overflowed |
-| new | one call that reads every port's fill and reserves the guard's room; the flush releases it |
+| new **(call)** | one call that reads every port's fill and sets `reserved`; the flush clears it |
+| new **(call)** | a capped send over two ports in one lock section (pass-through retrigger) |
 | new | `midi_ports_present()`; a setter in test and simulator builds |
 | new | `MIDI_MANDATORY_MAX`; `THRU_*_QUEUE_MAX` and the flam cap asserted against it |
 | `sequencer_state_t` | gains `uint8_t track_port[NUM_TRACKS]` |
@@ -296,9 +357,10 @@ there. The per-port tests run in the builds with the real queue.
 
 ### Port count
 
-The logical count is always 4: the stored value 0-3, validation, the UI and
-`note_drops[4]`. The physical count `MIDI_PORTS` is 4 when the board header
-defines the three pins and 1 otherwise, modelled on `REBIRTH_CV_ENABLE_PIN`:
+The logical count is always 4: the stored value 0-3, validation, the UI and the
+size of `note_drops[4]`, indexed by physical port **(call)**. The physical count
+`MIDI_PORTS` is 4 when the board header defines the three pins and 1 otherwise,
+modelled on `REBIRTH_CV_ENABLE_PIN`:
 `hardware/rev-b/boards/rebirth_revb_rp2354b.h` and `_rp2350b.h` gain
 `REBIRTH_MIDI_OUT_B_PIN 23`, `_C_PIN 24`, `_D_PIN 29`; the Pico builds use the
 SDK's `pico.h` and `pico2.h`, which define none. Host tests and the simulator
@@ -312,7 +374,7 @@ key is passed through. Everything below works with physical ports.
 ### Sequencer (`sequencer.c`, `song.c`)
 
 - `sequencer_state_t` gains `uint8_t track_port[NUM_TRACKS]`, under the shared
-  lock like `kit_config`. `sequencer_init()` sets the defaults by page beside
+  lock like `kit_config`. `sequencer_init()` sets the defaults by group beside
   `kit_config_defaults()`; `load_stopped()` sets them in the v7 and eight-track
   branches (not `pattern_init()`: the port is not a location's).
 - `snapshot_row_locked()` reads the port and `prepare_row()` stores the
@@ -321,15 +383,15 @@ key is passed through. Everything below works with physical ports.
   would add 16 bytes to each of the 320 rows (`prepared_patterns`, 256;
   `prepared_playback`, 64): 5,120 bytes. Rows of T9-64 are prepared inside the
   timer ISR by `load_prepared_track()` through the same snapshot.
-- `active_note_state_t` gains the port (64 bytes); `kit_runtime_t` gains it in
-  its padding (19 bytes padded to 20). Kit releases and `kit_release_all()` are
-  built per port.
+- `active_note_state_t` gains the port and the MIDI sounding bit in one byte
+  (64 bytes) **(call)**; `kit_runtime_t` gains the port in its padding (19 bytes
+  padded to 20). Kit releases and `kit_release_all()` are built per port.
 - `seq_set_track_port(track, port)` in `song.c` stores the port under the shared
   lock and refreshes that track's 32 prepared rows, like `seq_set_kit_config()`.
   `jitter_reset_now()` clears `note_drops`.
-- ISR cost per step: one queue-fill read per present port under the TX lock
-  (one lock section for all four), then per track a compare and an add, per kit
-  voice an add. To be measured on GPIO 7 with 64 tracks.
+- ISR cost per step: one queue-fill read and reservation per present port under
+  the TX lock (one lock section for all four) **(call)**, then per track a
+  compare and an add, per kit voice an add. To be measured on GPIO 7 with 64 tracks.
 
 RAM: the RP2040 release build of f8a8737 (Release, SDK 2.2.0,
 `arm-none-eabi-size -A`) has `.data` 15,084 + `.bss` 226,152 = 241,236 bytes;
@@ -341,45 +403,49 @@ carries three more 1,024-byte queues and the split step buffer.
 
 `MIDI_MANDATORY_MAX` = 3 x (NUM_TRACKS + MAX_KIT_TRACKS x KIT_VOICES) = 258
 bytes: one release for everything that can sound on one port (one note per
-track, one per kit voice). Every optional send must leave that much room,
-statically asserted against 1,023 - 258 = 765:
+track, one per kit voice). Optional sends are capped against 1,023 - 258 = 765,
+statically asserted **(call)**:
 
 | Optional send | Cap today | Cap after |
 |---|---|---|
-| Admitted step Note Ons | none (the overflow stops) | `G = min(D + 32, 765)` |
+| Admitted step Note Ons | none (the overflow stops) | `G = min(D + 72, 765)` |
 | Flam second hits (`KIT_FLAM_MAX_QUEUED`) | 319 | 319 |
 | Pass-through Note On (`THRU_ON_QUEUE_MAX`) | 511 | 511 |
 | Pass-through Note Off (`THRU_OFF_QUEUE_MAX`) | 767 | 765 |
 
-Optional bytes are queued only while the port's fill stays at or under 765.
-Every other send of Pattern and Song playback is a release of something
-sounding: `kit_release()`, `kit_release_all()`, `send_note_off_if_active()`, the
-Note Offs of the step batch (slides included) and of `stop_playback_outputs()`.
-At most 258 bytes of releases can be owed at any moment, so the fill stays at or
-under 1,023. A pass-through Note Off is not owed: refused, it is retried every
-pass. Panic clears the queue before its releases and the 96 bytes of All Notes
-Off. MIDI Song events are the one other mandatory send, and that mode keeps the
-stop rule. The three overflow checks (timer ISR while following, timer ISR on
-the internal clock, doorbell ISR) stay.
+The step's Note Ons are held to G through `reserved` (see "Admission"). A capped
+send from core 0 (pass-through) passes two separate checks **(call)**: `fill + length`
+within its own cap, and `fill + reserved + length <= 765`. Flam second hits run
+in the same timer ISR, outside phase 1, and see `reserved` = 0. So a key that
+arrives during phase 1 on an empty queue is accepted at every tempo
+(516 + 6 <= 765). Every other send of Pattern and Song playback is a release of
+something sounding: `kit_release()`, `kit_release_all()`,
+`send_note_off_if_active()`, the Note Offs of the step batch (slides included)
+and of `stop_playback_outputs()`. A pass-through Note Off is not owed: refused,
+it is retried every pass.
+
+The invariant **(call)**: fill + 3 x owed <= 1,023 on every port, where owed is the number
+of playback notes sounding on the port (at most 86, `MIDI_MANDATORY_MAX` / 3).
+
+1. A release adds at most 3 bytes and ends one owed note; draining only lowers
+   the sum.
+2. Outside phase 1 an optional send leaves fill <= 765, so the sum is at most
+   765 + 258. A flam second hit re-strikes a sounding voice: owed is unchanged.
+3. In phase 1 every accepted key keeps fill + reserved <= 765.
+4. Every admitted Note On kept S <= reserved, so at the flush fill <= 765 + R',
+   R' being the release bytes queued after the last admitted Note On.
+5. Each release in R' leaves its track or voice silent, so owed <= 86 - R' / 3
+   and the sum stays at or under 1,023.
+
+Panic clears the queue before its releases and the 96 bytes of All Notes Off.
+MIDI Song events are the one other mandatory send, and that mode keeps the stop
+rule. The three overflow checks (timer ISR while following, timer ISR on the
+internal clock, doorbell ISR) stay.
 
 The argument covers the TX queue. The flag has two other causes in `midi_out.c`:
-the 4-entry real-time queue, and the step buffer, whose share for each port
-must hold the full `MIDI_STEP_BUFFER_BYTES` (450), as every track may use one
-port.
-
-**The reservation (call).** The guard reads a port's fill when phase 1 starts,
-and the batch is queued later, at the flush. Phase 1's own direct sends in
-between (kit leftovers in `play_kit_step()`, a kind change in
-`load_prepared_track()`) are releases and are counted, but core 0's
-pass-through could queue on the same port in between. So the read reserves the
-room: in the one TX lock section that reads the fills, each port's `reserved`
-is set to `max(0, G - fill)`; phase 1 admits Note On bytes only up to that
-reservation; every capped send (pass-through, flam second hits) is accepted
-only if `fill + reserved + length` stays within its cap; the flush, in its own
-lock section, clears the reservation and queues the batch. A pass-through key
-that arrives in that window may be refused as on a full queue today: a Note On
-is dropped, a Note Off is retried on the next pass. Between steps the
-reservation is zero, so flams and keys see the real fill.
+the 4-entry real-time queue (see "Last line"), and the step buffer, whose share
+for each port must hold the full `MIDI_STEP_BUFFER_BYTES` (450), as every track
+may use one port.
 
 ### Storage (`flash_storage.c`)
 
@@ -389,8 +455,8 @@ reservation is zero, so flams and keys see the real fill.
   ports 256 = 150,016 of 196,608 bytes (v7 uses 149,760). `pattern_t`,
   `track_config_t` and every legacy record stay byte-identical.
 - **Loader order.** A valid v8 in the slot; else a valid v7 in the same slot
-  (ports by page, reported as a normal load, `LOADED OK`); else the eight-track
-  slot, v4-v6, as today (ports by page, so A for T1-8; `OLD SAVE LOADED`).
+  (ports by group, reported as a normal load, `LOADED OK`); else the eight-track
+  slot, v4-v6, as today (ports by group, so A for T1-8; `OLD SAVE LOADED`).
   Validation rejects a port above 3; ports B-D are valid on a one-output board.
 - **Downgrade.** Firmware that knows only v7 does not read a v8 slot (its
   loader requires version 7): it falls back to the eight-track save or reports
@@ -404,11 +470,12 @@ reservation is zero, so flams and keys see the real fill.
   Loading is tested with images written by the old writers (v5, v6, v7) built
   with `-fshort-enums`; today's `write_legacy_image()` serializes live types.
 - **Idle wait.** `midi_wait_output_idle()` waits for every present port: queue,
-  real-time queue and Clock flag empty, then the transmitter idle (PL011:
-  `uart_tx_wait_blocking`; PIO: TX FIFO empty, TXSTALL cleared and read set
-  again, then one more byte time for the stop bit; one bit time would do). Its
-  five call sites: in `save_stopped()` before `multicore_lockout_start_blocking()`
-  and again after it, before `save_and_disable_interrupts()`; in `load_stopped()`
+  real-time queue and Clock flag empty; then the PL011 path stays
+  `uart_tx_wait_blocking`, and a PIO port waits for its TX FIFO empty and one
+  byte time (320 us) **(call)**. The PL011 and the PIO finish a byte on their own
+  with interrupts off: the wait is for the software queue. Its five call sites:
+  in `save_stopped()` before `multicore_lockout_start_blocking()` and again
+  after it, before `save_and_disable_interrupts()`; in `load_stopped()`
   before RAM is changed; and in `ui.c` before a save and before a load, between
   `thru_release_all()` and `thru_retry_releases()`, so that a pass-through
   release a full queue refused goes out before the stall, now on whichever port
@@ -443,15 +510,16 @@ and 102-byte figures: the step buffer is `MIDI_STEP_BUFFER_BYTES`, 450;
   the Pico builds use nothing else. The Port rows, the step budget and the skip
   rule apply on every board: a Pico that stops on an overflow today skips notes
   instead. Lock order stays playback, then shared state or MIDI.
-- Nothing optional may push a port's fill above 765 (asserted). `pattern_t`
-  and every legacy record keep their bytes.
+- Nothing optional is accepted that would take a port's fill above 765
+  (asserted), and fill + 3 x owed stays at or under 1,023. `pattern_t` and
+  every legacy record keep their bytes.
 
 ## Approaches considered
 
-**Routing.** Fixed by page: no setting, but a track can never reach an
-instrument on another socket. A per-page table: four settings, but a track
-could not leave its page. Per track (chosen): one value per track, defaults by
-page.
+**Routing.** Fixed by 16-track group: no setting, but a track can never reach an
+instrument on another socket. A per-group table: four settings, but a track
+could not leave its group. Per track (chosen): one value per track, defaults by
+group.
 
 **Hardware.** UART0 for A plus PIO for B-D (chosen); the alternatives are under
 "Hardware resource per output".
@@ -478,16 +546,27 @@ bytes and changes every legacy record. A per-track block like the kit settings
   free, one byte waiting; their interrupt is due like `hal_uart_irq_due()`.
 - `SIM_EV_MIDI` carries `port << 8 | byte` rather than a new field: the 16-byte
   `sim_event_t` that `device.js` reads at a fixed stride keeps its shape, and an
-  older core reads as port A. `Device.drain()` keeps one running-status parser
-  per port (today one `status` and `data`) and adds `port` to each MIDI message;
-  `sim/test/smoke.c` masks the byte.
+  older core reads as port A. `Device.drain()` splits the value into port and
+  byte before parsing (its `value >= 0xF8` test reads the whole value today),
+  keeps one running-status parser per port (today one `status` and `data`) and
+  adds `port` to each MIDI message **(call)**. `sim/test/smoke.c` does the same
+  (its cast to `uint8_t` drops the port) and takes real-time bytes from A only:
+  it checks one Start and 192-198 Clocks, and four outputs carry four Starts.
 - The page gets a board switch "Pico (1 output) / Rev B (4 outputs)", which sets
   the present ports, and a byte indicator per output. The rig's instruments
   take channel messages from all four outputs merged and real-time bytes from A
-  only **(call)**: the page's tempo estimate (`app.js`, 0xF8) and its Stop
-  handling (0xFC), `device_check.js`, `clock_check.js` and `artist_check.js`
-  count Clock, Start and Stop, which every output now carries.
-- `sim_dbg_track_config` gains the stored port at bit 28 (bits 28-31 are free);
+  only **(call)**. Every consumer of `drain()` that reads Clock, Start, Stop or
+  Continue takes them from A: in `app.js` the tempo estimate (0xF8), Start, the
+  Stop handling (0xFC) and the MIDI log lines; `device_check.js` (Clocks while
+  a bus hangs); `clock_check.js` (Clock, Start, Stop and Continue out);
+  `artist_check.js` (Clock, Start and Stop counts); `midi_clips_check.js` (the
+  times of the first Start and Stop).
+- `midi_clips_check.js` also asserts that a firmware save is version 7, with
+  the CRC over three payloads: it moves to v8 and four **(call)**.
+  `sim/web/midi_clips.js` writes a v7 image, which the v7 fallback keeps loading
+  (ports by group).
+- `sim_dbg_track_config` gains the stored port at bit 28 (bits 28-31 are free),
+  and `Device.trackConfig()` reads the port bits **(call)**;
   `sim_dbg_note_drops(port)` reads the counters. `sim/build.sh` gets feature bit
   32, "four MIDI outputs", detected from `seq_set_track_port` in
   `include/sequencer.h`, as bit 8 is from `transport_toggle_mutes`.
@@ -513,16 +592,25 @@ gains the PIO interrupt.
   mid-note, ties, slides and kit voices included; Stop and Panic on every port;
   the fold to A with one present port, stored ports unchanged.
 - **Density** (`test_playback`, `test_clock`): per tempo of the table, no skip
-  at the table value, skips above it, lower tracks first, kit voice order; D
-  from the played interval and from the Clock estimate.
-- **Overload:** no stuck note and no overflow at any load, including 64 tracks
-  plus two flamming kits on one port at 300 BPM over 64 bars; drop counters;
-  pass-through keys hammered on the overloaded port between the fill read and
-  the flush never overflow it (the reservation).
+  at the table value at gate 10, 50 and 100 %, tied, and sliding every step;
+  skips above it, lower tracks first, kit voice order; the kit edge (two full
+  kits plus SYNTH tracks filling the budget, gate 100 %) **(call)**; D from the
+  played interval and from the Clock estimate.
+- **Overload:** no stuck note and no overflow at any load, including 64 tracks,
+  two of them flamming kits, on one port at 300 BPM over 64 bars; slow tempo,
+  40-80 BPM, with ties ending, gate 10 % and a queue prefilled through
+  pass-through **(call)**; drop counters by physical port; pass-through keys
+  hammered on the overloaded port inside phase 1 never overflow it, and a key
+  during phase 1 on an empty queue is accepted at every tempo **(call)**.
+- **Catch-up** (`test_clock`) **(call)**: the existing burst scenario (two kits
+  flamming through bursts) with a port loaded near the table: no overflow, no
+  stuck note, drops counted.
 - **Storage** (`test_storage`): v8 round trip; v4-v7 images written by the old
-  writers; a v8 save cut short; a port above 3; the idle wait on four ports.
+  writers; a v8 save cut short; a port above 3; the idle wait on four ports
+  (the fake flash erase checks that every port is idle **(call)**).
 - **UI** (`test_ui`): the Port rows, scrolling, the folded text; pass-through
-  port and channel per note.
+  port and channel per note; a retrigger across ports refused or sent whole,
+  Note Off and Note On together **(call)**.
 - **Build:** `firmware-release`, `pico2-release`, `revb-rp2354b`,
   `revb-rp2350b`, with RAM read from each map file. The sanitizer job runs the
   host tests with and without `-fshort-enums`, as today.
@@ -532,10 +620,11 @@ gains the PIO interrupt.
 Nothing here may be reported as checked:
 
 - The PIO program on silicon: waveform, baud, stop bit, side-set while stalled,
-  the `rel` IRQ flag numbering, TXSTALL as the idle test.
+  the shared IRQ flag **(call)**.
 - The line from reset until the transmitter starts. RP2350 pads reset with the
   isolation latch set and the internal pull-down on (`0x116`), against the 10 k
-  pull-up: a receiver may see a spurious byte.
+  pull-up until the pulls are switched off **(call)**: a receiver may see a
+  spurious byte.
 - Core 0 interrupt load with four outputs (up to 12,500 interrupts a second
   against 3,125 today) and its effect on the UI loop, panel scan and encoders.
 - Clock latency and skew between outputs.
@@ -543,25 +632,23 @@ Nothing here may be reported as checked:
 - The four current loops electrically (CA-033 at 3.3 V, supply current).
 - How real instruments react to skipped notes and running status.
 
-Unverified even on paper (not in the local SDK 2.2.0): how a `rel` IRQ index is
-computed (expected: flag plus state machine number, modulo 4); whether the
-side-set of `pull side 1` applies while the state machine stalls on it; whether
-TXSTALL is set again on every stalled cycle after it is cleared; the value of
-the internal pull-down.
+Unverified even on paper (not in the local SDK 2.2.0): whether the side-set of
+`pull side 1` applies while the state machine stalls on it; the value of the
+internal pull-down.
 
 ## Left to the builder
 
 - Exact names; one tagged step buffer or four.
 - Whether port A's Note On charge may use measured running-status savings, and
-  whether the guard margin of 32 bytes needs tuning against the tests.
+  whether the guard margin of 72 bytes needs tuning against the tests.
 - The golden-image format for the old-writer tests.
 - Where exactly the `DROP` line fits on y = 8, and its text for large counts.
 - Whether the Port row wraps from D to A or stops at the ends.
-- A pass-through retrigger whose old note is on another port: today the Note Off
-  and the Note On are one capped batch; across ports they are two sends.
 
 ## Deferred (decisions for later, with the owner)
 
 - Ports for MIDI Song tracks (song image and exporter).
 - A per-output Clock and transport switch.
 - Per-instrument port selection in the simulator's rig.
+- MIDI Song end on a nearly full queue: All Notes Off may not fit (it sets the
+  overflow flag) and Panic then sends it (today's behaviour, no stuck note).
