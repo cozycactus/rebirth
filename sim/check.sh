@@ -16,6 +16,7 @@ MODE=${1:-full}
 node sim/test/sh101_check.js
 node sim/test/sh101_rom_check.js
 node sim/test/midi_song_check.js
+node sim/test/midi_clips_check.js
 node sim/test/session64_check.js
 
 # The first word is 1 when MUTE waits for the launch point, the rest the scores.
