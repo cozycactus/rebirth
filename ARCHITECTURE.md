@@ -438,10 +438,16 @@ flash is programmed directly from SRAM. The three payloads (patterns, song,
 kit settings) are page-aligned. CRC32 covers their unpadded bytes, and the
 validity header is programmed last.
 
-When the format-7 header is absent, the loader checks the old slot for formats
-4, 5 and 6. It restores the original eight tracks, initializes the other 56
-and expands each song entry. Version 6 also restores kit steps and settings.
-Loading validates the whole project before changing RAM.
+When the format-7 slot holds no valid project, the loader checks the old slot
+for formats 4, 5 and 6. It restores the original eight tracks, initializes the
+other 56 and expands each song entry. Version 6 also restores kit steps and
+settings. Loading validates the whole project before changing RAM.
+
+A format-7 slot whose save was cut short looks exactly like one that was never
+written, so the loader does not tell the two apart: with no valid format-7
+project it always falls back on the old slot, and the load reports which
+project it gave (`LOADED OK` or `OLD SAVE LOADED`). A save verifies the
+format-7 slot alone.
 
 This is one save region. Power loss during erase/program may lose the previous
 save; an incomplete new save is rejected. Preserving the old save across power

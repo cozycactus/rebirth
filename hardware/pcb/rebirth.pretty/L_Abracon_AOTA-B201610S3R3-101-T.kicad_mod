@@ -1,0 +1,140 @@
+(footprint "L_Abracon_AOTA-B201610S3R3-101-T"
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(layer "F.Cu")
+	(descr "Abracon AOTA-B201610S3R3-101-T, pin 1 marked. Land pattern from Raspberry Pi RP2350B Minimal R4 (MIT).")
+	(property "Reference" "REF**"
+		(at 0 -1.55 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "adb361eb-a68a-48d1-b8ca-527e507d89ec")
+		(effects
+			(font
+				(size 0.8 0.5)
+				(thickness 0.125)
+			)
+		)
+	)
+	(property "Value" "L_Abracon_AOTA-B201610S3R3-101-T"
+		(at 0 0.8 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "31425657-fe2a-4bee-aed4-a8a5851fbe9e")
+		(effects
+			(font
+				(size 0.8 0.5)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "Datasheet" "https://abracon.com/datasheets/AOTA-B201610S3R3-101-T.pdf"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "ee1771d5-64ea-496a-9707-9721e7214d1a")
+		(effects
+			(font
+				(size 0.8 0.5)
+				(thickness 0.01)
+			)
+		)
+	)
+	(property "Description" "Inductor, SMT, 3.3uH, 20%, Irms=2.1A, Isat=2.4A, DCR=115mR typ 140mR max, Polarity Marked, M2016"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "8277b44b-6de8-4394-869e-6ecf21976391")
+		(effects
+			(font
+				(size 0.8 0.5)
+				(thickness 0.01)
+			)
+		)
+	)
+	(attr smd)
+	(duplicate_pad_numbers_are_jumpers no)
+	(fp_circle
+		(center -1.4 0.7)
+		(end -1.25 0.7)
+		(stroke
+			(width 0.01)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.SilkS")
+		(uuid "08caad91-7992-40d1-a407-7d47f059ee4e")
+	)
+	(fp_rect
+		(start -1.1 0.9)
+		(end 1.1 -0.9)
+		(stroke
+			(width 0.01)
+			(type default)
+		)
+		(fill no)
+		(layer "F.CrtYd")
+		(uuid "af326672-341d-40f7-afe2-76b13ba79a69")
+	)
+	(fp_rect
+		(start -1 0.8)
+		(end 1 -0.8)
+		(stroke
+			(width 0.01)
+			(type default)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "4785e87a-8b9d-4f66-b034-5a44d6af53d2")
+	)
+	(fp_rect
+		(start -0.4 0.8)
+		(end 0.4 -0.8)
+		(stroke
+			(width 0.01)
+			(type default)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "2813f303-06b4-4bcd-9c7b-d509f8c07728")
+	)
+	(fp_circle
+		(center -0.7 0.55)
+		(end -0.6 0.55)
+		(stroke
+			(width 0.01)
+			(type solid)
+		)
+		(fill yes)
+		(layer "F.Fab")
+		(uuid "130decc2-1344-4175-a3e9-18f7441e6d55")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "94400665-e5dc-4edb-b9e6-961269768635")
+		(effects
+			(font
+				(size 0.8 0.5)
+				(thickness 0.01)
+			)
+		)
+	)
+	(pad "1" smd rect
+		(at -0.7 0)
+		(size 0.7 1.7)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "44b020bd-460a-45c6-94ed-bb16fe2b95d4")
+	)
+	(pad "2" smd rect
+		(at 0.7 0)
+		(size 0.7 1.7)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "982d0edd-2db3-4ad0-82c0-3cb1c3721d99")
+	)
+	(embedded_fonts no)
+)

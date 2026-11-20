@@ -1,0 +1,14 @@
+(version 1)
+
+(rule "Standard through drilling"
+  (constraint hole_size (min 0.30mm)))
+
+# The nine ground vias in the exposed pad are part of the Raspberry Pi R4 land pattern.
+(rule "RP2350B exposed pad drilling"
+  (condition "A.Type == 'Pad' && A.memberOfFootprint('U301') && A.Pad_Number == '81'")
+  (constraint hole_size (min 0.25mm)))
+
+# The 0.4 mm pitch and 0.23 mm wide lands in the R4 pattern leave 0.17 mm.
+(rule "RP2350B pad spacing"
+  (condition "A.Type == 'Pad' && B.Type == 'Pad' && A.memberOfFootprint('U301') && B.memberOfFootprint('U301')")
+  (constraint clearance (min 0.15mm)))

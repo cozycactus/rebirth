@@ -391,6 +391,7 @@
               <select id="midi-song-mode">
                 <option value="full">Полная MIDI-аранжировка</option>
                 <option value="firmware">MIDI Song · выходы ReBirth</option>
+                <option value="pads">Клипы на падах · песня из клипов прибора</option>
               </select>
             </label>
             <label>Плата для UF2
@@ -401,6 +402,13 @@
             </label>
             <button class="btn" id="midi-song-export" type="button">Скачать MIDI Song UF2</button>
           </div>
+          <div class="row">
+            <label title="Только для полной аранжировки; такты по четыре доли">Начать с такта (полная аранжировка) <input type="number" id="midi-song-from" min="1" value="1" style="width:5em"></label>
+            <button class="btn" id="part-sounds-export" type="button">Скачать звуки партий (parts.json)</button>
+            <button class="btn" id="part-sounds-reset" type="button">Сбросить звуки этой песни</button>
+            <span class="sub" id="part-sounds-status" role="status"></span>
+          </div>
+          <div class="sub">Звук партии: в «Полной MIDI-аранжировке» откройте панель SH-101 её роли (BASS, LEAD, ARP, FX, PAD), выберите партию в «MIDI-партия» и крутите ручки и уровень; «соло» оставляет её одну. Настройки сохраняются в этом браузере сами, клипы на падах берут их же.</div>
           <details>
             <summary>Дорожки и аппаратная маршрутизация</summary>
             <div class="sub">Исходные MIDI-каналы можно переназначить. Для CV/Gate выберите одну монофоническую партию на пару, при необходимости задайте перенос в диапазон нот 24–48.</div>
@@ -571,6 +579,7 @@
 <script src="device.js"></script>
 <script src="artist.js"></script>
 <script src="midi_songs.js"></script>
+<script src="midi_clips.js"></script>
 <script src="dsp.js"></script>
 <script src="acid.js"></script>
 <script src="sh101.js"></script>

@@ -31,6 +31,35 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release"
       }
+    },
+    {
+      "name": "pico2-release",
+      "inherits": "firmware-release",
+      "displayName": "Firmware Release (Pico 2, RP2350 Arm)",
+      "description": "Cross-compile optimized firmware for the Pico 2 module",
+      "binaryDir": "${sourceDir}/build/pico2-release",
+      "cacheVariables": {
+        "PICO_BOARD": "pico2"
+      }
+    },
+    {
+      "name": "revb-rp2354b",
+      "inherits": "firmware-release",
+      "displayName": "ReBirth Rev B (RP2354B, 2 MiB flash)",
+      "binaryDir": "${sourceDir}/build/revb-rp2354b",
+      "cacheVariables": {
+        "PICO_BOARD": "rebirth_revb_rp2354b",
+        "REBIRTH_CV_DAC_GAIN": "2"
+      }
+    },
+    {
+      "name": "revb-rp2350b",
+      "inherits": "revb-rp2354b",
+      "displayName": "ReBirth Rev B (RP2350B, 16 MiB flash)",
+      "binaryDir": "${sourceDir}/build/revb-rp2350b",
+      "cacheVariables": {
+        "PICO_BOARD": "rebirth_revb_rp2350b"
+      }
     }
   ],
   "buildPresets": [
@@ -41,6 +70,18 @@
     {
       "name": "firmware-release",
       "configurePreset": "firmware-release"
+    },
+    {
+      "name": "pico2-release",
+      "configurePreset": "pico2-release"
+    },
+    {
+      "name": "revb-rp2354b",
+      "configurePreset": "revb-rp2354b"
+    },
+    {
+      "name": "revb-rp2350b",
+      "configurePreset": "revb-rp2350b"
     }
   ],
   "testPresets": []

@@ -1,0 +1,121 @@
+(footprint "C_0402_RP2350_VREG"
+	(version 20260206)
+	(generator "pcbnew")
+	(generator_version "10.0")
+	(layer "F.Cu")
+	(descr "RP2350B Minimal R4 (MIT), 0402 (1005 metric), VREG capacitor pads.")
+	(property "Reference" "REF**"
+		(at -1.8 0 0)
+		(unlocked yes)
+		(layer "F.SilkS")
+		(uuid "ab3ad3ca-c53e-4c36-9a2e-1ba464b4a28b")
+		(effects
+			(font
+				(size 0.8 0.5)
+				(thickness 0.125)
+				(bold yes)
+			)
+		)
+	)
+	(property "Value" "C_0402_RP2350_VREG"
+		(at 0 1 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "6ab87450-d5b1-4b06-a1f5-56b62d8679e2")
+		(effects
+			(font
+				(size 0.8 0.5)
+				(thickness 0.01)
+				(bold yes)
+			)
+		)
+	)
+	(property "Datasheet" "https://www.raspberrypi.com/documentation/microcontrollers/silicon.html#rp2350"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "9808d8ac-cd32-4c42-98e5-b5666a79034e")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "Capacitor, MLCC, 4.7uF, 20%, M1005, 6.3V, X5R"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "4f620a74-fd6e-4cd5-84db-26743148b19d")
+		(effects
+			(font
+				(size 1 1)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(duplicate_pad_numbers_are_jumpers no)
+	(fp_rect
+		(start -0.5 -0.25)
+		(end 0.5 0.25)
+		(stroke
+			(width 0.01)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.CrtYd")
+		(uuid "62d6acdb-e41f-4d0b-bc2e-4f57fc3c0d7d")
+	)
+	(fp_rect
+		(start -0.5 -0.25)
+		(end 0.5 0.25)
+		(stroke
+			(width 0.01)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "cd783e46-8fd7-487e-8a8a-3799ebebce31")
+	)
+	(fp_rect
+		(start -0.25 -0.25)
+		(end 0.25 0.25)
+		(stroke
+			(width 0.01)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "6a1335bf-299a-40cf-8887-849d33ad5913")
+	)
+	(fp_text user "${REFERENCE}"
+		(at 0 0 0)
+		(unlocked yes)
+		(layer "F.Fab")
+		(uuid "332f9543-0c53-4d90-a894-a92fafd12f8c")
+		(effects
+			(font
+				(size 0.8 0.5)
+				(thickness 0.01)
+			)
+		)
+	)
+	(pad "1" smd rect
+		(at -0.515 0)
+		(size 0.47 0.55)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(clearance 0.125)
+		(uuid "97d3d352-7efc-4023-b319-567a47817b45")
+	)
+	(pad "2" smd rect
+		(at 0.515 0)
+		(size 0.47 0.55)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(uuid "c34fa544-7d1e-474f-a5a3-9a46df81c94c")
+	)
+	(embedded_fonts no)
+)

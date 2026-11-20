@@ -14,7 +14,7 @@
 set -euo pipefail
 
 # The files of the page this script owns in the site's rebirth/ folder.
-PAGE_FILES="index.html app.js artist.js device.js rig.js acid.js dsp.js sh101.js sh101_cpu.js sh101_rom.js midi_songs.js core.js version.js three.js handmodel.js handrig.js handplan.js handlayer.js notices.txt"
+PAGE_FILES="index.html app.js artist.js device.js rig.js acid.js dsp.js sh101.js sh101_cpu.js sh101_rom.js midi_songs.js midi_clips.js core.js version.js three.js handmodel.js handrig.js handplan.js handlayer.js notices.txt"
 # Of those, the scripts app.js loads itself (the hands), not index.html.
 LOADED_BY_APP="three.js handmodel.js handrig.js handplan.js handlayer.js"
 SONG_LIBRARY="songs/twisted"

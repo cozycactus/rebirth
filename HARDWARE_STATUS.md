@@ -1,6 +1,6 @@
 # Hardware Status
 
-Last updated: 2026-11-17 (external MIDI clock added)
+Last updated: 2026-11-19 (Rev B board targets added; external MIDI clock added)
 
 ## Migrating An Existing Build
 
@@ -28,7 +28,10 @@ retried every 100 ms); without the LED chain GPIO 27 drives nothing.
 ## Verified In This Repo
 
 - Host unit tests build and pass.
-- RP2040 firmware target builds with Pico SDK 2.2.0.
+- The RP2040 firmware target and the Pico 2 target (RP2350, Arm, preset `pico2-release`)
+  build with Pico SDK 2.2.0, and so do the Rev B targets (presets `revb-rp2354b` and
+  `revb-rp2350b`, DAC gain 2x). The Rev B firmware keeps the Pico pin map; its only Rev B
+  specific code is the CV/Gate level shifter enable on GPIO 38, covered by `sync_gain2_tests`.
 - DIN MIDI UART output code is compiled into the firmware target.
 - CV/Gate, OLED, encoder, MCP23017, step LED, flash storage, and UI modules compile into the firmware target,
   as do the Session view (`session.c`), the LED frame builder (`led_frame.c`), the RGB LED chain
@@ -126,6 +129,13 @@ retried every 100 ms); without the LED chain GPIO 27 drives nothing.
 
 ## Needs Bench Verification
 
+- Everything on Rev B ([hardware/rev-b](hardware/rev-b/README.md)). No Rev B board exists
+  yet, so nothing about it is verified on hardware: not the board, the rear panel fit,
+  the RP2354B/RP2350B boot, MIDI OUT B-D (no firmware yet), microSD (no firmware yet) or
+  the VBUS-powered CV/Gate outputs.
+- Everything on a Pico 2. Its firmware builds and links, and nothing more is known: it has
+  not run on a board. The items below apply to it separately, the timer ISR jitter and the
+  flash save/load first.
 - Timer ISR jitter under dense MIDI/CV output using GPIO 7 and on-device stats.
 - Compare jitter stats before/after UART TX queue and prepared playback events on physical hardware.
 - Gate alignment across all four CV/Gate channels.

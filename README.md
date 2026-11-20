@@ -81,6 +81,25 @@ make -j$(nproc)
 
 Flash the resulting `.uf2` file by holding BOOTSEL and dragging to the Pico's USB drive.
 
+The same firmware builds for a Pico 2 module (RP2350, Arm cores) with Pico SDK 2.2.0
+installed in `~/.pico-sdk/sdk/2.2.0`:
+
+```bash
+cmake --preset pico2-release
+cmake --build --preset pico2-release
+```
+
+The image is `build/pico2-release/rebirth_pico2.uf2`. The pins and the save addresses in
+flash are those of the Pico. When exporting a song, choose **Pico 2 · RP2350** under
+**Плата для UF2** in the [MIDI Song importer](sim/README.md#midi-song). The Pico 2 build
+has not run on a board yet: see [HARDWARE_STATUS.md](HARDWARE_STATUS.md#needs-bench-verification).
+
+The Rev B board ([hardware/rev-b](hardware/rev-b/README.md): RP2354B or RP2350B, four MIDI OUT,
+microSD, every connector on the rear panel) has two presets, `revb-rp2354b` (2 MiB flash in the
+package) and `revb-rp2350b` (external 16 MiB flash). Both set the DAC gain to 2x; the image is
+named after the board, e.g. `build/revb-rp2354b/rebirth_revb_rp2354b.uf2`. No Rev B board has been
+built yet.
+
 The default DAC gain is 1x. For a board designed for 0-4.096 V CV, configure with
 `-DREBIRTH_CV_DAC_GAIN=2`; the DAC supply and logic interface must support it.
 See [ARCHITECTURE.md](ARCHITECTURE.md#cv-circuit) before choosing the hardware.
@@ -324,7 +343,10 @@ buttons edit it.
 Projects use format 7 and a CRC32. Loading an eight-track project (versions
 4–6) restores T1–T8 and starts the higher tracks empty. Version 6 preserves
 its kit lanes and settings. The 64-track project occupies one flash slot,
-so losing power during a save can lose that save.
+so losing power during a save can lose that save. When flash holds no valid
+64-track project (none was saved yet, or a save was cut short), LOAD gives the
+eight-track project if one is still there and shows `OLD SAVE LOADED` instead
+of `LOADED OK`.
 
 ### Kit track
 
