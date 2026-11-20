@@ -104,6 +104,8 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
   // 3. The artist loads and starts two songs, one that fits the chain and one
   //    that does not; every note start of the bars it plays sounds on time,
   //    as the plan has it and as the MIDI file has it.
+  assert.equal(plans[0].lost.entries, 0, plans[0].title + ' fits the chain');
+  assert.ok(plans[4].lost.entries > 0, plans[4].title + ' is longer than the chain');
   for (const index of [0, 4]) {
     const plan = plans[index];
     device.boot(false);
@@ -126,7 +128,7 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
       }
     }
     assert.notEqual(start, null, plan.title + ': PLAY started the chain');
-    assert.equal(Math.round(device.inspect().bpm), Math.round(plan.bpm), plan.title + ': the tempo the artist set');
+    assert.ok(Math.abs(device.inspect().bpm - plan.bpm) < 0.06, plan.title + ': the tempo the artist set (' + device.inspect().bpm.toFixed(2) + ')');
     assert.equal(device.inspect().state, 0, plan.title + ': the chain stops at its end');
     assert.ok(stop !== null && Math.abs(stop - start - plan.played * 16 * stepUs) < stepUs,
       plan.title + ': it stops after ' + plan.played + ' bars');

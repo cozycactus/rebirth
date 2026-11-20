@@ -26,6 +26,18 @@
   // set by a part panel's solo box, dropped when that panel's part or parts
   // change and when the song ends.
   let soloPart = null;
+  // A solo starting lets go of the notes the other parts hold (the gate's
+  // aside), so it is alone at once.
+  function releaseOthers(part) {
+    if (!midiRun?.player || !midiRun.held) return;
+    const { song, player, held } = midiRun;
+    for (const [key, n] of held) {
+      const track = key >> 11, channel = (key >> 7) & 15, note = key & 127;
+      if (track === part || song.tracks[track]?.role === 'gate') continue;
+      for (let i = 0; i < n; i++) player.midi({ track, status: 0x80 | channel, d1: note, d2: 0 }, ctx.currentTime);
+      held.delete(key);
+    }
+  }
   function clearSolo() {
     soloPart = null;
     document.querySelectorAll('.part-solo input').forEach(box => { box.checked = false; });
@@ -1062,6 +1074,7 @@
     soloBox.addEventListener('change', () => {
       soloPart = soloBox.checked && selectedPart ? selectedPart.track : null;
       document.querySelectorAll('.part-solo input').forEach(box => { if (box !== soloBox) box.checked = false; });
+      if (soloPart !== null) releaseOthers(soloPart);
     });
     solo.className = 'part-solo';
     trackLevel.append('Уровень партии ', gain, levelReadout, ' ', solo);
@@ -1724,8 +1737,23 @@
       }
       while (midiRun.cursor < song.events.length && song.events[midiRun.cursor].t <= until) {
         const e = song.events[midiRun.cursor++];
-        const alone = soloPart === null || e.track === soloPart || song.tracks[e.track].role === 'gate';
-        if (alone || !MidiSongs.noteOn(e)) player.midi(e, Math.max(now, start + e.t / 1e6));
+        const at = Math.max(now, start + e.t / 1e6);
+        // A note plays unless a solo leaves its part out; a Note Off goes
+        // out only for a Note On that went out (one before a seek's start,
+        // or one the solo held back, must not end a note struck since).
+        const key = (e.track * 16 + (e.status & 15)) * 128 + e.d1;
+        if (MidiSongs.noteOn(e)) {
+          if (soloPart === null || e.track === soloPart || song.tracks[e.track].role === 'gate') {
+            player.midi(e, at);
+            midiRun.held.set(key, (midiRun.held.get(key) || 0) + 1);
+          }
+        } else if (MidiSongs.noteOff(e)) {
+          const n = midiRun.held.get(key) || 0;
+          if (n) {
+            player.midi(e, at);
+            if (n > 1) midiRun.held.set(key, n - 1); else midiRun.held.delete(key);
+          }
+        } else player.midi(e, at);
         const on = MidiSongs.noteOn(e);
         if (on) midiRun.active[e.track]++;
         else if (MidiSongs.noteOff(e) && midiRun.active[e.track]) midiRun.active[e.track]--;
@@ -1848,7 +1876,7 @@
         if (cursor < 0) cursor = song.events.length;
         while (tempo + 1 < song.tempos.length && song.tempos[tempo + 1].time <= from) tempo++;
         midiRun = {
-          song, player, cursor, tempo, active: new Uint16Array(song.tracks.length),
+          song, player, cursor, tempo, active: new Uint16Array(song.tracks.length), held: new Map(),
           start: ctx.currentTime + 0.1 - from / 1e6,
         };
         phase = 'midi-full';
