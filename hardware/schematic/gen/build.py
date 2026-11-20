@@ -357,38 +357,44 @@ def sheet_mcu(d):
 
 # ------------------------------------------------------------------ sheet 4: MIDI
 
-def sheet_midi(d):
-    sh = d.sheet("MIDI", "midi.kicad_sch", "MIDI OUT (3.3 V, CA-033) and MIDI IN (reserved)", "A4", 4)
+def draw_midi_out(sh, bank=0):
+    """Draw one independent Rev A current loop. Rev B instantiates four copies."""
+    port = "ABCD"[bank]
+    device = 401 if bank == 0 else 402 + bank  # J402/U402 belong to MIDI IN
+    def passive(prefix, number):
+        return f"{prefix}{number + 10 * bank}"
+    tx = "MIDI_TX" if bank == 0 else "MIDI_TX_" + port
     sh.heading("MIDI OUT: 5 mA current loop at 3.3 V (MIDI CA-033)", (20.32, 30.48))
     y = 68.58     # TX, inverter and base drive
     yj = 58.42    # loop: collector -> RC -> pin 5
-    sh.hlabel("MIDI_TX", (30.48, y), "input", "left")
+    sh.hlabel(tx, (30.48, y), "input", "left")
     sh.wire((30.48, y), (60.96, y))
-    pull_up(sh, "R401", "10k", 45.72, y, "+3V3", "MIDI_TX")
-    place(sh, "74xGxx:74LVC1G14", "U401", "74LVC1G14", 76.2, y, fp=FP_SOT235,
-          conn={"2": "MIDI_TX", "4": "MIDI_TX_N", "5": "+3V3", "3": "GND", "1": None},
+    pull_up(sh, passive("R", 401), "10k", 45.72, y, "+3V3", tx)
+    place(sh, "74xGxx:74LVC1G14", f"U{device}", "74LVC1G14", 76.2, y, fp=FP_SOT235,
+          conn={"2": tx, "4": "MIDI_TX_N", "5": "+3V3", "3": "GND", "1": None},
           ref_at=(2.54, -8.89, "left"), val_at=(2.54, 8.89, "left"))
     sh.wire((71.12, y - 10.16), (71.12, y - 12.7))
     rail(sh, "+3V3", 71.12, y - 12.7)
     sh.wire((71.12, y + 10.16), (71.12, y + 12.7))
     gnd(sh, 71.12, y + 12.7)
-    decap(sh, "C401", "100n", 83.82, 45.72, "+3V3")
+    decap(sh, passive("C", 401), "100n", 83.82, 45.72, "+3V3")
     sh.wire((88.9, y), (92.71, y))
-    res(sh, "R406", "470", 96.52, y, {"1": "MIDI_TX_N", "2": "MIDI_BASE"}, horiz=True)
+    res(sh, passive("R", 406), "470", 96.52, y, {"1": "MIDI_TX_N", "2": "MIDI_BASE"}, horiz=True)
     sh.wire((100.33, y), (106.68, y))
-    pull_down(sh, "R407", "10k", 104.14, y, "MIDI_BASE", fields=LEFT)
-    place(sh, "Transistor_BJT:MMBT3904", "Q401", "MMBT3904", 111.76, y, fp="Package_TO_SOT_SMD:SOT-23",
+    pull_down(sh, passive("R", 407), "10k", 104.14, y, "MIDI_BASE", fields=LEFT)
+    place(sh, "Transistor_BJT:MMBT3904", f"Q{device}", "MMBT3904", 111.76, y, fp="Package_TO_SOT_SMD:SOT-23",
           conn={"1": "MIDI_BASE", "2": "GND", "3": "MIDI_SINK"},
           ref_at=(5.08, -1.27, "left"), val_at=(5.08, 1.27, "left"))
     sh.wire((114.3, y + 5.08), (114.3, y + 7.62))
     gnd(sh, 114.3, y + 7.62)
     sh.wire((114.3, y - 5.08), (114.3, yj), (118.11, yj))
-    res(sh, "R402", "10R 0.25W", 121.92, yj, {"1": "MIDI_SINK", "2": "MIDI_OUT_5"}, horiz=True, fp="Resistor_SMD:R_1206_3216Metric")
+    res(sh, passive("R", 402), "10R 0.25W", 121.92, yj, {"1": "MIDI_SINK", "2": "MIDI_OUT_5"}, horiz=True, fp="Resistor_SMD:R_1206_3216Metric")
     sh.wire((125.73, yj), (132.08, yj))
-    place(sh, "Device:FerriteBead_Small", "FB401", "1k@100MHz", 134.62, yj, rot=90, fp=FP_FB,
+    place(sh, "Device:FerriteBead_Small", passive("FB", 401), "1k@100MHz", 134.62, yj, rot=90, fp=FP_FB,
           conn={"1": "MIDI_OUT_5", "2": "MIDI_OUT_5F"}, ref_at=(0, -3.175, "center"), val_at=(0, 3.81, "center"))
     sh.wire((137.16, yj), (147.32, yj))
-    place(sh, "Connector:DIN-5_180degree", "J401", "MIDI OUT", 154.94, yj - 2.54, rot=180, fp=FP_DIN,
+    place(sh, "Connector:DIN-5_180degree", f"J{device}", "MIDI OUT" if bank == 0 else "MIDI OUT " + port,
+          154.94, yj - 2.54, rot=180, fp=FP_DIN,
           conn={"5": "MIDI_OUT_5F", "4": "MIDI_OUT_4F", "2": "GND", "1": None, "3": None},
           ref_at=(-5.08, -8.89, "left"), val_at=(5.08, 7.62, "left"))
     sh.nc((147.32, yj - 2.54))
@@ -396,12 +402,22 @@ def sheet_midi(d):
     sh.wire((154.94, yj + 5.08), (154.94, yj + 7.62))
     gnd(sh, 154.94, yj + 7.62)
     sh.wire((162.56, yj), (167.64, yj), (167.64, yj - 2.54))
-    place(sh, "Device:FerriteBead_Small", "FB402", "1k@100MHz", 167.64, yj - 5.08, fp=FP_FB,
+    place(sh, "Device:FerriteBead_Small", passive("FB", 402), "1k@100MHz", 167.64, yj - 5.08, fp=FP_FB,
           conn={"1": "MIDI_OUT_4", "2": "MIDI_OUT_4F"}, ref_at=(2.54, -1.27, "left"), val_at=(2.54, 1.27, "left"))
     sh.wire((167.64, yj - 7.62), (167.64, yj - 11.43))
-    res(sh, "R403", "33R 0.5W", 167.64, yj - 15.24, {"1": "+3V3", "2": "MIDI_OUT_4"}, fp=FP_R1210)
+    res(sh, passive("R", 403), "33R 0.5W", 167.64, yj - 15.24, {"1": "+3V3", "2": "MIDI_OUT_4"}, fp=FP_R1210)
     sh.wire((167.64, yj - 19.05), (167.64, yj - 21.59))
     rail(sh, "+3V3", 167.64, yj - 21.59)
+    if bank:
+        note(sh, 180.34, 35.56,
+             f"J{device} MIDI OUT {port}, DIN-5 180 deg female.",
+             "Pin 4 sources the loop through 33 R, 0.5 W.",
+             "Pin 5 is the sink through 10 R, 0.25 W.",
+             "Pin 2 is the output shield ground.")
+        note(sh, 20.32, 86.36,
+             f"The pull-up on {tx} holds the loop idle before the transmitter starts.",
+             "Each DIN has its own driver, transistor, current limiting and ferrites.")
+        return
     note(sh, 180.34, 35.56,
          "J401 MIDI OUT, rear panel: DIN-5 180 deg female.",
          "Pin 4 = +3.3 V through RA = R403 33 R 0.5 W,",
@@ -413,6 +429,10 @@ def sheet_midi(d):
          "TX high/idle = Q401 off. R401 idles the line before the UART runs, R407 keeps Q401 off unpowered.",
          "Pin 5 to GND: no driver current; 4-5 shorted: <= 85 mA in Q401 (200 mA max). FB401/402 optional.")
 
+
+def sheet_midi(d):
+    sh = d.sheet("MIDI", "midi.kicad_sch", "MIDI OUT (3.3 V, CA-033) and MIDI IN (reserved)", "A4", 4)
+    draw_midi_out(sh)
     sh.heading("MIDI IN: opto-isolated receiver (reserved in firmware)", (20.32, 99.06))
     yi = 114.3
     place(sh, "Connector:DIN-5_180degree", "J402", "MIDI IN", 40.64, 116.84, mirror="y", fp=FP_DIN,
@@ -457,13 +477,13 @@ def sheet_midi(d):
 
 # ------------------------------------------------------------------ sheet 5: CV and gates
 
-def dac_block(sh, ref, X, Y, cs_net, outs, cap_refs):
+def dac_block(sh, ref, X, Y, cs_net, outs, cap_refs, supply="+3V3"):
     place(sh, "Analog_DAC:MCP4822", ref, "MCP4822", X, Y, fp=FP_SO8,
-          conn={"1": "+3V3", "2": cs_net + "_T", "3": "DAC_SCK_T", "4": "DAC_MOSI_T", "5": "GND", "6": outs[1],
+          conn={"1": supply, "2": cs_net + "_T", "3": "DAC_SCK_T", "4": "DAC_MOSI_T", "5": "GND", "6": outs[1],
                 "7": "GND", "8": outs[0]},
           ref_at=(2.54, -13.97, "left"), val_at=(2.54, -11.43, "left"))
     sh.wire((X, Y - 10.16), (X, Y - 12.7))
-    rail(sh, "+3V3", X, Y - 12.7)
+    rail(sh, supply, X, Y - 12.7)
     sh.wire((X, Y + 12.7), (X, Y + 15.24))
     gnd(sh, X, Y + 15.24)
     lx = X - 35.56
@@ -475,9 +495,9 @@ def dac_block(sh, ref, X, Y, cs_net, outs, cap_refs):
     sh.label("DAC_MOSI_T", (lx, Y + 7.62), angle=180, justify="right bottom")
     sh.wire((X - 12.7, Y + 5.08), (X - 15.24, Y + 5.08), (X - 15.24, Y + 10.16), (lx, Y + 10.16))
     sh.label(cs_net + "_T", (lx, Y + 10.16), angle=180, justify="right bottom")
-    decap(sh, cap_refs[0], "100n", X + 20.32, Y - 17.78, "+3V3")
+    decap(sh, cap_refs[0], "100n", X + 20.32, Y - 17.78, supply)
     if len(cap_refs) > 1:
-        decap(sh, cap_refs[1], "10u", X + 30.48, Y - 17.78, "+3V3", fp=FP_C0805)
+        decap(sh, cap_refs[1], "10u", X + 30.48, Y - 17.78, supply, fp=FP_C0805)
 
 
 SPI_SERIES = [("DAC_SCK", "R561"), ("DAC_MOSI", "R562"), ("DAC_CS1_N", "R563"), ("DAC_CS2_N", "R564")]
@@ -495,7 +515,7 @@ def spi_entry(sh):
     note(sh, 20.32, 143.51, "DAC SPI from GPIO 10-13: R561-R564 at the Pico end of the lines.")
 
 
-def cv_stage(sh, unit, Xo, Yo, n, dac_net, refs):
+def cv_stage(sh, unit, Xo, Yo, n, dac_net, refs, jack_fp=FP_JACK, ring=False):
     """Unity buffer with the output resistor inside the loop."""
     pins = {1: ("3", "2", "1"), 2: ("5", "6", "7"), 3: ("10", "9", "8"), 4: ("12", "13", "14")}[unit]
     inv = "CV%d_FB" % n
@@ -519,15 +539,21 @@ def cv_stage(sh, unit, Xo, Yo, n, dac_net, refs):
     sh.wire((Xo + 8.89, Yo + 15.24), (Xo + 22.86, Yo + 15.24), (Xo + 22.86, Yo))
     sh.wire((Xo + 19.05, Yo), (Xo + 30.48, Yo))
     sh.label(jack, (Xo + 24.13, Yo))
-    jack_out(sh, "J%d" % (500 + n), "CV %d" % n, Xo + 35.56, Yo, jack, tvs="D%d" % (500 + n))
+    jack_out(sh, "J%d" % (500 + n), "CV %d" % n, Xo + 35.56, Yo, jack,
+             tvs="D%d" % (500 + n), fp=jack_fp, ring=ring)
 
 
-def jack_out(sh, ref, label, x, y, net, tvs=None):
-    place(sh, "Connector_Audio:AudioJack2", ref, "3.5mm TS", x, y, rot=180, fp=FP_JACK,
-          conn={"T": net, "S": "GND"}, ref_at=(6.35, -3.175, "left"), val_at=(6.35, 3.81, "left"),
-          hide_val=True)
-    sh.wire((x - 5.08, y + 2.54), (x - 5.08, y + 5.08))
-    gnd(sh, x - 5.08, y + 5.08)
+def jack_out(sh, ref, label, x, y, net, tvs=None, fp=FP_JACK, ring=False):
+    symbol = "Connector_Audio:AudioJack3" if ring else "Connector_Audio:AudioJack2"
+    place(sh, symbol, ref, "3.5mm TRS" if ring else "3.5mm TS", x, y + (2.54 if ring else 0),
+          rot=180, fp=fp, conn={"T": net, "S": "GND"},
+          ref_at=(6.35, -5.08 if ring else -3.175, "left"),
+          val_at=(6.35, 3.81, "left"), hide_val=True)
+    sx, sy = sh.pin(ref, "S")
+    sh.wire((sx, sy), (sx, sy + 2.54))
+    gnd(sh, sx, sy + 2.54)
+    if ring:
+        sh.nc(sh.pin(ref, "R"))
     sh.text(label, (x + 6.35, y + 0.635), size=1.524, bold=True)
     if tvs:
         xt = x - 8.89
@@ -1406,7 +1432,7 @@ PROJECTS = {
 }
 
 
-def write_project(d, outdir, project, symlib_uri, fplib_uri):
+def write_project(d, outdir, project, symlib_uri, fplib_uri, variants=()):
     path = os.path.join(outdir, project + ".kicad_pro")
     pro = {}
     if os.path.exists(path):
@@ -1419,6 +1445,10 @@ def write_project(d, outdir, project, symlib_uri, fplib_uri):
                     "intersheets_ref_suffix": ""},
         "legacy_lib_dir": "", "legacy_lib_list": [],
     }
+    if variants:
+        pro["schematic"]["variants"] = [
+            {"name": name, "description": description} for name, description in variants
+        ]
     pro["sheets"] = [[d.root.uuid, "Root"]] + [[s.sheet_uuid, s.name] for s in d.sheets]
     pro.setdefault("text_variables", {})
     with open(path, "w") as f:

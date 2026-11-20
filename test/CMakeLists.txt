@@ -72,7 +72,7 @@ add_test(NAME pattern_tests COMMAND test_pattern)
 add_test(NAME sync_tests COMMAND test_sync)
 add_executable(test_sync_gain2 test_sync.c ${REBIRTH_SRC}/midi_out.c ${REBIRTH_SRC}/cv_gate.c)
 target_include_directories(test_sync_gain2 PRIVATE ${REBIRTH_INC})
-target_compile_definitions(test_sync_gain2 PRIVATE MOCK_HARDWARE=1 CV_DAC_GAIN=2)
+target_compile_definitions(test_sync_gain2 PRIVATE MOCK_HARDWARE=1 CV_DAC_GAIN=2 REBIRTH_CV_ENABLE_PIN=38)
 add_test(NAME sync_gain2_tests COMMAND test_sync_gain2)
 add_test(NAME song_tests COMMAND test_song)
 

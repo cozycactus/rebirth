@@ -18,6 +18,11 @@
 //
 // v7 lives immediately before the MIDI Song slot. A new save leaves the
 // last 128 KiB intact so the original eight-track firmware can still read it.
+//
+// A load takes the v7 save when it is valid and the eight-track save
+// otherwise. A v7 save cut short by a power loss leaves its slot looking
+// exactly like one that was never written, so "no valid v7 save" is one case,
+// whatever the reason, and the load's result says which save it gave.
 #define FLASH_PAGE      256u
 #define STORE_OFFSET    0x000b0000u
 #define STORE_RESERVED  0x00030000u
@@ -235,19 +240,23 @@ static bool old_image_valid(const uint8_t *base) {
 }
 #endif
 
-bool flash_storage_is_valid(void) {
 #ifndef MOCK_HARDWARE
+// The v7 save in its own slot, whatever the eight-track slot holds.
+static bool current_image_valid(void) {
     const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
     const store_header_t *h = (const store_header_t *)base;
-    if (h->magic != MAGIC) return old_image_valid((const uint8_t *)(XIP_BASE + OLD_STORE));
-    if (h->version == VERSION) {
-        const pattern_t *patterns = (const pattern_t *)(base + PAT_OFFSET);
-        const song_t *song = (const song_t *)(base + SONG_OFFSET);
-        const kit_config_t *kits = (const kit_config_t *)(base + KIT_OFFSET);
-        return payload_valid(patterns, song, kits) &&
-               h->checksum == payload_checksum(patterns, song, kits);
-    }
-    return false;
+    if (h->magic != MAGIC || h->version != VERSION) return false;
+    const pattern_t *patterns = (const pattern_t *)(base + PAT_OFFSET);
+    const song_t *song = (const song_t *)(base + SONG_OFFSET);
+    const kit_config_t *kits = (const kit_config_t *)(base + KIT_OFFSET);
+    return payload_valid(patterns, song, kits) &&
+           h->checksum == payload_checksum(patterns, song, kits);
+}
+#endif
+
+bool flash_storage_is_valid(void) {
+#ifndef MOCK_HARDWARE
+    return current_image_valid() || old_image_valid((const uint8_t *)(XIP_BASE + OLD_STORE));
 #else
     return false;
 #endif
@@ -293,21 +302,20 @@ static bool save_stopped(void) {
     multicore_lockout_end_blocking();
     // Whether or not the new save validates.
     resync_inputs();
-    return ((const store_header_t *)(XIP_BASE + STORE_OFFSET))->magic == MAGIC && flash_storage_is_valid();
+    // The save just written: an eight-track save next to it is no success.
+    return current_image_valid();
 #else
     return false;
 #endif
 }
 
-static bool load_stopped(void) {
-    if (g_seq.transport.state != TRANSPORT_STOPPED) return false;
+static flash_load_t load_stopped(void) {
+    if (g_seq.transport.state != TRANSPORT_STOPPED) return FLASH_LOAD_FAILED;
 #ifndef MOCK_HARDWARE
-    if (!flash_storage_is_valid()) return false;
-
     const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
-    const store_header_t *h = (const store_header_t *)base;
-    bool current = h->magic == MAGIC;
     const uint8_t *old = (const uint8_t *)(XIP_BASE + OLD_STORE);
+    bool current = current_image_valid();
+    if (!current && !old_image_valid(old)) return FLASH_LOAD_FAILED;
     bool v6 = !current && ((const store_header_t *)old)->version == 6;
     midi_wait_output_idle();
     for (uint8_t i = 0; i < MAX_PATTERNS; i++) {
@@ -352,9 +360,9 @@ static bool load_stopped(void) {
         }
     }
     resync_inputs();
-    return true;
+    return current ? FLASH_LOAD_OK : FLASH_LOAD_OLD_SAVE;
 #else
-    return false;
+    return FLASH_LOAD_FAILED;
 #endif
 }
 
@@ -365,9 +373,9 @@ bool flash_storage_save(void) {
     return saved;
 }
 
-bool flash_storage_load(void) {
-    if (!sequencer_storage_begin()) return false;
-    bool loaded = load_stopped();
+flash_load_t flash_storage_load(void) {
+    if (!sequencer_storage_begin()) return FLASH_LOAD_FAILED;
+    flash_load_t loaded = load_stopped();
     sequencer_storage_end();
     return loaded;
 }

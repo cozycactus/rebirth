@@ -1,0 +1,13 @@
+#ifndef REBIRTH_REVB_RP2354B_H
+#define REBIRTH_REVB_RP2354B_H
+
+pico_board_cmake_set(PICO_PLATFORM, rp2350)
+pico_board_cmake_set_default(PICO_FLASH_SIZE_BYTES, (2 * 1024 * 1024))
+
+#define PICO_RP2350A 0
+#define PICO_FLASH_SIZE_BYTES (2 * 1024 * 1024)
+#define PICO_BOOT_STAGE2_CHOOSE_W25Q080 1
+#define PICO_FLASH_SPI_CLKDIV 2
+#define REBIRTH_CV_ENABLE_PIN 38
+
+#endif

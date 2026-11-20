@@ -81,6 +81,12 @@ static uint16_t note_to_dac(uint8_t midi_note) {
 // ─── Public API ─────────────────────────────────────────────────
 
 void cv_gate_init(void) {
+#ifdef REBIRTH_CV_ENABLE_PIN
+    // Rev B pulls /OE high in hardware. Keep that level while preparing its inputs.
+    gpio_init(REBIRTH_CV_ENABLE_PIN);
+    gpio_put(REBIRTH_CV_ENABLE_PIN, 1);
+    gpio_set_dir(REBIRTH_CV_ENABLE_PIN, GPIO_OUT);
+#endif
     // Init SPI1
     spi_init(CV_SPI, 1000000);  // 1 MHz — MCP4822 supports up to 20 MHz
     gpio_set_function(CV_SCK_PIN, GPIO_FUNC_SPI);
@@ -89,17 +95,20 @@ void cv_gate_init(void) {
     // CS pins as GPIO (manual control)
     for (int i = 0; i < 2; i++) {
         gpio_init(cs_pins[i]);
-        gpio_set_dir(cs_pins[i], GPIO_OUT);
         gpio_put(cs_pins[i], 1);  // CS inactive (high)
+        gpio_set_dir(cs_pins[i], GPIO_OUT);
     }
 
     // Gate pins
     for (int i = 0; i < NUM_CV_CHANNELS; i++) {
         gpio_init(gate_pins[i]);
-        gpio_set_dir(gate_pins[i], GPIO_OUT);
         gpio_put(gate_pins[i], 0);
+        gpio_set_dir(gate_pins[i], GPIO_OUT);
     }
 
+#ifdef REBIRTH_CV_ENABLE_PIN
+    gpio_put(REBIRTH_CV_ENABLE_PIN, 0);
+#endif
     // Zero all DAC outputs
     for (int i = 0; i < NUM_CV_CHANNELS; i++) {
         cv_set_voltage(i, 0);

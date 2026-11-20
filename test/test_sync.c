@@ -23,8 +23,12 @@ static int     mock_midi_len = 0;
 static uint16_t mock_dac_word;
 
 /* Capture GPIO state */
-#define NUM_GPIO 30
+#define NUM_GPIO 48
 static uint8_t mock_gpio[NUM_GPIO];
+#ifdef REBIRTH_CV_ENABLE_PIN
+static bool mock_gpio_output[NUM_GPIO];
+static bool cv_enable_prepared, cv_output_enabled, first_spi_write_enabled, mock_spi_seen;
+#endif
 
 /* Track order of operations for verifying commit ordering */
 #define OP_LOG_MAX 64
@@ -44,6 +48,10 @@ static void op_log_push(op_type_t type, uint32_t value) {
 static void mock_reset(void) {
     mock_midi_len = 0;
     memset(mock_gpio, 0, sizeof(mock_gpio));
+#ifdef REBIRTH_CV_ENABLE_PIN
+    memset(mock_gpio_output, 0, sizeof(mock_gpio_output));
+    cv_enable_prepared = cv_output_enabled = first_spi_write_enabled = mock_spi_seen = false;
+#endif
     op_log_len = 0;
 }
 
@@ -59,16 +67,25 @@ void uart_putc_raw(void *uart, uint8_t c) {
 
 /* GPIO mock */
 void gpio_put(uint8_t pin, bool value) {
+#ifdef REBIRTH_CV_ENABLE_PIN
+    if (pin == REBIRTH_CV_ENABLE_PIN && !value) {
+        cv_output_enabled = true;
+        cv_enable_prepared = mock_gpio_output[pin] && mock_gpio[pin] != 0;
+        for (uint8_t i = 12; i < 18; ++i) {
+            cv_enable_prepared &= mock_gpio_output[i] && mock_gpio[i] == (i < 14);
+        }
+    }
+#endif
     if (pin < NUM_GPIO) mock_gpio[pin] = value ? 1 : 0;
 }
 void gpio_set_mask(uint32_t mask) {
-    for (int i = 0; i < NUM_GPIO; i++) {
+    for (int i = 0; i < 32; i++) {
         if (mask & (1u << i)) mock_gpio[i] = 1;
     }
     op_log_push(OP_GPIO_SET, mask);
 }
 void gpio_clr_mask(uint32_t mask) {
-    for (int i = 0; i < NUM_GPIO; i++) {
+    for (int i = 0; i < 32; i++) {
         if (mask & (1u << i)) mock_gpio[i] = 0;
     }
     op_log_push(OP_GPIO_CLR, mask);
@@ -77,10 +94,23 @@ void gpio_clr_mask(uint32_t mask) {
 /* SPI mock (for cv_set_note / cv_set_voltage) */
 void spi_write_blocking(void *spi, const uint8_t *buf, int len) {
     (void)spi;
+#ifdef REBIRTH_CV_ENABLE_PIN
+    if (!mock_spi_seen) {
+        first_spi_write_enabled = cv_output_enabled;
+        mock_spi_seen = true;
+    }
+#endif
     if (len == 2) mock_dac_word = ((uint16_t)buf[0] << 8) | buf[1];
 }
 void gpio_init(uint8_t pin) { (void)pin; }
-void gpio_set_dir(uint8_t pin, bool out) { (void)pin; (void)out; }
+void gpio_set_dir(uint8_t pin, bool out) {
+#ifdef REBIRTH_CV_ENABLE_PIN
+    if (pin < NUM_GPIO) mock_gpio_output[pin] = out;
+#else
+    (void)pin;
+    (void)out;
+#endif
+}
 void spi_init(void *spi, uint32_t rate) { (void)spi; (void)rate; }
 void gpio_set_function(uint8_t pin, int func) { (void)pin; (void)func; }
 
@@ -127,6 +157,15 @@ TEST(test_midi_buf_no_send_until_flush) {
     /* Nothing should have been sent to UART yet */
     ASSERT_EQ(mock_midi_len, 0);
 }
+
+#ifdef REBIRTH_CV_ENABLE_PIN
+TEST(test_cv_translator_enables_after_cs_high_and_gates_low) {
+    cv_gate_init();
+    ASSERT_EQ(cv_enable_prepared, true);
+    ASSERT_EQ(first_spi_write_enabled, true);
+    ASSERT_EQ(mock_gpio[REBIRTH_CV_ENABLE_PIN], 0);
+}
+#endif
 
 TEST(test_cv_octave_scale_and_gain) {
     const uint16_t gain_bit = CV_DAC_GAIN == 1 ? (1u << 13) : 0;
@@ -354,6 +393,9 @@ TEST(test_96ppqn_uses_24_pulses_per_16th_step) {
 /* ── Main ────────────────────────────────────────────────── */
 
 int main(void) {
+#ifdef REBIRTH_CV_ENABLE_PIN
+    RUN(test_cv_translator_enables_after_cs_high_and_gates_low);
+#endif
     RUN(test_cv_octave_scale_and_gain);
     printf("\n=== rebirth sync unit tests ===\n\n");
 
