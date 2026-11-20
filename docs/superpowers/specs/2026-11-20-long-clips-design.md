@@ -88,7 +88,9 @@ heaviest song needs 613 bars of 16 steps.
    one pad per step up to 64 steps, one pad per bar above.
 6. Every step has a trig condition (codes of 2026-11-17, unchanged). FILL comes
    from a sustain pedal, a latched setting, or automatically every N bars.
-7. Room is kept for ratchets and micro-timing (an optional block per bar).
+7. Room is kept for ratchets and micro-timing: a clip may later get a third
+   layer (a 4-byte record per step, bars from the same pool); the v8 clip
+   record already carries that layer's bar mask, zero for now.
 8. Saves v7 (64 tracks) and v4, v5, v6 (eight tracks) still load.
 9. The RP2040 and RP2350 builds have the same capacity, so a save made on one
    loads on the other.
@@ -184,7 +186,7 @@ could read the 2026-11-17 design.
 S2 over S1 (my call): any bar is reached in two reads, so the timer, a jump to
 a song position and the UI never walk a chain; an empty bar inside a long clip
 costs nothing (21 % of the songs' bars are empty); one block type serves bars,
-kit bars, bar tables and later the ratchet blocks. The price is one table block
+kit bars, bar tables and later a ratchet layer. The price is one table block
 per clip longer than 16 steps.
 
 Playback: Codex and DeepSeek read one step word per track and step directly;
@@ -275,6 +277,20 @@ block_t    pool[POOL_BLOCKS];
 - **Hidden bars**: steps beyond the length stay stored, as today's hidden
   steps 13-16 of a 12-step clip do; they come back when the clip is
   lengthened. They occupy the pool.
+- **How note bars are freed — pending the owner.** A switched-off step keeps
+  its note and velocity, and switching it on again brings them back
+  (`pattern_toggle_step()`); no panel action zeroes a step. So a note bar,
+  once used, never becomes all zero and keeps its block; only kit bars return
+  to zero (a lane cycled to OFF). Doubling every clip of 8 locations to four
+  bars on all 64 tracks fills the pool, and nothing on the panel would free it
+  but copying an empty clip over a used one. Choices:
+  1. **Explicit clearing, nothing existing changes** (my pick): halving drops
+     the bars beyond the new length; the CLIP screen gets a CLEAR action that
+     empties the clip (both layers; length and end kept); the switched-off
+     steps of a used bar keep their notes as today.
+  2. **Automatic**: a bar with no active step and no condition is freed; a step
+     switched on there again takes the track's last note, as a new step does,
+     instead of its old one.
 - The location's default `length` and `track_length[]` go: every clip has its
   own length. Migration resolves "0 = the location's default".
 - The pool's free blocks form a list threaded through the blocks themselves
@@ -382,7 +398,13 @@ New:
   played back to the owner: a passage plays whole). Its pass is 0.
 - An idle track's TRACK LOOP launch point is the next step.
 - The pad of an idle track's own location launches it again (a playing clip's
-  own pad still only cancels a queue to another slot, as today).
+  own pad still only cancels a queue to another slot, as today). For an idle
+  track a queue to its own location is a change: it restarts at step 1 with
+  `pass` 0.
+- SCENE treats an idle track on its row as not playing that row (my call,
+  following the pad rule): the track is queued and restarts. Today's rules stay
+  otherwise: tracks playing the row keep playing, and a SCENE pressed while any
+  track is queued to its row cancels every queue.
 
 ### Clip ends
 
@@ -612,8 +634,9 @@ location, VALUE press returns to the selector.
 | TARGET | A1-D8 | `—` and inactive unless END is NEXT; choosing NEXT sets it to the next location (A8 → B1, D8 → A1) |
 | FILL (ALL) | OFF, ON, EVERY 2, 4, 8, 16 | for all tracks, not saved |
 
-On this screen step button 15 halves the length (`max(1, length / 2)`, steps
-beyond stay stored) and step button 16 doubles it with copy (`min(512, 2 *
+On this screen step button 15 halves the length (`max(1, length / 2)`; what
+happens to the bars beyond depends on the pending freeing rule above) and step
+button 16 doubles it with copy (`min(512, 2 *
 length)`; each new step `s` becomes a copy of step `s − length`, both layers,
 conditions included). Their LEDs are lit; the OLED labels them (my call: the
 step buttons are free on this screen). Selector buttons 11 and 12 keep
@@ -662,7 +685,7 @@ Against `src/ui.c` at f8a8737:
 | Pattern selector | 16 | nothing | CLIP screen | owner-approved 2026-11-20 |
 | Pattern selector | 11, 12 | ±1 within 1-16 | ±1 within 1-512 | range only |
 | CLIP screen | all | — | rows; buttons 15 and 16 halve and double | new screen |
-| Any view | pad of an idle track's location | (no idle state) | launches it again | new state |
+| Any view | pad of an idle track's location, or SCENE of its row | (no idle state) | launches it again | new state |
 | MIDI input | CC64 | ignored | FILL pedal | new input |
 
 Unchanged on purpose: PLAY, SCENE and MUTE act on press; TRACK long (bank in
@@ -689,22 +712,24 @@ simulator and an importer on a computer write and read the same bytes.
 |---|---|---:|
 | 0 | header: `u32` magic `RBTH` at 0, `u8` version 8 at 4, three zero bytes, `u32` CRC32 at 8, `u32` payload length at 12, `u16` data blocks at 16, `u16` kit blocks at 18, zeros to 256 | 256 |
 | 256 | 32 locations: for each of 64 tracks 7 bytes (type, MIDI channel, drum note, output mode, CV pair, gate %, muted), then swing, then name (9 bytes, zero-padded) | 14,656 |
-| then | 2,048 clips, location-major: `u16` length, end, plays, target, `u32` bar mask (bit `b`: bar `b` of the note layer is stored) | 18,432 |
+| then | 2,048 clips, location-major: `u16` length, end, plays, target, `u32` note bar mask (bit `b`: bar `b` of the note layer is stored), `u32` extension bar mask (zero in v8) | 26,624 |
 | then | 256 kit masks, location-major, slots 1-8: `u32` bar mask of the kit layer | 1,024 |
 | then | song: 256 entries of 64 locations and repeats, `u16` length, end mode, name (9) | 16,652 |
 | then | kit settings: 64 x (11 notes, normal, accent, max, flam) | 960 |
 | then | note bars in clip order, each clip's set mask bits in rising order: 16 x (note, velocity, flags, condition) | 64 each |
 | then | kit bars in the same order: 16 x `u32` | 64 each |
 
-The fixed part is 51,980 bytes. Tables are not saved; the load rebuilds them
-from the masks. With all 2,048 blocks as data the image is 183,052 bytes, below
-the slot's 196,608. The CRC32 (as v7's `crc32_update`) covers bytes 256 to the
+The fixed part is 60,172 bytes. Tables are not saved; the load rebuilds them
+from the masks. With all 2,048 blocks as data the image is 191,244 bytes, below
+the slot's 196,608. The extension mask is room for the ratchet and micro-timing
+layer (Goal 7): the firmware that first fills it writes version 9 with this
+layout. The CRC32 (as v7's `crc32_update`) covers bytes 256 to the
 payload end.
 
 ### Validation
 
 Before RAM is touched: magic, version, payload length; every length 1-512, end
-0-2, plays 1-99, target 0-31, reserved bytes zero; the masks' bit count equals
+0-2, plays 1-99, target 0-31, reserved bytes and every extension mask zero; the masks' bit count equals
 the block counts; blocks plus the tables the load will need (one per layer with
 a bar above 0) at most `POOL_BLOCKS`, else the load is refused with
 `POOL FULL`; every step: note and velocity ≤ 127, flag bits 4-7 zero, a known
@@ -718,7 +743,7 @@ Transport stopped, MIDI output idle, as now. Core 0 serializes the image on the
 fly through one 256-byte page buffer, twice: a pass computing the CRC and the
 length, then (core 1 parked, interrupts off) the erase of the slot and a pass
 programming the pages; the header last. No other buffer. In the simulator:
-48 sectors at 40 ms and at most 716 pages at 0.4 ms, about 2.2 s against the
+48 sectors at 40 ms and at most 748 pages at 0.4 ms, about 2.2 s against the
 artist's 2.6 s wait (v7 today: about 2.15 s).
 
 ### Load and migration

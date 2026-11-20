@@ -27,7 +27,7 @@ CTest, the WebAssembly simulator (`sim/`), Node for the simulator checks.
 - Gate pulses `(pct * 24 * 5243) >> 19`; no division, no new flash callee on the timer path (relative ELF check, Task 4).
 - Positions and lengths are `uint16_t`; "none" is 0xFFFF.
 - "Page" means eight tracks; the 16 steps on the step buttons are a "bar" in code, UI text and docs.
-- Save v8 byte layout exactly as the spec's table; the fixed part is 51,980 bytes; the CRC is v7's `crc32_update` over bytes 256 to the payload end.
+- Save v8 byte layout exactly as the spec's table; the fixed part is 60,172 bytes; the CRC is v7's `crc32_update` over bytes 256 to the payload end.
 - RAM of the RP2040 Release build (`arm-none-eabi-size -A`, `.data` + `.bss`) at most 236,000 bytes after every task; record it in the task's commit message.
 - Host tests: `(cd test && cmake --preset host-tests-debug && cmake --build --preset host-tests-debug && ctest --preset host-tests-debug)`, also configured with `-DCMAKE_C_FLAGS=-fshort-enums` as CI does.
 - Firmware: `cmake --preset firmware-release && cmake --build --preset firmware-release`, and `pico2-release`, `revb-rp2354b`.
@@ -110,7 +110,8 @@ Allocation and freeing are internal; operations needing blocks take them all
 first and publish last (the publish is a plain write here; Task 3 wraps it in
 `seq_lock`).
 
-- [ ] Tests: `sizes_on_arm` (4, 64, 8, 458; store 162,624 + 4); `fresh_store_is_empty` (free 2,048); `first_note_allocates_bar0_root`; `note_in_bar3_promotes_to_table` (2 blocks used; bar 0 kept); `zeroing_a_bar_frees_it`; `table_demotes_when_only_bar0_left`; `kit_layer_independent` (track 1 note and kit roots apart); `double_17_to_34_copies_both_layers_and_conds`; `halve_keeps_hidden_steps`; `copy_takes_end_plays_target`; `pool_exhaustion_changes_nothing` (fill the pool, then `clip_set_step` in a new bar, `clip_double`, `clip_copy`: each false; snapshot of the store byte-equal before and after — Review Focus 1); `free_list_survives_random_ops` (10,000 seeded operations, the free count always equals 2,048 minus reachable blocks, no block reachable twice).
+- [ ] **Before starting, read the owner's answer on how note bars are freed** (spec, Data model, "pending the owner"); with choice 1 `clip_halve()` frees the bars beyond the new length and `clip_clear()` is reachable from the CLIP screen (Task 10); with choice 2 a bar with no active step and no condition is freed on the edit that makes it so. Add the matching test (`halve_frees_bars_beyond` or `inactive_bar_freed`).
+- [ ] Tests: `sizes_on_arm` (4, 64, 8, 458; store 162,624 + 4); `fresh_store_is_empty` (free 2,048); `first_note_allocates_bar0_root`; `note_in_bar3_promotes_to_table` (2 blocks used; bar 0 kept); `zeroing_a_bar_frees_it`; `table_demotes_when_only_bar0_left`; `kit_layer_independent` (track 1 note and kit roots apart); `double_17_to_34_copies_both_layers_and_conds`; `halve_keeps_steps_within_last_bar`; `copy_takes_end_plays_target`; `pool_exhaustion_changes_nothing` (fill the pool, then `clip_set_step` in a new bar, `clip_double`, `clip_copy`: each false; snapshot of the store byte-equal before and after — Review Focus 1); `free_list_survives_random_ops` (10,000 seeded operations, the free count always equals 2,048 minus reachable blocks, no block reachable twice).
 - [ ] Implement in `src/clip.c` (no Pico SDK calls; pure C, built for host and firmware).
 - [ ] Run the host tests; commit `feat: block pool and clip store`.
 
@@ -165,8 +166,8 @@ header last), `bool v8_validate(const uint8_t *image, size_t len, uint16_t *bloc
 `bool legacy_migrate(const uint8_t *image, sequencer_state_t *)` (v4-v6).
 The probe order is v8, v7, the eight-track slot.
 
-- [ ] Test `v8_layout_matches_spec`: a hand-written image (one location name, one 20-step clip with bars 0 and 1, one kit bar on track 1, a two-entry song) at the spec's offsets loads; serializing it back gives the same bytes; the fixed part is 51,980 bytes.
-- [ ] Tests: `v8_round_trip`; one test per validation rule (length 0 and 513, end 3, plays 0 and 100, target 32, reserved byte, mask count mismatch, note 128, flag bit 4, unknown condition, AC 2, kit mask on track 9, three kit tracks, bad CRC) each refused with RAM unchanged.
+- [ ] Test `v8_layout_matches_spec`: a hand-written image (one location name, one 20-step clip with bars 0 and 1, one kit bar on track 1, a two-entry song) at the spec's offsets loads; serializing it back gives the same bytes; the fixed part is 60,172 bytes.
+- [ ] Tests: `v8_round_trip`; one test per validation rule (length 0 and 513, end 3, plays 0 and 100, target 32, reserved byte, a non-zero extension mask, mask count mismatch, note 128, flag bit 4, unknown condition, AC 2, kit mask on track 9, three kit tracks, bad CRC) each refused with RAM unchanged.
 - [ ] Tests: `v7_arm_fixture_migrates` (Task 0's `v7-arm.bin`; runs where `sizeof(pattern_v7_t) == 4108`, i.e. the `-fshort-enums` host build CI runs; elsewhere skipped with a message); `v7_host_image_migrates` (an image built here with `pattern_v7_t`); `v4_v5_v6_fixtures_migrate`; `v7_default_length_and_hidden_steps` (Review Focus 4); `v7_needing_2049_blocks_refused` (`FLASH_LOAD_POOL_FULL`, RAM unchanged).
 - [ ] `device_check.js`: a v8 round trip, the save time under 2.5 s, a v7 image in the simulator's layout and the v6 fixture migrating.
 - [ ] Implement; README: the update path (LOAD before SAVE), downgrade falls back to the eight-track save.
@@ -271,7 +272,7 @@ of `pads`); the artist's `Model` holds 512 steps and the clip ends.
 check and before the next step is read. `sim_dbg_clip_end()`, `sim_dbg_pass()`,
 `sim_dbg_idle()`.
 
-- [ ] Tests: `stop_after_three_plays_goes_idle` (silent from the fourth pass, notes released, kit voices released, flam cancelled); `next_after_one_play_starts_target_at_step1` (no quantization wait, `pass` 0); `next_to_empty_target_plays_silence`; `next_to_itself_restarts`; `chain_a_b_c_a_in_time`; `lowering_plays_ends_at_next_wrap`; `queue_beats_end_action_same_boundary` (Review Focus 3); `scene_beats_end_action`; `mute_keeps_counting`; `once_clip_starts_at_step1_under_bar_and_beat`; `loop_clip_keeps_phase_join`; `idle_track_launch_point_is_next_step`; `own_pad_relaunches_idle_clip`; `song_mode_end_makes_idle_until_location_changes`; `song_mode_next_never_changes_location`; `start_clears_idle_and_pass`; `spp_clears_idle`; `copy_carries_end_fields`; `session_shows_idle_as_present_not_playing`.
+- [ ] Tests: `stop_after_three_plays_goes_idle` (silent from the fourth pass, notes released, kit voices released, flam cancelled); `next_after_one_play_starts_target_at_step1` (no quantization wait, `pass` 0); `next_to_empty_target_plays_silence`; `next_to_itself_restarts`; `chain_a_b_c_a_in_time`; `lowering_plays_ends_at_next_wrap`; `queue_beats_end_action_same_boundary` (Review Focus 3); `scene_beats_end_action`; `mute_keeps_counting`; `once_clip_starts_at_step1_under_bar_and_beat`; `loop_clip_keeps_phase_join`; `idle_track_launch_point_is_next_step`; `own_pad_relaunches_idle_clip` (restarts at step 1, `pass` 0); `scene_relaunches_idle_tracks_on_its_row` (a second SCENE while they wait cancels every queue); `song_mode_end_makes_idle_until_location_changes`; `song_mode_next_never_changes_location`; `start_clears_idle_and_pass`; `spp_clears_idle`; `copy_carries_end_fields`; `session_shows_idle_as_present_not_playing`.
 - [ ] Implement; run everything; commit `feat: clips end by looping, stopping or starting another clip after N plays`.
 
 ### Task 13: the simulator plays clip ends
