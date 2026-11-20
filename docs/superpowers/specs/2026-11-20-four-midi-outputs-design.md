@@ -93,10 +93,15 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
   `PULSES_PER_STEP` times the pulse spacing the timer itself uses **(call)**.
   Internal clock: `pulse_interval_us`, the truncated interval (at 187.5 BPM D is
   249 bytes, where 46,875 / BPM gives 250). Following an external clock:
-  `ext_sub_us()`, a quarter of the Clock interval estimate, and the internal
-  period until two Clocks have been seen. So D always exists. Playback is
-  straight today (swing is stored, not played), so every step has the same D;
-  if swing is ever played, D must follow each step's real length **(call)**.
+  `ext_sub_us()`, a quarter of the Clock interval estimate (the mean of the last
+  four Clock intervals). Before two Clocks there is no estimate: that step has
+  no budget, only the guard with `G = 765`, Start having emptied the queue
+  **(call)**. While following, the budget follows the estimate: at the table's
+  exact rows a master a fraction of a percent fast, or jitter in the estimate
+  (34 us short at 120 BPM), drops the last note; the exact rows are promised on
+  the internal clock **(call)**. Not `shown_x16`: it trails a change under 4 %
+  over about 16 Clocks. Playback is straight today (swing is stored, not
+  played); if swing is ever played, D must follow each step's length **(call)**.
 - **Catch-up (call).** In a catch-up burst (`ext_catchup_us()`) steps come up to
   four times as fast as D assumes. The guard holds the queue, lower tracks keep
   priority, and a port loaded near the table skips notes until the burst ends.
@@ -114,8 +119,11 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
   with their own status byte **(call; the measurement below needs it)**. A flam
   without room for its second hit at admission plays as a plain hit with the
   plain gate (unless another voice of the step keeps its flam: one countdown per
-  kit) and counts in `flam_drops` **(call)**. A second hit dropped later at the
-  flam cap (319) comes after the gate was extended, as today. The charges are
+  kit) and counts in `flam_drops` **(call)**. The flam cap becomes G, read with
+  `reserved` = 0 **(call)**: a second hit charged in the budget is refused only
+  where a Note On would be (today's 319 drops every second hit of two flammed
+  kits plus SYNTH tracks within the budget, from 40 to 180 BPM). A second hit
+  refused there comes after the gate was extended, as today. The charges are
   fixed on every port **(call)**: running status is not credited, because the
   drain sends the status again after any gap in the queue.
 - **Order.** Tracks in track order (T1 first); kit voices in `kit_voice_order`
@@ -129,8 +137,10 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
   the most one step can put on one port: 258 bytes of Note Ons, 258 of
   releases. The margin of 72: 40 bytes because two full kits take 3 bytes a
   message in the queue and 2 on the wire, and 32 of slack. S is every byte the
-  step has put on the port since the read: direct releases (kit leftovers in
-  `play_kit_step()`, a kind change in `load_prepared_track()`), Note Offs in
+  step has put on the port since the read, counted where the bytes go: a
+  release goes to the note's own port (`k->port`, `active_note_state[tr].port`),
+  after a port change not the row's **(call)**. S holds direct releases (kit
+  leftovers in `play_kit_step()`, a kind change in `load_prepared_track()`), Note Offs in
   the batch, admitted Note Ons. A Note On is admitted when its charge fits the
   remaining budget and S plus the bytes it adds (a Note Off sent with it, as in
   a slide, included) stays within `reserved`. Releases are never refused. The
@@ -155,9 +165,9 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
   or kit voice.
 - **Lag (call).** An admitted Note On waits behind at most G (D + 72) queued
   bytes plus the keys passed in the window and the real-time bytes put ahead of
-  it: about one step plus 23 ms. From playback alone a Note Off waits behind at
-  most D + 72 + 258 bytes (156 ms at 300 BPM), and behind 1,023 bytes (327 ms)
-  at the very most.
+  it: about one step plus 23 ms; a flam's second hit, behind at most G too.
+  From playback alone a Note Off waits behind at most D + 72 + 258 bytes
+  (156 ms at 300 BPM), and behind 1,023 bytes (327 ms) at the very most.
 - **Last line (call).** The overflow flag and `panic_playback()` stay, as the
   MIDI Song player's rule and as a safety net. Admission makes a TX-queue
   overflow impossible in Pattern and Song playback (see "No overflow by
@@ -185,7 +195,8 @@ n = floor((D - 6) / 6), nominally floor((floor(46,875 / BPM) - 6) / 6):
 Running status and shared channels lower the wire bytes, not the charge: the
 promise is the table's n, and a shared-channel load above it skips although
 its bytes might fit **(call)**. The promise holds at a steady tempo, not in a
-catch-up burst **(call)**. Corollaries:
+catch-up burst, and the exact rows on the internal clock: following a Clock, D
+comes from the estimate (see "D") **(call)**. Corollaries:
 
 - **Default layout, SYNTH and DRUM tracks:** 16 per output, 102 bytes a step
   (measured) against 156.25 at 300 BPM. Nothing skips at any tempo.
@@ -193,7 +204,9 @@ catch-up burst **(call)**. Corollaries:
   Two kits with all 11 voices on every step plus 14 SYNTH tracks on one output:
   182 bytes a step (measured; the charges give 2 x 46 + 14 x 6 + 6). It fits to
   240 BPM (195); at 300 BPM A's higher tracks skip. Two kits with every voice
-  flammed: 188 bytes (charges 2 x 91 + 6), which also fits to 240 BPM.
+  flammed: 188 bytes (charges 2 x 91 + 6), which also fits to 240 BPM. With
+  the flam cap at G, flammed kits plus SYNTH tracks filling the budget keep
+  every second hit (two kits flammed + 33 SYNTH at 120 BPM: charges 380 of 384).
 - **Pico:** all 64 tracks on the one wire fit to 120 BPM (390 against 390).
 
 **Measured on the host** (build of f8a8737, the fake UART in wire-time mode,
@@ -220,11 +233,15 @@ and overflowed later; loads just below held 64 bars. Every surviving run put all
 768 Clocks on the wire, the latest 1,276 us after its pulse (bound 1,280 us).
 
 **Checked by a byte-level model** of the admission rule above **(call)**: a model
-of the rule, not firmware and not the host measurements above. No overflow in
-any family tried (pass-through prefill, keys hammered inside phase 1, slides,
-catch-up bursts, tempo jumps, random patterns, 40-300 BPM), the peak of fill +
-3 x owed 1,017; no skip at any row of the table at gate 10, 50 and 100 %, with
-all tracks tied and with slides every step.
+of the rule, not firmware and not the host measurements above. At margin 72
+and flam cap G, flammed kits included: no overflow in any family tried
+(pass-through prefill, keys hammered in phase 1, slides, catch-up bursts, tempo
+jumps, random patterns, 40-300 BPM), fill + 3 x owed at most 1,017; no skip at
+any table row at gate 10, 50 and 100 %, tied or sliding every step; no skip and
+no lost second hit with 1-2 kits of 1, 6 or 11 voices, flammed or not, plus
+SYNTH tracks filling the budget, at every D; the first step without an estimate
+skips nothing within the table (five tempo pairs). The zero-drain sweep from any
+state (626,688 cases) ran at margin 32 and cap 319, which its proof does not use.
 
 ### Drop counters
 
@@ -423,7 +440,7 @@ statically asserted **(call)**:
 | Optional send | Cap today | Cap after |
 |---|---|---|
 | Admitted step Note Ons | none (the overflow stops) | `G = min(D + 72, 765)` |
-| Flam second hits (`KIT_FLAM_MAX_QUEUED`) | 319 | 319 |
+| Flam second hits (`KIT_FLAM_MAX_QUEUED`) | 319 | `G`, with `reserved` = 0 |
 | Pass-through Note On (`THRU_ON_QUEUE_MAX`) | 511 | 511 |
 | Pass-through Note Off (`THRU_OFF_QUEUE_MAX`) | 767 | 765 |
 
@@ -444,7 +461,8 @@ of playback notes sounding on the port (at most 86, `MIDI_MANDATORY_MAX` / 3).
 1. A release adds at most 3 bytes and ends one owed note; draining only lowers
    the sum.
 2. Outside phase 1 an optional send leaves fill <= 765, so the sum is at most
-   765 + 258. A flam second hit re-strikes a sounding voice: owed is unchanged.
+   765 + 258 (a flam's cap G is at most 765). A flam second hit re-strikes a
+   sounding voice: owed is unchanged.
 3. In phase 1 every accepted key keeps fill + reserved <= 765.
 4. Every admitted Note On kept S <= reserved, so at the flush fill <= 765 + R',
    R' being the release bytes queued after the last admitted Note On.
@@ -613,8 +631,11 @@ the PIO interrupt, and `fake_uart_run_until()` serves both by wire time **(call)
   table, no skip
   at the table value at gate 10, 50 and 100 %, tied, and sliding every step;
   skips above it, lower tracks first, kit voice order; the kit edge (two full
-  kits plus SYNTH tracks filling the budget, gate 100 %) **(call)**; D from the
-  played interval and from the Clock estimate.
+  kits plus SYNTH tracks filling the budget, gate 100 %) **(call)**; a flammed
+  kit at a budget-fitting load keeps every second hit (two flammed kits plus
+  33 SYNTH tracks at 120 BPM, gate 100 %) **(call)**; D from the played interval
+  and from the Clock estimate; the first step following a Clock with no
+  estimate yet (internal 300 BPM, master 120) skips nothing **(call)**.
 - **Overload:** no stuck note and no overflow at any load, including 64 tracks,
   two of them flamming kits, on one port at 300 BPM over 64 bars; slow tempo,
   40-80 BPM, with ties ending, gate 10 % and a queue prefilled through
