@@ -2,7 +2,9 @@
 # Checks the built simulator (sim/web/core.js) the way the page will use it:
 # for every score the page offers on this firmware, the device check and,
 # unless `quick`, the artist check (every song in every arrangement); then,
-# when the firmware follows an external clock, the clock check.
+# when the firmware follows an external clock, the clock check; and, also
+# unless `quick`, the hands' unit and whole-show checks, once (every song in
+# every arrangement in all four scores: the hands need only artist.js).
 #   sim/check.sh          - all of it, seconds per score
 #   sim/check.sh quick    - the device check only
 # Which scores fit is read from the core, as the page does (app.js, initKeyboard):
@@ -63,4 +65,21 @@ done
 if node -e 'require("./sim/web/core.js")().then(c => process.exit(c._sim_features && (c._sim_features() & 16) ? 0 : 1))'; then
     echo "── external clock check"
     node sim/test/clock_check.js
+fi
+
+if [ "$MODE" != quick ]; then
+    echo "── hands: unit check"
+    node sim/test/hands_unit.js
+    echo "── hands: whole-show check"
+    LOG=sim/build/hands.log
+    mkdir -p sim/build
+    if env QMUTE="$QMUTE" node sim/test/hands_check.js > "$LOG" 2>&1; then
+        tail -1 "$LOG"
+    else
+        # The first failures and the summary (FAIL… and FAILED:), not the
+        # lines of the shows that failed.
+        grep -E '^FAIL|Error' "$LOG" | head -40
+        echo "hands check failed; the whole run is in $LOG" >&2
+        exit 1
+    fi
 fi

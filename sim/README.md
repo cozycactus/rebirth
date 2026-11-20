@@ -464,3 +464,112 @@ next downbeat, so it passes with either score.
 
 The page has an on-screen keyboard, computer keys and Web MIDI for the same
 input. With a firmware that does not listen on its DIN input it says so.
+
+## The hands
+
+Two hands drawn over the panel play what the artist does: they press and
+hold the keys, hold steps while the other hand turns an encoder, press two
+MUTE keys at once, copy a clip with index and thumb, and turn the encoders in
+a pinch and press them. At normal speed a fingertip lands on its control when
+the firmware sees the press and leaves when it sees the release; between
+gestures the hands lift and leave the panel. They only watch the score:
+nothing they do reaches the device. They do not play the synths' knobs, the
+MIDI keyboard card, or the user's own presses. They play the artist's sets
+only: not a MIDI Song, nor its loading as the device's clips ("Клипы на
+падах", which presses the panel: the ring marks those presses even with the
+box ticked, and the hands are not built while it loads), nor the PAD phrases
+of the four SH-101 songs (MIDI the score sends straight to the synth, with no
+hand on the panel).
+
+`sim/web/handplan.js` turns the show's actions into a plan per hand (which
+hand and finger, where, when); `handrig.js` builds a hand from the model,
+poses it and fits its fingertips onto the controls, and its driver samples
+the plan into poses at the device's time; `handlayer.js` draws them in a
+WebGL2 canvas over the panel, only while a hand moves. `app.js` loads these
+scripts, with `three.js` and `handmodel.js`, only once the box is ticked, one
+after another after the device is up, so the hands hold up neither the device
+nor the sound; from disk too.
+Building the hands from them (the canvas, the two rigs, shaders compiled and
+textures uploaded) is one task of 0.2–0.3 s, so it never runs while a live
+set plays: when the box is first ticked during a set (the hands not built on
+the page yet), or the scripts arrive after "Сыграть" with the preparation
+skipped, the ring stays until the set ends or is stopped, and the hands are
+there from the next show on. Once built, unticking and ticking the box hides
+and shows them at once. The build also waits while a MIDI Song loads or
+plays (its task would stall the device's tick beyond the 60 ms look-ahead):
+ticked then, the hands are built when the song ends or is stopped. It may
+run in a preparation (silent, as it is played faster than real time) and on
+an idle page, and so also while the device sounds there, after a click on
+the panel has taken a set over (the artist stops, the sequencer plays on)
+or while the user plays the device. Its task then holds up the main thread
+once while the music plays, which may be heard (from disk the 303s and the
+SH-101s run on that thread).
+
+The checkbox "показывать руки" in the artist's card shows and hides them,
+and the browser keeps the choice. It is off until the user ticks it: by
+default the page shows the ring. On the page opened from disk the 303s run
+on the main thread and the hands' heaviest frames delay them (see the frame
+cost below), so ticked there the hands are drawn lighter (a 1024 px shadow
+map and a pixel ratio of at most 1.5, instead of 2048 and 2). Without the hands a ring marks the control under the artist's finger, as
+before. The ring is also what shows when the browser has no WebGL2 or would
+draw it in software, when the hands' scripts fail to load, while the WebGL
+context is lost (the hands come back when the browser restores it), for the
+rest of a show whose hands failed, and in a preparation shown at x40. At x8 and x16
+the hands play the preparation approximately: the fingertips are exact at
+normal speed only.
+
+`node sim/test/hands_unit.js` checks the assets, the rig, the planner and
+the driver, and that the panel `app.js` draws is the one the hands aim at;
+`node sim/test/hands_check.js` plans every song in every arrangement in all
+four scores and poses 32 of those shows (every press on its control, the
+hand rules and the order of a hand's fingers across held keys, the grip
+turning with the knob, nothing of the hand's mesh through a control or the
+plate, the hands' speed), 4 of them also every 20 ms of the live set;
+`HANDS_FULL=1` poses every show, and `QMUTE=1` builds the scores with
+`quantMutes`, so a MUTE group is held as the page plays it. `sim/check.sh`
+runs both, passing `QMUTE` as for the artist check.
+
+The frame cost was measured on an Apple M1 (headless Chrome 157, WebGL
+through ANGLE on Metal), the page at 1500 × 1000 and a pixel ratio of 2, the
+sound on, over 60 s of a live set with pad launches, two MUTE pairs and held
+steps edited with the encoder (the fw2 score, song 3), with and without the
+hands, three runs each over HTTP and six from disk:
+
+- Over HTTP the hands take 0.1 ms of the main thread per frame (median; p99
+  1 ms) and draw about one frame in four. Frame times are the same with and
+  without them (median 16.7 ms, p95 16.8 ms), and no task over 50 ms came in
+  that minute in any run, from disk either. The heaviest frames, 10–11 ms,
+  are the first poses of a pinch or of held steps, when the fingers are
+  fitted to them for the first time.
+- From disk the 303s' callbacks (every 21.3 ms) came at worst 24.1–26.7 ms
+  apart without the hands and 27.5–33.6 ms with them, the late ones at those
+  first poses. One interval passed 32 ms (1.5 buffers): 33.6 ms, in one of
+  the six runs with the hands; none did in the runs without them. (An
+  earlier round, before the last fixes to the hands, had 3 such intervals
+  in 2 of 6 runs with the hands, none without.) Hence the lighter drawing
+  there.
+- Once per page, building the hands is one task of 0.2–0.3 s, its warm-up
+  (shaders compiled, textures uploaded) included, and never inside a live
+  set (see above); planning a show takes 13–18 ms at its start.
+
+These were measured before the SH-101 voices came to the page. From disk
+they too run on the main thread, which the numbers above do not include.
+
+Where the hands come from:
+
+- `sim/web/three.js`: three.js 0.187.0 (MIT), only the parts the hands use,
+  bundled into one classic script with esbuild 0.25.0.
+- `sim/web/handmodel.js`: the hands of
+  [Godot XR Tools](https://github.com/GodotVR/godot-xr-tools) at commit
+  `6fc5361` (CC0 1.0, DigitalN8m4r3; the mesh is MakeHuman output, CC0):
+  their mesh and skeleton, and their three textures as JPEG, embedded as
+  base64.
+- `sim/web/notices.txt`: the notices of both, published with the page.
+
+Both are committed as built. `sim/vendor/README.md` says how they are built
+and holds the SHA-256 of every source file; to build them again:
+
+```bash
+sim/vendor/build-three.sh                     # needs Node, npm and a network
+python3 sim/vendor/build-handmodel.py [DIR]   # macOS (sips), Python 3.9+; downloads the sources, or reads them from DIR
+```

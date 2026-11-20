@@ -1,0 +1,77 @@
+Third-party notices of the ReBirth simulator page
+=================================================
+
+Two files of this page, three.js and handmodel.js, are built from other
+people's work. Their notices follow; how they are built is in
+sim/vendor/README.md of the source.
+
+
+three.js (the file three.js)
+----------------------------
+
+three.js 0.187.0, https://github.com/mrdoob/three.js (npm package three).
+three.js here is a bundle of the parts of it the hands use, made with
+esbuild 0.25.0 by sim/vendor/build-three.sh. Its licence:
+
+The MIT License
+
+Copyright © 2010-2026 three.js authors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+
+The hand model (the file handmodel.js)
+---------------------------------------
+
+The hands of Godot XR Tools, https://github.com/GodotVR/godot-xr-tools,
+commit 6fc5361db295c12b5e51ee5b9fee09751a4458e7, folder
+addons/godot-xr-tools/hands: model/Hand_Nails_L.gltf, model/Hand_Nails_R.gltf,
+textures/caucasian_realistic_baseColor.png, textures/hands_normal.png and
+textures/hands_occlusionRoughnessMetallic.png. handmodel.js holds their mesh
+and skeleton and the textures as JPEG, converted by
+sim/vendor/build-handmodel.py.
+
+The folder's License.md begins with this statement and goes on with the
+text of CC0 1.0 Universal
+(https://creativecommons.org/publicdomain/zero/1.0/legalcode):
+
+    To the extent possible under law, DigitalN8m4r3 aka Miodrag Sejic
+    has waived all copyright and related or neighboring rights to Hand Models for the Godot XR Tools.
+    This work is published from: Austria.
+    Date: 7th November 2022
+
+The folder's About.md:
+
+    The Hand Mesh was made using the Makehuman Community Edition
+    It was slightly modified inside Blender 3D and textured inside Substance Painter
+
+    If there should be concerns regarding License issues
+    https://github.com/makehumancommunity/makehuman/blob/master/LICENSE.md
+
+    under point D of the makehuman communtiy edition license
+    https://github.com/makehumancommunity/makehuman/blob/master/LICENSE.md#d-concerning-the-output-from-makehuman
+    As the assets have been released under CC0, there is no limitation on what you can do with this combined output.
+    The MakeHuman project makes no claim whatsoever over output such as:
+
+        Exports to files (FBX, OBJ, DAE, MHX2...)
+        Exports via direct integration (import via MPFB)
+        Graphical data generated via scripting or plugins
+        Renderings
+        Screenshots
+        Saved model files
