@@ -23,7 +23,9 @@ Decided by the project owner:
    editors**, where a pad press picks the step.
 
 The end-behaviour rules below were played back to the owner and not
-corrected. Everything marked "my call" is open to review in the pull request.
+corrected. The owner approved the design and its plan on 2026-11-20
+(`docs/superpowers/plans/2026-11-20-long-clips.md`). Everything marked "my
+call" stays open to review in the pull request.
 
 Builds on: `2026-11-16-session-panel-design.md`, `2026-11-16-drum-kit-track-design.md`,
 `2026-11-16-hold-step-edit-design.md`, `2026-11-17-pad-keyboard-design.md`,
