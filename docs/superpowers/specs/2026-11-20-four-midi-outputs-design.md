@@ -95,7 +95,8 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
   249 bytes, where 46,875 / BPM gives 250). Following an external clock:
   `ext_sub_us()`, a quarter of the Clock interval estimate (the mean of the last
   four Clock intervals). Before two Clocks there is no estimate: that step has
-  no budget, only the guard with `G = 765`, Start having emptied the queue
+  no budget, only the guard with `G = 765` on the fill it reads (Start and
+  Continue do not clear the queue: a restart's releases and keys may wait there)
   **(call)**. While following, the budget follows the estimate: at the table's
   exact rows a master a fraction of a percent fast, or jitter in the estimate
   (34 us short at 120 BPM), drops the last note; the exact rows are promised on
@@ -106,8 +107,9 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
   four times as fast as D assumes. The guard holds the queue, lower tracks keep
   priority, and a port loaded near the table skips notes until the burst ends.
   Goal 5 and the density promise are for a steady tempo.
-- **Step budget** D - 6: six Clock bytes go out every step. Unused budget is not
-  carried over.
+- **Step budget** D - 6: six Clock bytes go out every step; none when D is 6 or
+  less (bunched Clocks can shrink the estimate that far), computed without an
+  unsigned wrap **(call)**. Unused budget is not carried over.
 - **Charges.** A SYNTH or DRUM Note On charges 6 (itself and its Note Off,
   whenever that is sent); a CV-only track sends none, so it is never charged or
   skipped **(call)**. A tie or slide continuation on the same pitch charges
@@ -119,7 +121,8 @@ Evaluated per physical port when a step is built in the timer ISR (phase 1 of
   with their own status byte **(call; the measurement below needs it)**. A flam
   without room for its second hit at admission plays as a plain hit with the
   plain gate (unless another voice of the step keeps its flam: one countdown per
-  kit) and counts in `flam_drops` **(call)**. The flam cap becomes G, read with
+  kit) and counts in `flam_drops` **(call)**. The flam cap becomes the G of the
+  step that armed the flam (765 on a first step without an estimate), read with
   `reserved` = 0 **(call)**: a second hit charged in the budget is refused only
   where a Note On would be (today's 319 drops every second hit of two flammed
   kits plus SYNTH tracks within the budget, from 40 to 180 BPM). A second hit
@@ -233,15 +236,17 @@ and overflowed later; loads just below held 64 bars. Every surviving run put all
 768 Clocks on the wire, the latest 1,276 us after its pulse (bound 1,280 us).
 
 **Checked by a byte-level model** of the admission rule above **(call)**: a model
-of the rule, not firmware and not the host measurements above. At margin 72
-and flam cap G, flammed kits included: no overflow in any family tried
-(pass-through prefill, keys hammered in phase 1, slides, catch-up bursts, tempo
-jumps, random patterns, 40-300 BPM), fill + 3 x owed at most 1,017; no skip at
-any table row at gate 10, 50 and 100 %, tied or sliding every step; no skip and
-no lost second hit with 1-2 kits of 1, 6 or 11 voices, flammed or not, plus
-SYNTH tracks filling the budget, at every D; the first step without an estimate
-skips nothing within the table (five tempo pairs). The zero-drain sweep from any
-state (626,688 cases) ran at margin 32 and cap 319, which its proof does not use.
+of the rule, not firmware and not the host measurements above
+(`tools/midi_wire_model/run_checks.py --full`). At margin 72 and flam cap G,
+flammed kits included: no overflow in any family tried (pass-through prefill,
+keys hammered in phase 1, slides, catch-up bursts, tempo jumps, random
+patterns, 20-300 BPM), fill + 3 x owed at most 1,017; no skip at any table row
+at gate 10, 50 and 100 %, tied, sliding or held on one pitch every step, and one
+note more skips only the last track; no skip and no lost second hit with 1-2
+kits of 1, 6 or 11 voices, flammed or not, plus SYNTH tracks filling the budget,
+at every D; the first step without an estimate skips nothing within the table
+(five tempo pairs); no overflow in the zero-drain sweep from any state
+(1,242,960 cases at 20 tempos).
 
 ### Drop counters
 
