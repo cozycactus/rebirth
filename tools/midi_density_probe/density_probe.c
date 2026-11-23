@@ -107,7 +107,6 @@ static void run_case(const probe_case_t *c, float bpm) {
             k++;
         }
     }
-    // fill_end appended
     // name;bpm;result;stopped_step;peak;cause;flam_drops;wire_bytes;wire_per_step;queued_per_step;clocks_expected;clocks_wire;max_clock_late_us;overruns
     bool any = probe_tx_overflow || probe_rt_overflow || probe_buf_overflow;
     printf("%s;%g;%s;%d;%u;%s%s%s%s;%u;%u;%.2f;%.2f;%u;%u;%u;%u;%u\n",
@@ -150,9 +149,16 @@ static void run_long(const char *name, uint8_t synth, bool kits, float bpm, unsi
 
 int main(int argc, char **argv) {
     seq_lock_init();
-    if (argc == 9 && strcmp(argv[1], "cell") == 0) {
-        probe_case_t c = {argv[2], (uint8_t)atoi(argv[3]), atoi(argv[4]) != 0, atoi(argv[5]) != 0,
-                          atoi(argv[6]) != 0, (uint8_t)atoi(argv[7])};
+    if (argc > 1 && strcmp(argv[1], "cell") == 0) {
+        int synth = argc == 9 ? atoi(argv[3]) : -1, kits = argc == 9 ? atoi(argv[4]) != 0 : 0;
+        int gate = argc == 9 ? atoi(argv[7]) : 0;
+        if (argc != 9 || synth < 0 || synth + (kits ? 2 : 0) > NUM_TRACKS || gate < 10 || gate > 100) {
+            fprintf(stderr, "usage: density_probe cell NAME SYNTH KITS FLAM ONE_CHANNEL GATE BPM\n"
+                            "       SYNTH + 2 x KITS <= %d, GATE 10-100\n", NUM_TRACKS);
+            return 2;
+        }
+        probe_case_t c = {argv[2], (uint8_t)synth, kits != 0, atoi(argv[5]) != 0,
+                          atoi(argv[6]) != 0, (uint8_t)gate};
         printf(CSV_HEADER);
         run_case(&c, (float)atof(argv[8]));
         return 0;

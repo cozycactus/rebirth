@@ -32,7 +32,7 @@ CAP_SAFE = 765         # 1,023 - 258 (MIDI_MANDATORY_MAX)
 STEP_MAX = 516         # the most one step can put on one port
 THRU_ON_CAP = 511
 PPS = 24               # pulses per step
-KIT_ORDER = list(range(11))   # voice indices, already in kit_voice_order
+KIT_ORDER = [0, 1, 6, 7, 8, 5, 2, 3, 4, 9, 10]   # src/kit.c kit_voice_order (voice indices)
 
 
 class Rule:
@@ -193,10 +193,12 @@ class Synth:
         self.ch = ch
         self.steps = steps
         self.gate = max(1, gate_pct * PPS // 100)
-        self.on = False
+        self.on = False           # note_is_on: advances on a skipped Note On too
+        self.midi = False         # the spec's "MIDI sounding" bit: a Note Off is owed
         self.note = 0
         self.flags_tie_slide = (False, False)
         self.countdown = 0
+        self.skips = 0
         self.kit = False
 
 
@@ -212,6 +214,9 @@ class Kit:
         self.flam = 0
         self.countdown = 0
         self.flam_countdown = 0
+        self.flam_G = None        # G of the step that armed the flam
+        self.skipped = []         # voices skipped, in the order they were skipped
+        self.skips = 0
         self.kit = True
 
 
@@ -245,6 +250,18 @@ class Seq:
 
     def synth_off_msg(self, tr):
         return [0x80 | tr.ch, tr.note & 0x7F, 0]
+
+    def synth_release_batch(self, tr, batch):
+        """prepare_note_off(): the Note Off only when the MIDI bit is set; the
+        state ends either way. Returns the change in owed."""
+        d = 0
+        if tr.on and tr.midi:
+            batch += self.synth_off_msg(tr)
+            self.S += 3
+            d = -1
+        tr.on = tr.midi = False
+        tr.countdown = 0
+        return d
 
     def kit_release_msg(self, k):
         out = []
@@ -283,9 +300,6 @@ class Seq:
         self.budget -= charge
         self.adm_on += on_bytes
         return True
-
-    def guard_limit(self):
-        return min(D_for(self.P) + self.rule.margin, CAP_SAFE)
 
     def phase1(self, step):
         port = self.port
@@ -338,16 +352,20 @@ class Seq:
                     c = 4 + (2 if first else 0)
                     want_flam = val == 3
                     cf = c + ((4 + (1 if first_flam else 0)) if want_flam else 0)
+                    plain_for_budget = False
                     if want_flam and (self.rule.name == 'today' or cf <= self.budget):
                         charge = cf
                     else:
-                        if want_flam:
-                            self.flam_budget_drops += 1
+                        plain_for_budget = want_flam
                         want_flam = False
                         charge = c
                     if not self.admit(charge, 3, 3):
                         self.skips += 1
+                        tr.skips += 1
+                        tr.skipped.append(v)
                         continue
+                    if plain_for_budget:
+                        self.flam_budget_drops += 1
                     first = False
                     if want_flam:
                         first_flam = False
@@ -362,47 +380,51 @@ class Seq:
                     tr.countdown = off if off < PPS else PPS
                     tr.flam = flam
                     tr.flam_countdown = tr.flam_pulses
+                    tr.flam_G = self.G
             else:
                 active, note, tie, slide = tr.steps[step % 16]
                 if not active:
-                    if tr.on:
-                        batch += self.synth_off_msg(tr)
-                        bat_owed -= 1
-                        self.S += 3
-                        tr.on = False
-                        tr.countdown = 0
+                    bat_owed += self.synth_release_batch(tr, batch)
                     continue
                 ptie, pslide = tr.flags_tie_slide
-                connected = tr.on and (ptie or pslide)
-                if connected and tr.note == note:
+                if tr.on and (ptie or pslide) and tr.note == note:
+                    # a tie or slide continuation: silent, charge 0, also after a skip
                     tr.flags_tie_slide = (tie, slide)
                     tr.countdown = 0 if (tie or slide) else tr.gate
                     continue
                 if tr.on and pslide:
-                    if self.admit(6, 3, 6):
-                        batch += [0x90 | tr.ch, note, 100] + self.synth_off_msg(tr)
-                        self.S += 6
+                    # legato: the new Note On first, then the old note's Note Off,
+                    # sent only if the old note sounds on MIDI
+                    old_midi = tr.midi
+                    if self.admit(6, 3, 6 if old_midi else 3):
+                        batch += [0x90 | tr.ch, note, 100]
+                        self.S += 3
+                        if old_midi:
+                            batch += self.synth_off_msg(tr)
+                            self.S += 3
+                        else:
+                            bat_owed += 1
+                        tr.midi = True
                     else:
                         self.skips += 1
-                        batch += self.synth_off_msg(tr)
-                        bat_owed -= 1
-                        self.S += 3
-                        tr.on = False
-                        tr.countdown = 0
-                        continue
+                        tr.skips += 1
+                        if old_midi:
+                            batch += self.synth_off_msg(tr)
+                            self.S += 3
+                            bat_owed -= 1
+                        tr.midi = False
                 else:
-                    if tr.on:
-                        batch += self.synth_off_msg(tr)
-                        bat_owed -= 1
+                    bat_owed += self.synth_release_batch(tr, batch)
+                    if self.admit(6, 3, 3):
+                        batch += [0x90 | tr.ch, note, 100]
+                        bat_owed += 1
                         self.S += 3
-                        tr.on = False
-                        tr.countdown = 0
-                    if not self.admit(6, 3, 3):
+                        tr.midi = True
+                    else:
                         self.skips += 1
-                        continue
-                    batch += [0x90 | tr.ch, note, 100]
-                    bat_owed += 1
-                    self.S += 3
+                        tr.skips += 1
+                        tr.midi = False
+                # a skipped Note On advances the state as an admitted one would
                 tr.on = True
                 tr.note = note
                 tr.flags_tie_slide = (tie, slide)
@@ -434,8 +456,9 @@ class Seq:
             elif tr.countdown > 0:
                 tr.countdown -= 1
                 if tr.countdown == 0 and tr.on:
-                    self.direct(self.synth_off_msg(tr), -1, 'note off')
-                    tr.on = False
+                    if tr.midi:
+                        self.direct(self.synth_off_msg(tr), -1, 'note off')
+                    tr.on = tr.midi = False
         for tr in self.tracks:
             if tr.kit and tr.flam_countdown > 0:
                 tr.flam_countdown -= 1
@@ -448,7 +471,7 @@ class Seq:
                     tr.flam = 0
                     cap = self.rule.flam_cap
                     if cap == 'G':
-                        cap = self.guard_limit()
+                        cap = tr.flam_G       # the G of the step that armed the flam
                     port.advance(port.now)
                     ahead = port.fill
                     if msg and not port.capped(msg, cap):
@@ -472,9 +495,11 @@ def run(seq, steps, spacing=None, step_P=None, between=None):
                 seq.P = step_P(seq, s)
             for _ in range(PPS):
                 seq.run_pulse()
-                if between:
-                    between(seq)
                 seq.t += spacing(seq, seq.pulse) if spacing else seq.P
+                if between:
+                    # core 0 acts just before the next pulse (the worst moment)
+                    seq.port.advance(seq.t)
+                    between(seq)
         seq.port.advance(seq.t + 10_000_000)
         return None
     except Overflow as e:
@@ -496,16 +521,24 @@ class Thru:
         self.offs = offs
         self.ons = ons
         self.at = at
+        self.ch = 0               # keys on rotating channels: no running status
+
+    def _msgs(self):
+        self.ch = (self.ch + 1) % 16
+        c = self.ch
+        return [0x80 | c, 60, 0, 0x90 | c, 60, 100], [0x80 | c, 61, 0]
 
     def push(self, seq, limit=None):
         port = seq.port
         off_cap = seq.rule.thru_off_cap
+        accepted = 0
         while self.ons and (limit is None or port.fill + 6 <= limit) and \
-                port.capped([0x80, 60, 0, 0x90, 60, 100], THRU_ON_CAP):
-            pass
+                port.capped(self._msgs()[0], THRU_ON_CAP):
+            accepted += 1
         while self.offs and (limit is None or port.fill + 3 <= limit) and \
-                port.capped([0x81, 61, 0], off_cap):
-            pass
+                port.capped(self._msgs()[1], off_cap):
+            accepted += 1
+        return accepted
 
     def __call__(self, seq, where):
         if self.mode in ('hammer', 'window'):
@@ -515,5 +548,4 @@ class Thru:
         if self.mode == 'hammer':
             self.push(seq)
         elif self.mode == 'prefill' and seq.pulse == self.at * PPS:
-            seq.port.advance(seq.port.now)
             self.push(seq, self.target)
