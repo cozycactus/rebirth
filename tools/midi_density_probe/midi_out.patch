@@ -1,0 +1,55 @@
+--- a/src/midi_out.c
++++ b/src/midi_out.c
+@@ -29,6 +29,10 @@
+ static uint8_t midi_buf[MIDI_STEP_BUFFER_BYTES];
+ static uint16_t midi_buf_len = 0;
+ static volatile bool midi_overflow;
++// PROBE (density-probe copy only): peak queue fill and overflow causes.
++uint16_t probe_tx_peak;
++uint32_t probe_tx_enqueued;
++bool probe_tx_overflow, probe_rt_overflow, probe_buf_overflow;
+ 
+ #ifndef MOCK_HARDWARE
+ _Static_assert((MIDI_TX_QUEUE_SIZE & (MIDI_TX_QUEUE_SIZE - 1u)) == 0,
+@@ -131,6 +135,8 @@
+         midi_tx_queue[midi_tx_head] = data[i];
+         midi_tx_head = midi_tx_next(midi_tx_head);
+     }
++    { uint16_t q = (midi_tx_head - midi_tx_tail) & (MIDI_TX_QUEUE_SIZE - 1u); // PROBE
++      if (q > probe_tx_peak) probe_tx_peak = q; probe_tx_enqueued += length; }
+     midi_tx_drain_locked();
+     return true;
+ }
+@@ -257,6 +263,7 @@
+     uint32_t lock_state = midi_tx_lock();
+     if (!midi_tx_enqueue_locked(data, length, MIDI_TX_QUEUED_MAX)) {
+         midi_tx_dropped_bytes += length;
++        probe_tx_overflow = true; // PROBE
+         midi_overflow = true;
+     }
+     midi_tx_unlock(lock_state);
+@@ -289,6 +296,7 @@
+         midi_rt_count++;
+     } else {
+         midi_tx_dropped_bytes++;
++        probe_rt_overflow = true; // PROBE
+         midi_overflow = true;
+     }
+     if (cancel_clock) midi_clock_pending = false;
+@@ -308,6 +316,7 @@
+         midi_buf[midi_buf_len++] = data1;
+         midi_buf[midi_buf_len++] = data2;
+     } else {
++        probe_buf_overflow = true; // PROBE
+         midi_overflow = true;
+     }
+ }
+@@ -334,6 +343,8 @@
+ #endif
+ }
+ 
++uint16_t probe_tx_fill(void) { return (uint16_t)((midi_tx_head - midi_tx_tail) & (MIDI_TX_QUEUE_SIZE - 1u)); } // PROBE
++
+ bool __not_in_flash_func(midi_output_overflowed)(void) {
+ #ifndef MOCK_HARDWARE
+     uint32_t lock_state = midi_tx_lock();
