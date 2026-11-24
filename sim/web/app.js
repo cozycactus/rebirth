@@ -18,6 +18,16 @@
   let show = null, phase = 'idle';  // idle | prep | live
   let showPatch = [];
   let importedSongs = [], midiRun = null, launchSerial = 0;
+  let generation = 0;             // the show's number: startShow, endShow and reboot each begin a new one
+  let lastTickWall = 0;           // wall() at the last tick
+  // The hands (handlayer.js): the layer once loaded; whether the last
+  // frame showed them (then the artist's touches get no ring); whether a
+  // touch since then was ringed by another state than that (the next frame
+  // marks every held control again); a generation whose plan failed (the
+  // ring for the rest of that show); a generation that has logged a pose
+  // off its targets.
+  let handLayer = null, handsOn = false, touchesStale = false, handsFailed = -1, handsWarned = -1;
+  const artistHeld = new Set();   // the controls the artist holds down now, as io.touch set them
   // A MIDI song laid out as the device's clips (midi_clips.js): its plan and
   // the SH-101 voices its MIDI channels play, kept until the next start or a
   // reboot, so the pads still sound the song's parts after it has played.
@@ -205,6 +215,7 @@
     device.encoderSwitch(0, false);
     device.encoderSwitch(1, false);
     hands.settleEncoders();
+    artistHeld.clear();
     deviceEl.querySelectorAll('.finger, .down').forEach(el => el.classList.remove('finger', 'down'));
   }
 
@@ -341,7 +352,10 @@
       }
       const el = elementFor(a);
       if (!el) return;
-      el.classList.toggle('finger', a.down);
+      if (a.down) artistHeld.add(el); else artistHeld.delete(el);
+      const ring = !handsShown();     // with the hands, a finger is drawn instead
+      if (ring === handsOn) touchesStale = true;
+      el.classList.toggle('finger', a.down && ring);
       el.classList.toggle('down', a.down);
     },
     rig(id, value, ramp) { moveKnob(id, value, ramp, device.now()); },
@@ -1722,6 +1736,7 @@
   }
   function tick() {
     const w = wall();
+    lastTickWall = w;
     // A tick that comes late (a busy page, a hidden tab) advances the device by
     // less than the look-ahead, so nothing it produces is already in the past:
     // the music slows for a moment instead of playing a bunch of notes at once.
@@ -1810,6 +1825,8 @@
     lastWall = wall();
     $('show-start').disabled = true;
     $('show-stop').disabled = false;
+    generation++;
+    planHands();
   }
 
   async function startMidiSong(song) {
@@ -1924,6 +1941,8 @@
     phase = 'idle';
     refreshMidiParts();
     speed = 1;
+    generation++;
+    if (handLayer) handLayer.drop();
     playhead = device.now() - LOOKAHEAD_US;
     $('show-start').disabled = false;
     $('show-stop').disabled = true;
@@ -1937,6 +1956,8 @@
   function reboot() {
     launchSerial++;               // a start still waiting for the audio gives up
     if (phase !== 'idle') endShow();
+    generation++;
+    if (handLayer) handLayer.drop();
     clearSolo();
     stopPads();
     hands.clear();
@@ -2004,10 +2025,138 @@
     }
   }
   function frame() {
+    requestAnimationFrame(frame);
+    handsPart(() => {
+      const shown = handsShown();
+      if (shown === handsOn && !touchesStale) return;
+      handsOn = shown;
+      touchesStale = false;
+      redoTouches();
+      if (handLayer) handLayer.setVisible(shown);
+    });
     drawOled();
     drawLights();
     drawStatus();
-    requestAnimationFrame(frame);
+    if (handsOn) handsPart(drawHands);
+  }
+  // The hands' part of a frame: whatever fails there ends the hands for
+  // this show (the ring comes back at the next frame, the canvas hidden),
+  // never the frame loop.
+  function handsPart(part) {
+    try {
+      part();
+    } catch (e) {
+      handsFailed = generation;
+      console.error('The hands stopped for this show:', e);
+      try { handLayer.canvas.style.display = 'none'; } catch (_) { /* no layer */ }
+    }
+  }
+
+  // ─── The hands ────────────────────────────────────────────────
+  // Two hands drawn over the panel (handlayer.js) play what the artist does;
+  // without them a ring marks the control under the artist's finger. The
+  // checkbox is off until the user ticks it, and kept in localStorage; the
+  // hands' scripts load only once it is ticked.
+  const HANDS_KEY = 'rebirth.hands';
+  const HAND_SCRIPTS = ['three.js', 'handmodel.js', 'handrig.js', 'handplan.js', 'handlayer.js'];
+  let handsLoad = null;
+  const handsWanted = () => $('show-hands').checked;
+  // Shown: wanted, loaded, able to draw (its WebGL context not lost), not
+  // failed on this show, not in a preparation faster than x16, and not with
+  // a MIDI song laid out as clips (padsRun: its loading presses the panel,
+  // but the hands play the artist's sets only); there the ring.
+  const handsShown = () => handsWanted() && !!handLayer && handLayer.available && handsFailed !== generation &&
+    !(phase === 'prep' && (speed > 16 || speed === Infinity)) && !padsRun;
+
+  // The hands' scripts, one after another, then the layer: once, memoised;
+  // null without WebGL2 (or with WebGL drawn in software) or when anything
+  // fails (the ring stays). The 303s on the main thread (rig.js inline: the
+  // page from disk) get the lighter drawing. Nothing here holds up the
+  // device or the audio: the scripts load at any time, but building the
+  // layer and its warm-up are one task of 0.2–0.3 s (sim/README.md, "The
+  // hands"), so they wait while the set sounds (the ring until then) or a
+  // MIDI Song loads or plays (longer than the look-ahead: the tick would
+  // stall), and while the hands are not wanted: they build on an idle page
+  // or in an artist's preparation only (a MIDI song laid out as clips loads
+  // in a 'prep' of its own, at real speed: not there).
+  const buildable = () => new Promise(resolve => {
+    const check = () => ((phase === 'idle' || (phase === 'prep' && !padsRun)) && handsWanted() ? resolve() : setTimeout(check, 250));
+    check();
+  });
+  function loadHands() {
+    if (handsLoad) return handsLoad;
+    const v = window.SIM_BUILD ? '?v=' + window.SIM_BUILD.short : '';
+    const script = name => new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = name + v;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('cannot load ' + name));
+      document.head.appendChild(s);
+    });
+    handsLoad = Promise.resolve()
+      .then(() => { if (!window.WebGL2RenderingContext) throw new Error('no WebGL2'); })
+      .then(() => HAND_SCRIPTS.reduce((done, name) => done.then(() => script(name)), Promise.resolve()))
+      .then(() => (rig ? rig.ready : null))
+      .then(how => window.HandLayer.create(deviceEl, { quality: how === 'inline' ? 'light' : 'full', until: buildable }))
+      .then(layer => {
+        layer.setVisible(false);      // until frame() shows it
+        layer.warm();
+        handLayer = layer;
+        return layer;
+      })
+      .catch(e => {
+        console.warn('The hands are off, the ring marks the artist\'s finger: ' + ((e && e.message) || e));
+        return null;
+      });
+    return handsLoad;
+  }
+  // The running show's plan for the hands: now if they are loaded, else
+  // once they are, if the show is still the same one. Only the artist's
+  // set has one: an idle page and a MIDI Song (no artist, show null; laid
+  // out as clips, padsRun) have none.
+  function planHands() {
+    const gen = generation;
+    const plan = () => {
+      if (gen !== generation || (phase !== 'prep' && phase !== 'live') || padsRun) return;
+      try {
+        handLayer.setShow(show, gen);
+      } catch (e) {
+        handsFailed = gen;
+        console.error('The hands cannot play this show:', e);
+      }
+    };
+    if (handLayer) plan();
+    else if (handsWanted()) loadHands().then(layer => { if (layer) plan(); });
+  }
+  // The hands shown or hidden: the artist's controls held at this moment
+  // (as io.touch left them, whatever became of the plan) marked again, with
+  // classList alone (nothing reaches the device): `down` always, `finger`
+  // without the hands. The user's own presses stay down.
+  function redoTouches() {
+    deviceEl.querySelectorAll('.finger, .down').forEach(el => el.classList.remove('finger', 'down'));
+    for (const el of held.keys()) el.classList.add('down');
+    for (const el of artistHeld) {
+      el.classList.add('down');
+      if (!handsOn) el.classList.add('finger');
+    }
+  }
+  // The hands at device time: the device's now, and how far the clock that
+  // runs the device (wall(): the audio clock while the sound is on) has
+  // moved it on since the last tick (at most one tick's worth), which the
+  // driver never lets pass an unprocessed down, up or edge, nor fall back;
+  // in a fast preparation, averaged over about two frames. A pose off its
+  // targets is drawn as it is and logged once a show.
+  function drawHands() {
+    const now = device.now();
+    const extrapolated = now + Math.min(Math.max(0, (wall() - lastTickWall) * 1e6 * speed), 10000 * speed);
+    const windowUs = phase === 'prep' && speed > 1 ? 2 * 16700 * speed : 0;
+    handLayer.frame({ now, extrapolated, speed, windowUs });
+    const last = handLayer.last;
+    if (last && (!last.left.ok || !last.right.ok) && handsWarned !== generation) {
+      handsWarned = generation;
+      console.warn('The hands: a pose off its targets at device time ' + last.t + ' (' +
+        ['left', 'right'].filter(side => !last[side].ok).join(' and ') + ' hand), drawn as it is.');
+    }
   }
 
   // ─── Hints ────────────────────────────────────────────────────
@@ -2122,10 +2271,20 @@
       device.play(false, device.now() + 80000);
     });
 
+    // Set either way: a browser may restore a form's checkbox on reload.
+    let kept = null;
+    try { kept = localStorage.getItem(HANDS_KEY); } catch (e) { /* not kept: off */ }
+    $('show-hands').checked = kept === 'on';
+    $('show-hands').addEventListener('change', () => {
+      try { localStorage.setItem(HANDS_KEY, handsWanted() ? 'on' : 'off'); } catch (e) { /* not kept */ }
+      if (handsWanted()) planHands();
+    });
+
     lastWall = wall();
     setInterval(tick, 10);
     requestAnimationFrame(frame);
     window.sim = { device, hands, get rig() { return rig; }, get ctx() { return ctx; }, get phase() { return phase; },
-                   get show() { return show; }, startShow, endShow, sendMidiIn };
+                   get show() { return show; }, get handLayer() { return handLayer; }, startShow, endShow, sendMidiIn };
+    if (handsWanted()) planHands();     // ticked before: loads the hands once the device is up
   });
 })();

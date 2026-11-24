@@ -29,6 +29,7 @@
   #device .face { position: absolute; left: 6.8%; right: 6.8%; top: 4.9%; bottom: 4.6%; background: var(--panel);
     border-radius: 0.4cqw; box-shadow: inset 0 0 0 0.15cqw #2a2b30, 0 0.6cqw 1.6cqw rgba(0,0,0,.5); }
   #device .at { position: absolute; }
+  .handsgl { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5; }
   #device .label { position: absolute; transform: translate(-50%, -50%); color: #e9e9ea; font-size: 1.05cqw;
     font-weight: 600; letter-spacing: .04em; white-space: nowrap; pointer-events: none; }
   #oled-frame { background: #0b0c0f; border: 0.15cqw solid #33353b; border-radius: 0.3cqw; padding: 0.9cqw 1cqw; }
@@ -361,6 +362,9 @@
       <div class="row" style="margin-top:8px">
         <label data-tip="С галочкой видно, как артист набирает клипы на остановленном приборе, в ускоренном времени. Без неё подготовка проходит мгновенно."><input type="checkbox" id="show-prep" checked> показать подготовку ускоренно</label>
         <select id="prep-speed" data-tip="Во сколько раз ускорить подготовку. Сам сет всегда идёт в настоящем времени."><option value="8">×8</option><option value="16" selected>×16</option><option value="40">×40</option></select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label data-tip="Две руки играют на приборе то, что делает артист. По умолчанию выключено: кружок под пальцем, как раньше; браузер запомнит выбор. Если включить руки впервые во время сета, они появятся в следующем. На странице, открытой с диска, руки рисуются облегчённо: там синтезаторы считаются в основном потоке, и руки могут их задержать."><input type="checkbox" id="show-hands"> показывать руки</label>
       </div>
       <div class="row" style="margin-top:8px">
         <label for="show-variant">Как артист набирает клипы:</label>
