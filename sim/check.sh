@@ -4,7 +4,9 @@
 # unless `quick`, the artist check (every song in every arrangement); then,
 # when the firmware follows an external clock, the clock check; and, also
 # unless `quick`, the hands' unit and whole-show checks, once (every song in
-# every arrangement in all four scores: the hands need only artist.js).
+# every arrangement in all four scores: the hands need only artist.js,
+# and the eight Twisted songs performed with MUTE over their clips). The
+# MIDI checks run first, the live MUTE one included (midi_live_check.js).
 #   sim/check.sh          - all of it, seconds per score
 #   sim/check.sh quick    - the device check only
 # Which scores fit is read from the core, as the page does (app.js, initKeyboard):
@@ -19,6 +21,7 @@ node sim/test/sh101_check.js
 node sim/test/sh101_rom_check.js
 node sim/test/midi_song_check.js
 node sim/test/midi_clips_check.js
+node sim/test/midi_live_check.js
 node sim/test/session64_check.js
 
 # The first word is 1 when MUTE waits for the launch point, the rest the scores.
