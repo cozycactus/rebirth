@@ -438,6 +438,31 @@ it to the other hand. Nobody has listened to the moves yet.
 3. Derived moves only; corrections by ear wait until someone has listened.
 4. The spacing stays: returns 8 bars apart, 16 before a hats or snare move.
 
+## As built (2026-11-25)
+
+- `MidiSongs.read` returns `meters` (FF 58); `MidiClips.plan` carries
+  `meters` and `ppqn`; `MidiClips.mutes(plan)` returns `{ setEnd,
+  stretches, groups, moves }` exactly as above, and Sham's moves are the
+  table. The show's options are `{ moves, bars }` (`bars` = `setEnd`, the
+  same as `store(plan, { bars })` takes); it returns `{ actions, playAt, t0,
+  end, moves }`, `moves` being those that fit (all of them at the Twisted
+  tempos). One jitter is drawn per change; a page turn has its own caption
+  ("TRACK: страница N").
+- The page follows "The page" to the letter; `midi_live_check.js` reads
+  `app.js` for the order and the gates (part 5).
+- Measured on an M1: `midi_live_check.js` 2.7 s; `hands_check.js` with
+  the eight performed shows 103 s alone (122 s with a headless Chrome
+  beside it; each performed show posed in full: peak 1.95 m/s, no crossing
+  or palm overlap); the whole `sim/check.sh` 2 min 21 s, all passing.
+- Headless Chrome over HTTP: with the box ticked just before "Сыграть" the
+  hands were not built on the idle page and were built before the phase
+  became the preparation (during the load); the loading moves, the first
+  kick roll (bar 41 muted, back on 42) and the first drop (page turn to 2,
+  kick and bass muted in bars 88–89, back on 90) were played by the hands
+  with no ring; the plain clips mode on the same page showed the ring and
+  no hands. No console error but the page's known 404s (`favicon.ico`,
+  `local-songs/twisted/catalog.json`).
+
 ## Review changes
 
 DeepSeek (D1–D22) and Grok (G1–G10), each checked against the code, and the
