@@ -1,7 +1,8 @@
 # Live MUTE Over the Clips Song ("It's a Sham, Man") — Design
 
-Date: 2026-11-25. Status: draft, revised the same day after two independent
-reviews (DeepSeek, Grok; Codex was unavailable), see "Review changes". The
+Date: 2026-11-25. Status: approved by the owner on 2026-11-25, after two
+independent reviews the same day (DeepSeek, Grok; Codex was unavailable),
+see "Review changes" and "What the owner decided". The
 feature and its shape are the owner's choice, made in conversation: the
 hands load a Twisted song laid out as the device's clips ("Клипы на
 падах"), switch to Song mode, and while the device plays the chain itself
@@ -260,23 +261,20 @@ each landing on a downbeat `B`. A change is a list of gestures:
   "MUTE Kick на четвёртую долю: бочка уходит на такт перед новой частью",
   "Страница 2 (TRACK): бас", "MUTE Kick и Bass вернутся с сильной долей".
 
-**The end** — the owner decides (open question 1). Both options give the
-same moves, and the last return is at least 8 bars before the stop, so a
-stop never cancels a waiting return and the live mutes are 0 at the end.
-When the chain holds the whole song (Contains LSD, A Magician…, Are You
-Sponged) both are the same: the chain stops by itself.
+**The end (owner's decision).** The set ends on `setEnd`. For the
+performed mode the store keeps only the chain rows up to `setEnd` (Sham: 251
+rows of 256, the last row's repeats cut; `MidiClips.store(plan, { bars })`),
+and `SONG_END_STOP` stops the device exactly on that downbeat: no press,
+nothing timed. The last return is at least 8 bars before it, so the stop
+never cancels a waiting return and the live mutes are 0 at the end. When the
+chain holds the whole song (Contains LSD, A Magician…, Are You Sponged) the
+chain is not cut and stops by itself as today. The plain mode keeps its 256
+rows: `store(plan)` without options is today's function.
 
-- **Option B, shorter chain (recommended).** For the performed mode the
-  store keeps only the chain rows up to `setEnd` (Sham: 251 rows of 256, the
-  last row's repeats cut), and `SONG_END_STOP` stops the device exactly on
-  that downbeat. No press, nothing timed; the check asserts the exact bar.
-  The plain mode keeps its 256 rows.
-- **Option A, timed PLAY.** The chain stays at `plan.played` (256 rows);
-  the artist presses PLAY 60 ms before the downbeat of `setEnd`. On the core
-  the Stop goes out 34–36 ms before that downbeat on every song, and the
-  last 1/16 step's tail is cut by as much. It is a visible last gesture, but
-  it depends on the debounce and the UI pass, and the check must assert the
-  Stop's time.
+Alternatives not taken: the artist pressing PLAY 60 ms before the downbeat
+of `setEnd` with the chain kept whole (on the core the Stop went out 34–36
+ms early and its time depends on the debounce and the UI pass), and letting
+the chain run out mid-phrase (Sham: after bar 262).
 
 ## The page (`index.html`, `app.js`)
 
@@ -328,8 +326,7 @@ user's now). A reboot clears all of it.
 
 **`sim/test/midi_live_check.js` (new; in `sim/check.sh` after
 `midi_clips_check.js`; skipped with a message when the core lacks
-`quantMutes`).** All eight Twisted songs, each from boot, the end option
-chosen:
+`quantMutes`).** All eight Twisted songs, each from boot:
 
 1. Plain mode unchanged: `mutes(plan)` leaves the plan as it was (a deep
    compare); `show(plan, s)` has no `t0`/`end` and its actions are the first
@@ -342,8 +339,7 @@ chosen:
    plays in that span is muted; `change ≤ 2` in muted bars; one stretch; no
    tie at the edges; the spacing; the last return 8 bars before the end.
 3. The actions: after PLAY only `say`, `mute` (column 0–7), `edge` on
-   encoder 0 in whole detents (±8, summing to 0 by the end) and, under
-   option A, the final `play`; at most two MUTE downs within 100 ms, at most
+   encoder 0 in whole detents (±8, summing to 0 by the end); at most two MUTE downs within 100 ms, at most
    two columns apart; no press of a track between its previous press and
    that press's landing (from the actions: the core exposes no pending bits,
    and a cancelled change would fail 4 too).
@@ -355,8 +351,8 @@ chosen:
    plan's minus the cells of muted (track, bar), by step, channel and note
    (the multiset of `midi_clips_check.js`, where a re-struck tie counts as
    an extra), and nothing from the stop's downbeat on.
-6. The end: stopped on the planned downbeat (B: exactly; A: the Stop 0–60
-   ms before it), live mutes 0, no overruns, MIDI overflow or fatal.
+6. The end: stopped exactly on the planned downbeat (the stored chain
+   ends there), live mutes 0, no overruns, MIDI overflow or fatal.
 7. Page wiring, read from `app.js`'s source as `hands_unit.js` reads its
    panel (brittle by nature: it names the edit to make when it fails): in
    the performed branch `performed: true`, then `phase = 'prep'`, then
@@ -410,8 +406,8 @@ eight so: every check passed, peak 1.95 m/s, no crossings or palm overlaps,
 Scratch scripts outside the repository implemented the rules above (meters
 read from the files), built the shows with the seeded jitter, the gestures
 and the page turns, and ran them on the wasm core (`sim/build.sh web` in a
-worktree, emsdk linked from the main checkout) under both end options and
-under "let the chain run out". On all eight songs: every landing exact at
+worktree, emsdk linked from the main checkout) under three ends (the
+shortened chain, a timed PLAY, the chain run out). On all eight songs: every landing exact at
 −25 / +40 ms, the mask the script's at the middle of every bar, the notes
 the plan's minus the muted cells with nothing after the end, the stop where
 planned, live mutes 0, no overrun or fatal. `hands_check.js`'s checks
@@ -432,21 +428,15 @@ it to the other hand. Nobody has listened to the moves yet.
 - The meter rule needs `MidiSongs.read` to report FF 58 events; a file with
   a wrong or missing meter is treated as 4/4.
 
-## Open questions for the owner
+## What the owner decided (2026-11-25)
 
-1. **How the set ends** (on Sham: after bar 257, the last phrase line inside
-   the chain, instead of 262). Option B, the device's stored chain is cut at
-   that line and stops by itself (recommended: exact, nothing timed). Option
-   A, the artist presses PLAY just before that line, and the chain itself
-   still holds 262 bars. Or a third: let the chain run out at 262,
-   mid-phrase, as first described.
-2. **Hands not built at "Сыграть".** Default now: the page may build them
-   while the song loads (silent, the device stopped), up to 4 s; if that is
-   not enough, that one show gets the ring.
-3. **Derived moves only, or corrections by ear later?** Default: derived
-   only until someone has listened.
-4. **Density.** Default: keep the spacing (8 bars, 16 before a hats or snare
-   move). Sham gets 10 moves in 7 minutes, the longest gap 54 bars.
+1. The end: the stored chain is cut at the last phrase line inside it and
+   the device stops by itself (Sham: after bar 257). No timed PLAY.
+2. Hands not built at "Сыграть": the page may build them while the song
+   loads (the device stopped, silent), up to 4 s; otherwise that one show
+   gets the ring. Only in the performed mode.
+3. Derived moves only; corrections by ear wait until someone has listened.
+4. The spacing stays: returns 8 bars apart, 16 before a hats or snare move.
 
 ## Review changes
 
@@ -472,7 +462,7 @@ Confirmed and fixed:
   events). The meter rule and stretches; it keeps 11 moves outside them.
 - D7: the plain mode must not change. `show()` is opt-in; check 1.
 - D8, G4: the timed PLAY's margin and the ambiguous end. `setEnd` is
-  defined once; the end is open question 1 with both options measured.
+  defined once; the owner chose the shortened chain.
 - D9: "`buildable` unchanged" contradicted the recommended build. The build
   during `midi-loading` is now the default, with its gate.
 - D10: no check covered the page. Check 7.
