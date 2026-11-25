@@ -86,6 +86,11 @@ typedef struct {
 
 #define SHORT_ENUMS (sizeof(song_end_mode_t) == 1)
 _Static_assert(sizeof(old_song_t) == (SHORT_ENUMS ? 2316 : 2324), "legacy song ABI");
+_Static_assert(sizeof(((old_song_t *)0)->entries[0]) == 9, "legacy song row");
+_Static_assert(offsetof(old_song_t, length) == 2304, "legacy song ABI");
+_Static_assert(offsetof(old_song_t, end_mode) == (SHORT_ENUMS ? 2306 : 2308), "legacy song ABI");
+_Static_assert(offsetof(old_song_t, name) == (SHORT_ENUMS ? 2307 : 2312), "legacy song ABI");
+_Static_assert(offsetof(song_entry_v7_t, repeats) == 64, "v7 song row");
 _Static_assert(sizeof(song_entry_v7_t) == 65, "v7 song row");
 _Static_assert(sizeof(song_v7_t) == (SHORT_ENUMS ? 16652 : 16660), "v7 song ABI");
 _Static_assert(offsetof(song_v7_t, length) == 16640, "v7 song ABI");
@@ -97,6 +102,8 @@ _Static_assert(sizeof(pattern_v5_t) == 459 && sizeof(pattern_v6_t) == 972, "lega
 // Format 8: 384 rows of 68 bytes.
 _Static_assert(sizeof(song_t) == (SHORT_ENUMS ? 26124 : 26132), "v8 song ABI");
 _Static_assert(offsetof(song_t, length) == 26112, "v8 song ABI");
+_Static_assert(offsetof(song_t, end_mode) == (SHORT_ENUMS ? 26114 : 26116), "v8 song ABI");
+_Static_assert(offsetof(song_t, name) == (SHORT_ENUMS ? 26115 : 26120), "v8 song ABI");
 #define V5_PAT_BYTES    (sizeof(pattern_v5_t) * MAX_PATTERNS)
 #define V5_SONG_OFFSET  (PAT_OFFSET + PAGE_ROUND(V5_PAT_BYTES))
 #define V6_PAT_BYTES    (sizeof(pattern_v6_t) * MAX_PATTERNS)
@@ -194,6 +201,16 @@ static bool song_valid(const song_t *song) {
         }
     }
     return true;
+}
+
+// What a save holds and a load leaves past the song's rows and in their
+// padding: zeros. The song edits keep it so (song.c); this also clears what a
+// save made elsewhere left there. Called on the stopped sequencer's song.
+static void song_canonicalise(song_t *song) {
+    for (uint16_t i = 0; i < MAX_SONG_ENTRIES; i++) {
+        if (i >= song->length) memset(&song->entries[i], 0, sizeof(song->entries[i]));
+        else memset(song->entries[i]._pad, 0, sizeof(song->entries[i]._pad));
+    }
 }
 
 static bool song_v7_valid(const song_v7_t *song) {
@@ -343,6 +360,7 @@ static bool save_stopped(void) {
     if (g_seq.transport.state != TRANSPORT_STOPPED) return false;
 #ifndef MOCK_HARDWARE
     if (!payload_valid(g_seq.patterns, &g_seq.song, g_seq.kit_config)) return false;
+    song_canonicalise(&g_seq.song);
     // Build the 256-byte header page
     static store_header_t hdr;
     memset(&hdr, 0xFF, sizeof(hdr));    // 0xFF = erased flash default
@@ -415,6 +433,7 @@ static flash_load_t load_stopped(void) {
     }
     if (kind == IMAGE_V8) {
         memcpy(&g_seq.song, base + SONG_OFFSET, SONG_BYTES);
+        song_canonicalise(&g_seq.song);
         memcpy(g_seq.kit_config, base + KIT_OFFSET, KIT_BYTES);
     } else if (kind == IMAGE_V7) {
         // Field by field: a v7 row is 65 bytes, a v8 row 68.
@@ -446,6 +465,7 @@ static flash_load_t load_stopped(void) {
             sequencer_refresh_track_playback(track, pattern);
         }
     }
+    transport_song_loaded();
     resync_inputs();
     return current ? FLASH_LOAD_OK : FLASH_LOAD_OLD_SAVE;
 #else

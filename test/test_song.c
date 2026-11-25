@@ -119,6 +119,8 @@ TEST(test_song_full_chain_shifts) {
     ASSERT_TRUE(song_remove(0));                      /* 383 rows move down */
     ASSERT_EQ(g_seq.song.length, MAX_SONG_ENTRIES - 1);
     for (unsigned row = 0; row < MAX_SONG_ENTRIES - 1; row++) assert_full_row(row, row + 1);
+    static const song_entry_t empty;
+    ASSERT_EQ(memcmp(&g_seq.song.entries[MAX_SONG_ENTRIES - 1], &empty, sizeof(empty)), 0);  /* vacated */
     uint8_t first[NUM_TRACKS];
     for (unsigned t = 0; t < NUM_TRACKS; t++) first[t] = full_location(0, t);
     ASSERT_TRUE(song_insert_patterns(0, first, full_repeats(0)));  /* 383 rows move up */
@@ -136,6 +138,12 @@ TEST(test_song_full_chain_shifts) {
     for (unsigned t = 0; t < NUM_TRACKS; t++) last[t] = full_location(MAX_SONG_ENTRIES - 1, t);
     ASSERT_TRUE(song_insert_patterns(MAX_SONG_ENTRIES - 1, last, full_repeats(MAX_SONG_ENTRIES - 1)));
     for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) assert_full_row(row, row);
+
+    /* Cleared, no row keeps the old song. */
+    song_clear();
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) {
+        ASSERT_EQ(memcmp(&g_seq.song.entries[row], &empty, sizeof(empty)), 0);
+    }
 }
 
 /* song_move_rows() leaves what memmove leaves, either way round, for 0, 1

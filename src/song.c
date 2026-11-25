@@ -157,6 +157,7 @@ bool song_remove(uint16_t position) {
         song_move_rows(&g_seq.song.entries[position], &g_seq.song.entries[position + 1], count);
     }
     g_seq.song.length--;
+    uint16_t vacated = g_seq.song.length;
     transport_t *t = playing_song_transport();
     if (t && position < t->song_position) {
         t->song_position--;
@@ -167,6 +168,9 @@ bool song_remove(uint16_t position) {
         t->song_position = (position > 0) ? (uint16_t)(position - 1) : g_seq.song.length;
     }
     seq_unlock(lock_state);
+    // Rows past the length are Core 0's alone (Core 1 reads only the song's
+    // rows), and they stay zero, as a save writes them.
+    memset(&g_seq.song.entries[vacated], 0, sizeof(g_seq.song.entries[vacated]));
     return true;
 }
 
@@ -213,6 +217,8 @@ void song_clear(void) {
     g_seq.song.length = 0;
     g_seq.song.name[0] = '\0';
     seq_unlock(lock_state);
+    // Outside the lock, as in song_remove(): no row is the song's now.
+    memset(g_seq.song.entries, 0, sizeof(g_seq.song.entries));
 }
 
 void song_set_end_mode(song_end_mode_t mode) {

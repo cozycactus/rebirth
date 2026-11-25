@@ -281,6 +281,8 @@ void sequencer_core1_entry(void);
 void transport_start(void);
 void transport_stop(void);
 void transport_continue(void);
+// After a project load (stopped): the song position starts over in the new song.
+void transport_song_loaded(void);
 void transport_set_bpm(float bpm);
 void transport_set_mode(play_mode_t mode);
 void transport_set_launch_quant(launch_quant_t q);  // ignores q >= COUNT

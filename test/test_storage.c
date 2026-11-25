@@ -80,25 +80,32 @@ static void write_legacy_image(uint8_t version) {
         size_t stride = version == 6 ? sizeof(record) : sizeof(pattern_v5_t);
         memcpy(old + PAT_OFFSET + i * stride, &record, stride);
     }
-    old_song_t song = {0};
-    CHECK(g_seq.song.length <= OLD_SONG_ENTRIES);
-    song.length = g_seq.song.length;
-    song.end_mode = g_seq.song.end_mode;
-    memcpy(song.name, g_seq.song.name, sizeof(song.name));
-    for (unsigned i = 0; i < song.length; i++) {
-        memcpy(song.entries[i].pattern_index, g_seq.song.entries[i].pattern_index, OLD_TRACKS);
-        song.entries[i].repeats = g_seq.song.entries[i].repeats;
+    // The song record byte by byte, as the eight-track firmware laid it out
+    // (not from old_song_t): 256 rows of 8 locations and repeats, then length,
+    // end mode (one byte on the device, four on the host) and name.
+    CHECK(g_seq.song.length <= 256);
+    const bool short_enums = sizeof(song_end_mode_t) == 1;
+    const size_t song_bytes = short_enums ? 2316 : 2324;
+    uint8_t song[2324];
+    memset(song, 0, sizeof(song));
+    for (unsigned i = 0; i < g_seq.song.length; i++) {
+        memcpy(song + i * 9, g_seq.song.entries[i].pattern_index, OLD_TRACKS);
+        song[i * 9 + 8] = g_seq.song.entries[i].repeats;
     }
-    memcpy(old + (version == 6 ? V6_SONG_OFFSET : V5_SONG_OFFSET), &song, sizeof(song));
+    song[2304] = (uint8_t)g_seq.song.length;
+    song[2305] = (uint8_t)(g_seq.song.length >> 8);
+    song[short_enums ? 2306 : 2308] = (uint8_t)g_seq.song.end_mode;
+    memcpy(song + (short_enums ? 2307 : 2312), g_seq.song.name, 9);
+    memcpy(old + (version == 6 ? V6_SONG_OFFSET : V5_SONG_OFFSET), song, song_bytes);
     store_header_t *header = (store_header_t *)old;
     header->magic = MAGIC;
     header->version = version;
-    if (version == 5) header->checksum = payload_checksum_v5(old + PAT_OFFSET, &song);
+    if (version == 5) header->checksum = payload_checksum_v5(old + PAT_OFFSET, song);
     if (version == 6) {
         const size_t bytes = OLD_TRACKS * sizeof(kit_config_t);
         memcpy(old + V6_KIT_OFFSET, g_seq.kit_config, bytes);
         uint32_t crc = crc32_update(UINT32_MAX, old + PAT_OFFSET, V6_PAT_BYTES);
-        crc = crc32_update(crc, &song, sizeof(song));
+        crc = crc32_update(crc, song, song_bytes);
         header->checksum = ~crc32_update(crc, old + V6_KIT_OFFSET, bytes);
     }
 }
@@ -205,6 +212,7 @@ static void fill_project(bool with_kits) {
         p->name[5] = (char)('0' + i % 10);
     }
     song_clear();
+    memset(g_seq.song.entries, 0, sizeof(g_seq.song.entries));  // as a save leaves it
     for (uint8_t entry = 0; entry < 5; entry++) {
         uint8_t locations[NUM_TRACKS];
         for (uint8_t t = 0; t < NUM_TRACKS; t++) {
@@ -258,6 +266,17 @@ static bool patterns_equal(const pattern_t *a, const pattern_t *b) {
            a->length == b->length && a->swing == b->swing && strcmp(a->name, b->name) == 0;
 }
 
+// Every row past the song's is zero, and every row's padding.
+static bool song_canonical(const song_t *song) {
+    static const song_entry_t empty;
+    for (unsigned i = 0; i < MAX_SONG_ENTRIES; i++) {
+        const song_entry_t *e = &song->entries[i];
+        if (i >= song->length ? memcmp(e, &empty, sizeof(empty)) != 0
+                              : (e->_pad[0] | e->_pad[1] | e->_pad[2]) != 0) return false;
+    }
+    return true;
+}
+
 static bool songs_equal(const song_t *a, const song_t *b) {
     if (a->length != b->length || a->end_mode != b->end_mode || strcmp(a->name, b->name)) return false;
     for (unsigned i = 0; i < a->length; i++) {
@@ -294,6 +313,7 @@ static void check_migrated(uint8_t version) {
         song.entries[i].repeats = snap.song.entries[i].repeats;
     }
     CHECK(songs_equal(&g_seq.song, &song));
+    CHECK(song_canonical(&g_seq.song));     // rows 256-383 too, after a scribbled RAM
     kit_config_t defaults;
     kit_config_defaults(&defaults);
     for (uint8_t t = 0; t < NUM_TRACKS; t++) {
@@ -309,7 +329,7 @@ static void set_kit_tracks(uint8_t track_a, uint8_t track_b) {
     }
 }
 
-static void test_v7_round_trip(void) {
+static void test_round_trip(void) {
     set_kit_tracks(1, 4);
     g_seq.patterns[5].kit_steps[1][3] = kit_set(0, 2, 3);
     g_seq.patterns[31].kit_steps[4][15] = kit_set(kit_set(0, 0, 1), 7, 2);
@@ -406,26 +426,41 @@ static void test_v7_image(void) {
     write_v7_image();
     scribble_ram();
     CHECK(flash_storage_is_valid());
+    CHECK(v7_image_valid() && !v8_image_valid());
     CHECK(flash_storage_load() == FLASH_LOAD_OK);
     for (uint8_t i = 0; i < MAX_PATTERNS; i++) CHECK(patterns_equal(&g_seq.patterns[i], &snap.patterns[i]));
     CHECK(songs_equal(&g_seq.song, &snap.song));
+    CHECK(song_canonical(&g_seq.song));     // rows 256-383 and every row's padding
     CHECK(memcmp(g_seq.kit_config, snap.kits, sizeof(snap.kits)) == 0);
-    static const song_entry_t empty;
-    for (unsigned i = 256; i < MAX_SONG_ENTRIES; i++) {
-        CHECK(memcmp(&g_seq.song.entries[i], &empty, sizeof(empty)) == 0);
-    }
+
+    // A shorter format 7 song with old rows left past it in the record: they
+    // stay behind.
+    song_clear();
+    fill_song_rows(200);
+    ram_take();
+    write_v7_image();
+    memset(IMG + SONG_OFFSET + 200 * 65, 0x0B, 56 * 65);    // valid locations, stale
+    reseal_golden_v7();
+    scribble_ram();
+    CHECK(flash_storage_load() == FLASH_LOAD_OK);
+    CHECK(songs_equal(&g_seq.song, &snap.song));
+    CHECK(song_canonical(&g_seq.song));
+    fill_song_rows(256);
 
     // Damaged: a length past 256, a location out of range in row 255, an end
     // mode out of range (each resealed), a flipped byte (not resealed).
     uint8_t *song = IMG + SONG_OFFSET;
     const unsigned end_mode_at = sizeof(song_end_mode_t) == 1 ? 16642 : 16644;
-    for (int bad = 0; bad < 4; bad++) {
+    const unsigned name_end = sizeof(song_end_mode_t) == 1 ? 16651 : 16656;
+    for (int bad = 0; bad < 6; bad++) {
         write_v7_image();
         if (bad == 0) { song[16640] = 1; song[16641] = 1; }           // 257
         if (bad == 1) song[255 * 65 + 63] = MAX_PATTERNS;
         if (bad == 2) song[end_mode_at] = 2;
-        if (bad != 3) reseal_golden_v7();
-        else song[100 * 65 + 7] ^= 1;
+        if (bad == 3) song[name_end] = 'X';                              // name[8]
+        if (bad <= 3) reseal_golden_v7();
+        if (bad == 4) song[100 * 65 + 7] ^= 1;
+        if (bad == 5) IMG[V7_GOLDEN_KITS + 20] ^= 1;                     // a kit setting
         ram_take();
         CHECK(!flash_storage_is_valid());
         CHECK(flash_storage_load() == FLASH_LOAD_FAILED);
@@ -471,22 +506,40 @@ static void test_v8_full_song(void) {
     CHECK(flash_storage_load() == FLASH_LOAD_OK);
     CHECK(ram_unchanged());
 
-    // Damaged: a length past 384, a location out of range in row 383 (each
-    // resealed), a flipped byte in row 383, an unknown version.
+    // Damaged: a length past 384, a location out of range in row 383, a name
+    // without its NUL (each resealed), a flipped byte in row 383, an unknown
+    // version.
     song_t *img_song = (song_t *)(IMG + SONG_OFFSET);
-    for (int bad = 0; bad < 4; bad++) {
+    for (int bad = 0; bad < 5; bad++) {
         CHECK(flash_storage_save());
         if (bad == 0) img_song->length = MAX_SONG_ENTRIES + 1;
         if (bad == 1) img_song->entries[383].pattern_index[63] = MAX_PATTERNS;
-        if (bad <= 1) reseal_current();
-        if (bad == 2) img_song->entries[383].pattern_index[5] ^= 1;
-        if (bad == 3) ((store_header_t *)IMG)->version = 9;
+        if (bad == 2) img_song->name[8] = 'X';
+        if (bad <= 2) reseal_current();
+        if (bad == 3) img_song->entries[383].pattern_index[5] ^= 1;
+        if (bad == 4) ((store_header_t *)IMG)->version = 9;
         CHECK(!flash_storage_is_valid());
         CHECK(flash_storage_load() == FLASH_LOAD_FAILED);
         CHECK(ram_unchanged());
     }
 
-    // A save cut short erased the format 7 save it replaced: no save is left.
+    // A save writes no stale rows: cleared, the whole song record is zero
+    // but its trailer. A save that holds them (made elsewhere) loads without.
+    song_clear();
+    CHECK(flash_storage_save());
+    for (unsigned i = 0; i < MAX_SONG_ENTRIES * sizeof(song_entry_t); i++) CHECK(IMG[SONG_OFFSET + i] == 0);
+    fill_song_rows(10);
+    ram_take();
+    CHECK(flash_storage_save());
+    img_song->entries[3]._pad[1] = 7;
+    memset(&img_song->entries[50], 0x0B, sizeof(song_entry_t));
+    reseal_current();
+    scribble_ram();
+    CHECK(flash_storage_load() == FLASH_LOAD_OK);
+    CHECK(songs_equal(&g_seq.song, &snap.song) && song_canonical(&g_seq.song));
+
+    // A format 8 save cut short (here, over a format 7 one) leaves neither a
+    // format 8 nor a format 7 save: the save erased the slot first.
     song_clear();
     fill_song_rows(200);
     write_v7_image();
@@ -497,6 +550,36 @@ static void test_v8_full_song(void) {
     fake_flash_program_limit = UINT32_MAX;
     CHECK(!flash_storage_is_valid());
     CHECK(flash_storage_load() == FLASH_LOAD_FAILED);
+}
+
+// A load stopped in the middle of a longer song: Continue starts the loaded
+// song from its first row instead of refusing a position past its end.
+static void test_continue_after_loading_a_shorter_song(void) {
+    no_old_save();
+    fill_project(false);
+    fill_song_rows(100);
+    CHECK(flash_storage_save());
+    fill_song_rows(MAX_SONG_ENTRIES);
+    transport_set_mode(PLAY_MODE_SONG);
+    uint32_t lock = seq_lock();
+    g_seq.transport.song_position = 300;
+    g_seq.transport.song_repeat_count = 9;
+    seq_unlock(lock);
+    CHECK(flash_storage_load() == FLASH_LOAD_OK);
+    CHECK(g_seq.song.length == 100);
+    CHECK(g_seq.transport.song_position == 0);
+    CHECK(g_seq.transport.song_repeat_count == g_seq.song.entries[0].repeats);
+    CHECK(memcmp((const void *)g_seq.transport.current_pattern, g_seq.song.entries[0].pattern_index, NUM_TRACKS) == 0);
+    transport_continue();
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    transport_stop();
+    // In Pattern mode only the song position is cleared.
+    transport_set_mode(PLAY_MODE_PATTERN);
+    lock = seq_lock();
+    g_seq.transport.song_position = 300;
+    seq_unlock(lock);
+    CHECK(flash_storage_load() == FLASH_LOAD_OK);
+    CHECK(g_seq.transport.song_position == 0 && g_seq.transport.song_repeat_count == 0);
 }
 
 // ─── A current slot with no valid save, next to an old save ────
@@ -773,16 +856,17 @@ int main(void) {
     fake_before_lockout = NULL;
     test_save_resyncs_panel_input();
     test_load_resyncs_panel_input();
-    test_v7_round_trip();
+    test_round_trip();
     test_legacy_images();
     test_v7_image();
     test_v8_full_song();
+    test_continue_after_loading_a_shorter_song();
     test_load_falls_back_on_the_old_save();
     test_v6_rejections();
     test_copies_one_pattern_per_lock_section();
     puts("PASS storage round-trip, playback guard, checksum, legacy validation, "
          "interrupted save, late MIDI before erase, resync after save and load, "
-         "v6 kits, v4/v5/v6 migration, a format 7 save, a full format 8 song, fallback on the old save, v6 rejections, "
+         "v6 kits, v4/v5/v6 migration, a format 7 save, a full format 8 song, Continue after a load, fallback on the old save, v6 rejections, "
          "one pattern per lock section");
     return 0;
 }
