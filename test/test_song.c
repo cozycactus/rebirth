@@ -138,6 +138,35 @@ TEST(test_song_full_chain_shifts) {
     for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) assert_full_row(row, row);
 }
 
+/* song_move_rows() leaves what memmove leaves, either way round, for 0, 1
+ * and all but one of the rows. */
+TEST(test_song_move_rows_matches_memmove) {
+    static song_entry_t got[MAX_SONG_ENTRIES], want[MAX_SONG_ENTRIES];
+    static const unsigned counts[] = {0, 1, 2, MAX_SONG_ENTRIES - 1};
+    for (unsigned c = 0; c < sizeof(counts) / sizeof(counts[0]); c++) {
+        for (int up = 0; up < 2; up++) {
+            for (unsigned i = 0; i < sizeof(got); i++) ((uint8_t *)got)[i] = (uint8_t)(i * 13 + 5);
+            memcpy(want, got, sizeof(got));
+            unsigned n = counts[c];
+            if (up) {
+                song_move_rows(&got[1], &got[0], (uint16_t)n);
+                memmove(&want[1], &want[0], n * sizeof(song_entry_t));
+            } else {
+                song_move_rows(&got[0], &got[1], (uint16_t)n);
+                memmove(&want[0], &want[1], n * sizeof(song_entry_t));
+            }
+            ASSERT_EQ(memcmp(got, want, sizeof(got)), 0);
+        }
+    }
+    /* Further apart, and onto itself. */
+    for (unsigned i = 0; i < sizeof(got); i++) ((uint8_t *)got)[i] = (uint8_t)(i * 7);
+    memcpy(want, got, sizeof(got));
+    song_move_rows(&got[100], &got[3], 200);
+    memmove(&want[100], &want[3], 200 * sizeof(song_entry_t));
+    song_move_rows(&got[5], &got[5], 10);
+    ASSERT_EQ(memcmp(got, want, sizeof(got)), 0);
+}
+
 /* A row written over old bytes still has its padding 0. */
 TEST(test_song_rows_are_written_whole) {
     reset_song();
@@ -523,6 +552,7 @@ int main(void) {
     RUN(test_song_append_full);
     RUN(test_song_full_chain_shifts);
     RUN(test_song_rows_are_written_whole);
+    RUN(test_song_move_rows_matches_memmove);
 
     /* song_insert */
     RUN(test_song_insert_at_start);

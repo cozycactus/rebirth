@@ -1,4 +1,5 @@
 #include <string.h>
+#include "pico/stdlib.h"
 #include "sequencer.h"
 #include "kit.h"
 
@@ -15,6 +16,32 @@ pattern_t *seq_playing_pattern(uint8_t track) {
 }
 
 // ─── Song editing ───────────────────────────────────────────────
+
+// A list edit shifts every row after the edit point with Core 0's interrupts
+// off (seq_lock), and Core 1's timer waits on the lock every pulse. The rows
+// are whole words, so each is copied as 17 word loads and stores, from RAM and
+// never inlined into a caller in flash; the C library's memmove copies these
+// rows a byte at a time. A row's source and destination never overlap (a shift
+// is at least one row), so only the order of the rows depends on the overlap.
+// GCC must not turn the copy back into a memmove call or vectorise it.
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("no-tree-loop-distribute-patterns", "no-tree-vectorize")))
+#endif
+void __no_inline_not_in_flash_func(song_move_rows)(song_entry_t *dst, const song_entry_t *src,
+                                                   uint16_t rows) {
+    if (!rows || dst == src) return;
+    if (dst < src) {
+        for (uint16_t r = 0; r < rows; r++) {
+#pragma GCC unroll 17
+            for (unsigned w = 0; w < SONG_ROW_WORDS; w++) dst[r].words[w] = src[r].words[w];
+        }
+    } else {
+        for (uint16_t r = rows; r--;) {
+#pragma GCC unroll 17
+            for (unsigned w = 0; w < SONG_ROW_WORDS; w++) dst[r].words[w] = src[r].words[w];
+        }
+    }
+}
 
 // While Song mode plays, list edits keep the playing entry where it is, so the
 // entry that follows it in the edited list plays next. Caller holds seq_lock.
@@ -83,9 +110,7 @@ bool song_insert_patterns(uint16_t position, const uint8_t pattern_index[NUM_TRA
     // Shift entries after position
     uint16_t count = g_seq.song.length - position;
     if (count > 0) {
-        memmove(&g_seq.song.entries[position + 1],
-                &g_seq.song.entries[position],
-                count * sizeof(song_entry_t));
+        song_move_rows(&g_seq.song.entries[position + 1], &g_seq.song.entries[position], count);
     }
 
     song_entry_t *e = &g_seq.song.entries[position];
@@ -108,9 +133,7 @@ bool song_remove(uint16_t position) {
 
     uint16_t count = g_seq.song.length - position - 1;
     if (count > 0) {
-        memmove(&g_seq.song.entries[position],
-                &g_seq.song.entries[position + 1],
-                count * sizeof(song_entry_t));
+        song_move_rows(&g_seq.song.entries[position], &g_seq.song.entries[position + 1], count);
     }
     g_seq.song.length--;
     transport_t *t = playing_song_transport();
@@ -140,13 +163,11 @@ bool song_move(uint16_t from, uint16_t to) {
     song_entry_t tmp = g_seq.song.entries[from];
 
     if (from < to) {
-        memmove(&g_seq.song.entries[from],
-                &g_seq.song.entries[from + 1],
-                (to - from) * sizeof(song_entry_t));
+        song_move_rows(&g_seq.song.entries[from], &g_seq.song.entries[from + 1],
+                       (uint16_t)(to - from));
     } else {
-        memmove(&g_seq.song.entries[to + 1],
-                &g_seq.song.entries[to],
-                (from - to) * sizeof(song_entry_t));
+        song_move_rows(&g_seq.song.entries[to + 1], &g_seq.song.entries[to],
+                       (uint16_t)(from - to));
     }
     g_seq.song.entries[to] = tmp;
     transport_t *t = playing_song_transport();
