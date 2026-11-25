@@ -4,7 +4,9 @@
 # unless `quick`, the artist check (every song in every arrangement); then,
 # when the firmware follows an external clock, the clock check; and, also
 # unless `quick`, the hands' unit and whole-show checks, once (every song in
-# every arrangement in all four scores: the hands need only artist.js).
+# every arrangement in all four scores: the hands need only artist.js,
+# and the eight Twisted songs performed with MUTE over their clips). The
+# MIDI checks run first, the live MUTE one included (midi_live_check.js).
 #   sim/check.sh          - all of it, seconds per score
 #   sim/check.sh quick    - the device check only
 # Which scores fit is read from the core, as the page does (app.js, initKeyboard):
@@ -19,13 +21,15 @@ node sim/test/sh101_check.js
 node sim/test/sh101_rom_check.js
 node sim/test/midi_song_check.js
 node sim/test/midi_clips_check.js
+node sim/test/midi_live_check.js
 node sim/test/session64_check.js
 
-# The first word is 1 when MUTE waits for the launch point, the rest the scores.
+# The first word is 1 when MUTE waits for the launch point, the second the
+# Song-mode chain's rows (256 in a core without the export), the rest the scores.
 CAN=$(node -e '
   require("./sim/web/core.js")().then(core => {
     const f = core._sim_features ? core._sim_features() : 0;
-    const last = !!(f & 1), out = [f & 8 ? 1 : 0];
+    const last = !!(f & 1), out = [f & 8 ? 1 : 0, core._sim_song_entries ? core._sim_song_entries() : 256];
     if (!last) out.push("base");
     if (last) out.push("fw2");
     if (last && (f & 2)) out.push("keys");
@@ -34,7 +38,8 @@ CAN=$(node -e '
   });')
 set -- $CAN
 QMUTE=$1
-shift
+ROWS=$2
+shift 2
 SCORES="$*"
 echo "scores this firmware takes: $SCORES$( [ "$QMUTE" = 1 ] && echo ', each with QMUTE=1 (MUTE waits for the launch point)')"
 
@@ -73,7 +78,7 @@ if [ "$MODE" != quick ]; then
     echo "── hands: whole-show check"
     LOG=sim/build/hands.log
     mkdir -p sim/build
-    if env QMUTE="$QMUTE" node sim/test/hands_check.js > "$LOG" 2>&1; then
+    if env QMUTE="$QMUTE" ROWS="$ROWS" node sim/test/hands_check.js > "$LOG" 2>&1; then
         tail -1 "$LOG"
     else
         # The first failures and the summary (FAIL… and FAILED:), not the

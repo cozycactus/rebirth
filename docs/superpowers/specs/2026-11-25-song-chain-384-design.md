@@ -241,17 +241,14 @@ flash map is the same on every board.
 
 ## Order with PR #31 (`claude/sham-live`)
 
-PR #31 rewrites `store()`/`show()` around `chain()`, which holds the one
-`entries.slice(0, 256)`, and adds `midi_live_check.js`, which tests a chain cut
-short (Sham's set ends on bar 257, `:86`; "256 rows stored", `:137`). This
-branch stays on `origin/master`; its simulator work is one commit, last. If #31
-merges first, that commit is rebased: `chain()` slices `p.rows`, its tests build
-plans with `rows: 256`, and `midi_live_check.js` reads the trailer from
-`layoutFor(256)`. A trial merge (`git merge-tree`) conflicts in three files:
-`midi_clips.js` (the plan's return fields, `store()` beside the new `chain()`,
-the song record writes, `show()`'s caption, the exported `api`), `app.js` (the
-plan and `writeStore` in the pads launch, the "вошли … строк" log line) and
-`sim/README.md` (the chain paragraph).
+PR #31 (the live MUTE set) merged first (c70c7aa); this branch merged master
+in (no rebase: the branch is published). `chain()` slices `p.rows`; `store()`
+writes the plan's layout; `plan()` carries `rows`, `ppqn` and `meters`; the
+page plans with `device.songEntries()` and keeps #31's order and gates.
+`midi_live_check.js` takes the core's rows: at 384 every song plays whole and
+its set runs to the song's end (Sham: 14 moves to bar 361); the cut path keeps
+a 256-row Sham (10 moves, set end 257, a version 7 image performed on the new
+core). `hands_check.js` plans with the rows `sim/check.sh` reads from the core.
 
 ## Tests
 

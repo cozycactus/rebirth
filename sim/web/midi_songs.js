@@ -19,7 +19,7 @@
     if (format > 1 || !ppqn || ppqn & 0x8000 || !count || count > 256 || (format === 0 && count !== 1) ||
         headerEnd < 14 || headerEnd > bytes.length) throw Error('Нужен MIDI формата 0 или 1 с PPQN.');
     let pos = headerEnd;
-    const tempos = [], events = [], tracks = [];
+    const tempos = [], events = [], tracks = [], meters = [];
     let duration = 0;
     for (let track = 0; track < count; track++) {
       if (pos + 8 > bytes.length || view.getUint32(pos) !== 0x4d54726b) throw Error('Нет дорожки MTrk ' + track + '.');
@@ -57,6 +57,11 @@
           const size = variable();
           if (pos + size > end) throw Error('Оборванное метасобытие MIDI.');
           if (meta === 0x03) title = decoder.decode(bytes.subarray(pos, pos + size)).trim() || title;
+          // A time signature as written; one that makes no bar (numerator 0,
+          // denominator past 1/64) is left out.
+          if (meta === 0x58 && size >= 2 && bytes[pos] > 0 && bytes[pos + 1] <= 6) {
+            meters.push({ tick, num: bytes[pos], den: 2 ** bytes[pos + 1] });
+          }
           if (meta === 0x51 && size === 3) {
             const us = bytes[pos] * 65536 + bytes[pos + 1] * 256 + bytes[pos + 2];
             if (us) tempos.push({ tick, track, us });
@@ -105,7 +110,8 @@
     for (const event of events) event.t = timeAt(event.tick);
     const title = name.replace(/\.midi?$/i, '');
     return { id: title, title, duration: timeAt(duration), lastTick: duration, bpm: 60000000 / map[0].us,
-      ppqn, timeAt, tempos: map, tracks, events };
+      ppqn, timeAt, tempos: map, tracks, events,
+      meters: meters.sort((a, b) => a.tick - b.tick) };   // time signatures (FF 58), as in the file
   }
 
   const normalized = name => name.trim().normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();

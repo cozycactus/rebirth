@@ -479,6 +479,14 @@ DeepSeek) led to one fix wave. What it changed against the text above:
   The check plans 240 shows; the preparation's speed bound is 9 m/s (two of
   the new songs reach 8.00 and 8.33 m/s there, the old ones 7.90), the live
   set's still 4 m/s.
+- 2026-11-25, `2026-11-25-sham-live-mutes-design.md`: the hands also play
+  the performed clips mode ("Клипы на падах · артист играет MUTE"): its
+  loading and MUTE performance are one show at speed 1 with a plan, and the
+  hands may be built while it loads, before anything is scheduled. The
+  plain clips mode and a MIDI Song still get none, and the build still
+  never runs while either plays. (`index.html` now has 13 script tags, the
+  count `publish.sh` takes from `PAGE_FILES` less `LOADED_BY_APP`; the 12
+  above was the count at the time.)
 
 ## Left to the builder
 
