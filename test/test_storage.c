@@ -110,7 +110,7 @@ static void reseal_golden_v7(void) {
 }
 
 // Recompute the current checksum after a test edited the image.
-static void reseal_v7(void) {
+static void reseal_current(void) {
     store_header_t *header = (store_header_t *)IMG;
     header->checksum = payload_checksum(IMG + PAT_OFFSET, IMG + SONG_OFFSET, IMG + KIT_OFFSET);
 }
@@ -450,6 +450,55 @@ static void test_v7_image(void) {
     check_migrated(6);
 }
 
+// A full 384-row song saves as format 8 and loads back byte for byte, padding
+// included; a damaged one is no save.
+static void test_v8_full_song(void) {
+    no_old_save();
+    fill_project(true);
+    fill_song_rows(MAX_SONG_ENTRIES);
+    CHECK(!song_append(0, 1));
+    CHECK(flash_storage_save());
+    CHECK(((store_header_t *)IMG)->version == 8);
+    const song_t *saved = (const song_t *)(IMG + SONG_OFFSET);
+    CHECK(saved->length == MAX_SONG_ENTRIES);
+    for (unsigned i = 0; i < MAX_SONG_ENTRIES; i++) {
+        const uint8_t *row = IMG + SONG_OFFSET + i * 68;
+        CHECK(row[64] == g_seq.song.entries[i].repeats);
+        CHECK(row[65] == 0 && row[66] == 0 && row[67] == 0);
+    }
+    ram_take();
+    scribble_ram();
+    CHECK(flash_storage_load() == FLASH_LOAD_OK);
+    CHECK(ram_unchanged());
+
+    // Damaged: a length past 384, a location out of range in row 383 (each
+    // resealed), a flipped byte in row 383, an unknown version.
+    song_t *img_song = (song_t *)(IMG + SONG_OFFSET);
+    for (int bad = 0; bad < 4; bad++) {
+        CHECK(flash_storage_save());
+        if (bad == 0) img_song->length = MAX_SONG_ENTRIES + 1;
+        if (bad == 1) img_song->entries[383].pattern_index[63] = MAX_PATTERNS;
+        if (bad <= 1) reseal_current();
+        if (bad == 2) img_song->entries[383].pattern_index[5] ^= 1;
+        if (bad == 3) ((store_header_t *)IMG)->version = 9;
+        CHECK(!flash_storage_is_valid());
+        CHECK(flash_storage_load() == FLASH_LOAD_FAILED);
+        CHECK(ram_unchanged());
+    }
+
+    // A save cut short erased the format 7 save it replaced: no save is left.
+    song_clear();
+    fill_song_rows(200);
+    write_v7_image();
+    CHECK(flash_storage_load() == FLASH_LOAD_OK);
+    fake_flash_programs = 0;
+    fake_flash_program_limit = 2;
+    CHECK(!flash_storage_save());
+    fake_flash_program_limit = UINT32_MAX;
+    CHECK(!flash_storage_is_valid());
+    CHECK(flash_storage_load() == FLASH_LOAD_FAILED);
+}
+
 // ─── A current slot with no valid save, next to an old save ────
 // A save cut short leaves the current slot looking exactly like one that was
 // never written, so the two cannot be told apart. Whenever the current slot
@@ -538,7 +587,7 @@ static void test_v6_rejections(void) {
         CHECK(flash_storage_save());
         ram_take();
         apply_bad(which, img_patterns(), img_kits());
-        reseal_v7();
+        reseal_current();
         CHECK(!flash_storage_is_valid());
         CHECK(!flash_storage_load());
         CHECK(ram_unchanged());
@@ -727,12 +776,13 @@ int main(void) {
     test_v7_round_trip();
     test_legacy_images();
     test_v7_image();
+    test_v8_full_song();
     test_load_falls_back_on_the_old_save();
     test_v6_rejections();
     test_copies_one_pattern_per_lock_section();
     puts("PASS storage round-trip, playback guard, checksum, legacy validation, "
          "interrupted save, late MIDI before erase, resync after save and load, "
-         "v6 kits, v4/v5/v6 migration, a format 7 save, fallback on the old save, v6 rejections, "
+         "v6 kits, v4/v5/v6 migration, a format 7 save, a full format 8 song, fallback on the old save, v6 rejections, "
          "one pattern per lock section");
     return 0;
 }

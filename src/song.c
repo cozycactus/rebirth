@@ -48,6 +48,7 @@ bool song_append_patterns(const uint8_t pattern_index[NUM_TRACKS], uint8_t repea
     }
 
     song_entry_t *e = &g_seq.song.entries[g_seq.song.length];
+    memset(e, 0, sizeof(*e));
     memcpy(e->pattern_index, pattern_index, sizeof(e->pattern_index));
     e->repeats = repeats;
     g_seq.song.length++;
@@ -87,10 +88,10 @@ bool song_insert_patterns(uint16_t position, const uint8_t pattern_index[NUM_TRA
                 count * sizeof(song_entry_t));
     }
 
-    memcpy(g_seq.song.entries[position].pattern_index,
-           pattern_index,
-           sizeof(g_seq.song.entries[position].pattern_index));
-    g_seq.song.entries[position].repeats = repeats;
+    song_entry_t *e = &g_seq.song.entries[position];
+    memset(e, 0, sizeof(*e));
+    memcpy(e->pattern_index, pattern_index, sizeof(e->pattern_index));
+    e->repeats = repeats;
     g_seq.song.length++;
     transport_t *t = playing_song_transport();
     if (t && position <= t->song_position) t->song_position++;
