@@ -138,19 +138,21 @@ pickup bar, and the kick enters on bar 34 (1-based), the hats on 42.
 
 **The set end.** `setEnd` is where the performance ends: when the chain
 holds the whole song, `plan.played`; when it is cut short, the last phrase
-line at or before `plan.played` (Sham: chain bar 257, so the last bar heard
-is bar 257; the chain alone would play to 262). Open question 1 decides how
-the device stops there; the moves are the same either way.
+line at or before `plan.played`, if that line is in the chain's last 8 bars
+(Sham: chain bar 257, so the last bar heard is bar 257; the chain alone
+would play to 262). Without such a line (the song's end is not in 4/4) the
+chain is not cut further: `setEnd` is `plan.played`, never 0.
 
-**Groups (call)**, by role and General MIDI note, never the gate role, only
-on pages 1–2:
+**Groups (call)**, by role and General MIDI note over every track (a `+2`
+continuation included), never the gate role. A move that would mute a track
+past page 2 is not made, so a group is never muted in part:
 
 | Group | Tracks | Sham |
 |---|---|---|
-| kick | role `kick` on page 1 | 1 |
-| hats | drum notes 42, 44, 46 on page 1 | 5 Hats CH, 6 Hats OH |
-| snare | drum notes 38, 40 on page 1, names without "fill" | 2 Snares |
-| bass | role `bass` on page 2 | 10 Bass |
+| kick | role `kick` | 1 |
+| hats | drum notes 42, 44, 46 | 5 Hats CH, 6 Hats OH |
+| snare | drum notes 38, 40, names without "fill" | 2 Snares |
+| bass | role `bass` | 10 Bass |
 
 Every Twisted song puts its kick on track 1, its hats and snare on page 1
 and its bass on page 2 (tracks 9–14).
@@ -211,7 +213,7 @@ then the intro to bar 40. All eight songs:
 | Song | Moves | MUTE presses | TRACK turns | Max presses in a bar |
 |---|---|---|---|---|
 | Contains LSD | 7 | 20 | 0 | 2 |
-| The Synths of Orpheus | 15 | 36 | 4 | 3 |
+| The Synths of Orpheus | 15 | 34 | 2 | 3 |
 | Centaurs Are Real | 15 | 36 | 0 | 2 |
 | A Magician Nevers Reveals His Tricks | 9 | 26 | 2 | 2 |
 | It's a Sham, Man | 10 | 26 | 4 | 2 |
@@ -462,6 +464,60 @@ it to the other hand. Nobody has listened to the moves yet.
   with no ring; the plain clips mode on the same page showed the ring and
   no hands. No console error but the page's known 404s (`favicon.ico`,
   `local-songs/twisted/catalog.json`).
+
+### Code review (DeepSeek DS1–DS14, Grok G1–G5)
+
+Confirmed and fixed:
+
+- DS6, G1: a superseded start cleared the next start's hands window
+  (`buildDuringLoad = 0` unconditionally). Now only its own window, on the
+  throw path too; the browser run below stops a performed start during its
+  load and starts again: the hands still build in the second load.
+- DS2, G2: a time signature with numerator 0 or a huge denominator hung
+  `mutes()`. `MidiSongs.read` drops such meters; `mutes()` skips any that
+  makes no bar and caps each meter at the chain's end. Made-up meters in
+  the check.
+- DS1: groups were page-filtered, so a part with a voice past page 2 could
+  be muted in part. Groups now span every track, and a move with a track
+  past page 2 is not made. Not only imported songs: Orpheus' drop back on
+  bar 42 had left "Dist Bass Seq 1" (track 30) playing; it is a kick roll
+  now (Orpheus: 34 MUTE presses, 2 page turns). A change turns the page
+  whenever it needs one other than the one shown. Made-up `+2` hats on
+  pages 2 and 3 in the check.
+- DS3: an odd-meter song could be cut to `setEnd = 0`. The chain is cut
+  only at a phrase line in its last 8 bars; a long 5/4 song in the check
+  keeps its 256 rows.
+- DS4, DS13: the checks now require every scripted move to be kept
+  (`midi_live_check.js` and `hands_check.js`), and `hands_check.js` sums
+  every column for the performed shows.
+- DS5: "never half a group" is checked with groups built apart from
+  `mutes()`, plus Sham's groups as a fixture.
+- DS7, G5: the new page's keys came 83 ms after the last TRACK edge; now 80.
+- DS8: the plain image is taken before `mutes()` runs. Also compared once
+  against origin/master's `midi_clips.js`: `store(plan)` and `show(plan,
+  start)` are byte for byte the same for all eight songs.
+- DS9, G4 (in part): the source check now follows the whole performed
+  branch in order (the mode, the window, the voices, the 4 s race, the
+  window's conditional clear, the superseded-start stop, `if (performed)`
+  around `generation++` and `planHands()`, the catch path) and the option's
+  `quantMutes` gate.
+- DS10: endShow now stops the channel voices of a start still waiting for
+  the hands (`loadingPlayer`).
+- DS11: the loading caption names the chain as stored (Sham: 251 rows,
+  257 bars).
+- DS12: each press is checked to be 60 ms before its downbeat, and `end`
+  exactly 1.5 s after the chain.
+- DS14, G4: the PASS line says when the core part was skipped.
+- G3: the log says why a song has no MUTE part (no kick on pages 1–2, no
+  4/4, no move through the rules, or none fits the tempo).
+
+Refuted: none. Partly: G4's "the source check does not prove the page"
+stands in principle (it reads text); the behaviour was run in the browser.
+
+After the fixes: `sim/check.sh` passed (2 min 44 s; `hands_check.js` 248
+shows, 40 posed, 124 s), and the browser run repeated the loading, the
+kick roll on bar 41, the drop's page turn and bars 88–89, and the plain
+mode's ring, plus the stop-and-restart during the load.
 
 ## Review changes
 

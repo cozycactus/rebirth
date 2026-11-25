@@ -249,17 +249,19 @@ finished track. The moves come from the layout (`MidiClips.mutes`, spec
   **drop** (kick and bass out for the two bars before a big one, at most one
   every 64 bars), a **hats cut** (four bars) or the **snare out** (two bars)
   inside a steady groove, taken in turn.
-- A move mutes every track of its group that plays from the bar the key is
-  pressed in to the return, and each of them must play in all of those
-  bars; no section change inside it, no tied note at its edges; returns at
+- A move mutes every track of its group (by role or drum note, a `+2`
+  continuation too) that plays from the bar the key is pressed in to the
+  return, and each of them must play in all of those bars and sit on pages
+  1–2; no section change inside it, no tied note at its edges; returns at
   least 8 bars apart (16 before a hats or snare move), none in the last 8.
+  A time signature that makes no bar counts as 4/4.
 - The keys are pressed on beat 4 of the bar before (beat 2 for a page turn,
   or for the return of a one-bar move) with a little jitter; the quantised
   MUTE lands them on the downbeat. The bass is on page 2: a drop turns TRACK
   by 8 tracks and back.
-- A chain cut short at 256 rows is cut further at its last phrase line, so
-  the device stops itself on a phrase (Sham: after bar 257). The plain mode
-  keeps its 256 rows.
+- A chain cut short at 256 rows is cut further at its last phrase line (if
+  that line is in its last 8 bars), so the device stops itself on a phrase
+  (Sham: after bar 257). The plain mode keeps its 256 rows.
 
 Sham gets 10 moves (26 MUTE presses, 4 page turns), the eight songs 7–15.
 The hands play this mode, loading included. `sim/test/midi_live_check.js`
