@@ -35,7 +35,13 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
   const selector = () => tap(down => device.encoderSwitch(1, down), 700000);
   // The chain length and save layout this core has (384 rows, version 8).
   assert.equal(device.songEntries(), 384, 'the core reports its chain length');
-  assert.equal(Device.prototype.songEntries.call({ core: {} }), 256, 'a core without the export holds 256 rows');
+  // Device's fallback only (no older wasm core is run here): a core without
+  // the export is taken for 256 rows.
+  assert.equal(Device.prototype.songEntries.call({ core: {} }), 256, 'Device reads a missing export as 256 rows');
+  assert.throws(() => MidiClips.layoutFor(512), 'no other chain length');
+  assert.throws(() => MidiClips.layoutFor('256'), 'a number, not a string');
+  assert.throws(() => MidiClips.layoutFor('toString'), 'no inherited key');
+  assert.equal(MidiClips.plan(songs[0]).rows, 384, 'plan() lays out for 384 rows unless told');
   const L = MidiClips.layoutFor(device.songEntries());
 
   // 1. The layout: a save the firmware writes itself reads back with these
@@ -217,7 +223,7 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
   //    in the song editor), a pad picks a part's clip and PLAY plays it on
   //    that part's channel.
   {
-    const plan = plans[4];
+    const plan = sham256;                      // the plan section 3 loaded last
     const long = enc => tap(down => device.encoderSwitch(enc, down), 700000);
     long(1);                                   // VALUE long: SELECT PATTERN
     long(0);                                   // TRACK long: the song editor

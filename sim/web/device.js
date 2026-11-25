@@ -172,6 +172,7 @@
     inspect() {
       const c = this.core;
       const fatal = c._sim_dbg_fatal();
+      const song = c._sim_dbg_song ? c._sim_dbg_song() : -1;
       return {
         state: c._sim_dbg_transport_state(),
         bpm: c._sim_dbg_bpm(),
@@ -191,8 +192,8 @@
         extBpm: c._sim_dbg_ext_tenths ? c._sim_dbg_ext_tenths() / 10 : 0,
         extLosses: c._sim_dbg_ext_losses ? c._sim_dbg_ext_losses() : 0,
         // The Song-mode chain (absent in an older core): its rows and the row playing.
-        songLength: c._sim_dbg_song ? c._sim_dbg_song() & 0xffff : -1,
-        songPosition: c._sim_dbg_song ? c._sim_dbg_song() >>> 16 : -1,
+        songLength: song < 0 ? -1 : song & 0xffff,
+        songPosition: song < 0 ? -1 : song >>> 16,
         fatal: fatal ? c.UTF8ToString(fatal) : null,
       };
     }

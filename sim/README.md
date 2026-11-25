@@ -228,8 +228,10 @@ image is for the simulator only: a song for the board needs that layout
 (and a way to put it there, as the MIDI Song UF2 does for its slot).
 
 `sim/test/midi_clips_check.js` checks the save layout against one the
-firmware writes, LOAD of every Twisted song, and that two of them, one
-longer than the chain, sound every note start at its step on its channel,
+firmware writes, LOAD of every Twisted song at 384 rows, SAVE after a load,
+and that two of them (Contains LSD; Sham whole, and again cut at 256 rows from
+a version 7 image through the format 7 fallback) sound every note start at
+its step on its channel,
 as the plan has it and as the MIDI file has it, read apart: some note of
 each part at each of its steps, and no note the file does not start there.
 It also launches another clip from a part's pad after the chain and hears

@@ -31,7 +31,7 @@
   const STORE_BYTES = 192 * 1024;
   const FORMATS = { 256: { VERSION: 7, ROW_BYTES: 65 }, 384: { VERSION: 8, ROW_BYTES: 68 } };
   function layoutFor(rows) {
-    const f = FORMATS[rows];
+    const f = typeof rows === 'number' && Object.prototype.hasOwnProperty.call(FORMATS, rows) ? FORMATS[rows] : null;
     if (!f) throw Error('Цепочка прибора — 256 или 384 строки, не ' + rows + '.');
     const TRAILER = rows * f.ROW_BYTES, SONG_BYTES = TRAILER + 20;
     return { ROWS: rows, VERSION: f.VERSION, ROW_BYTES: f.ROW_BYTES, TRAILER, PAGE, PAT_OFFSET, SONG_OFFSET,
