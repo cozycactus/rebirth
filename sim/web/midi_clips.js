@@ -2,11 +2,13 @@
 // with notes becomes one or more device tracks (a polyphonic part one track
 // per voice, a drum part one track per drum sound), each bar a 16-step clip,
 // the distinct bars of a track its locations, and the song's order of bars a
-// Song-mode chain. The result is a version 7 save image that the firmware
-// loads with LOAD, as if it had saved it itself; the page writes it into the
-// simulated flash (Device.writeStore). Notes are quantised to the 1/16 grid;
-// controllers and pitch bend are not carried over. The chain holds 256 rows:
-// a longer song plays up to the bar where its 257th row would start.
+// Song-mode chain. The result is a save image that the firmware loads with
+// LOAD, as if it had saved it itself; the page writes it into the simulated
+// flash (Device.writeStore). Notes are quantised to the 1/16 grid; controllers
+// and pitch bend are not carried over. The chain holds as many rows as the core
+// does (Device.songEntries(): 384, a version 8 save; 256 in an older core, a
+// version 7 save): a longer song plays up to the bar where the row past them
+// would start.
 (function (root) {
   'use strict';
 
@@ -16,16 +18,25 @@
   const MELODIC_CHANNELS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14];
   const ACTIVE = 1, TIE = 8;
 
-  // The version 7 save (src/flash_storage.c) as the simulator's wasm32 build
-  // lays out pattern_t, song_t and kit_config_t (4-byte enums).
-  // sim/test/midi_clips_check.js checks it against a save that build writes.
-  // The RP2040 build packs enums into a byte (track_config_t 7 bytes, pattern_t
-  // 4108, song_t 16652), so this image is for the simulator only: an image for
-  // the board needs that layout.
-  const PAGE = 256, PATTERN_BYTES = 4684, SONG_BYTES = 16660, KIT_BYTES = 15;
+  // The save (src/flash_storage.c) as the simulator's wasm32 build lays out
+  // pattern_t, song_t and kit_config_t (4-byte enums): version 8 with 384 song
+  // rows of 68 bytes, or version 7 with 256 rows of 65, for an older core. A
+  // row is its 64 locations and then the repeats, at byte 64 in both; the rest
+  // of a row is 0. sim/test/midi_clips_check.js checks this against a save the
+  // build writes. The RP2040 build packs enums into a byte (track_config_t 7
+  // bytes, pattern_t 4108, song_t 26124), so this image is for the simulator
+  // only: an image for the board needs that layout. PAGE is the flash page.
+  const PAGE = 256, PATTERN_BYTES = 4684, KIT_BYTES = 15;
   const PAT_OFFSET = PAGE, SONG_OFFSET = PAT_OFFSET + Math.ceil(PATTERN_BYTES * LOCATIONS / PAGE) * PAGE;
-  const KIT_OFFSET = SONG_OFFSET + Math.ceil(SONG_BYTES / PAGE) * PAGE;
   const STORE_BYTES = 192 * 1024;
+  const FORMATS = { 256: { VERSION: 7, ROW_BYTES: 65 }, 384: { VERSION: 8, ROW_BYTES: 68 } };
+  function layoutFor(rows) {
+    const f = FORMATS[rows];
+    if (!f) throw Error('Цепочка прибора — 256 или 384 строки, не ' + rows + '.');
+    const TRAILER = rows * f.ROW_BYTES, SONG_BYTES = TRAILER + 20;
+    return { ROWS: rows, VERSION: f.VERSION, ROW_BYTES: f.ROW_BYTES, TRAILER, PAGE, PAT_OFFSET, SONG_OFFSET,
+             SONG_BYTES, KIT_OFFSET: SONG_OFFSET + Math.ceil(SONG_BYTES / PAGE) * PAGE, PATTERN_BYTES, STORE_BYTES };
+  }
   const KIT_DEFAULT = [36, 38, 45, 47, 50, 37, 39, 42, 46, 49, 51, 80, 110, 127, 3];
   const DRUM_NAME = { 36: 'BD', 38: 'SD', 39: 'CP', 42: 'CH', 44: 'PH', 46: 'OH', 49: 'CY', 54: 'TB', 57: 'RC', 37: 'RS' };
 
@@ -94,7 +105,9 @@
     return { cells, gate, offGrid, merged: notes.length - byStep.size };
   }
 
-  function plan(song) {
+  // The plan for a chain of `rows` rows (the core's Device.songEntries()).
+  function plan(song, { rows = 384 } = {}) {
+    layoutFor(rows);
     const step = song.ppqn / 4;
     const tracks = [], parts = [];
     for (const raw of song.tracks) {
@@ -248,7 +261,7 @@
       else entries.push({ locations, repeats: 1 });
     }
 
-    const played = entries.slice(0, 256).reduce((n, e) => n + e.repeats, 0);
+    const played = entries.slice(0, rows).reduce((n, e) => n + e.repeats, 0);
     // The device plays one tempo: the one the song keeps longest, summed over
     // its stretches (Snarled Up ramps through 75 BPM in its first bars and
     // then stays at 147), within the firmware's 20-300 BPM.
@@ -260,13 +273,13 @@
     const us = [...kept].reduce((a, b) => b[1] > a[1] ? b : a)[0];
     const bpm = Math.min(300, Math.max(20, Math.round(600000000 / us) / 10));
     return {
-      title: song.title, bpm, bars, played, tracks, entries, channels,
+      title: song.title, bpm, bars, played, rows, tracks, entries, channels,
       gateChannel: GATE_CHANNEL, drumChannel: DRUM_CHANNEL,
       lost: {
         offGrid: tracks.reduce((n, t) => n + t.offGrid, 0),
         merged: tracks.reduce((n, t) => n + t.merged, 0),
         controllers: parts.reduce((n, p) => n + p.lost, 0),
-        entries: Math.max(0, entries.length - 256),   // rows past the 256 the device holds
+        entries: Math.max(0, entries.length - rows),  // rows past those the device holds
       },
     };
   }
@@ -280,6 +293,7 @@
   }
 
   function store(p) {
+    const { VERSION, ROW_BYTES, TRAILER, SONG_BYTES, KIT_OFFSET } = layoutFor(p.rows);
     const bytes = new Uint8Array(STORE_BYTES).fill(0xff);
     const view = new DataView(bytes.buffer);
     const text = (at, s, size) => {
@@ -311,16 +325,16 @@
       text(at + 4162, ('P' + (loc + 1)).padEnd(8, ' '), 9);
     }
     bytes.fill(0, SONG_OFFSET, SONG_OFFSET + SONG_BYTES);
-    p.entries.slice(0, 256).forEach((entry, i) => {
-      bytes.set(entry.locations, SONG_OFFSET + i * 65);
-      bytes[SONG_OFFSET + i * 65 + 64] = entry.repeats;
+    p.entries.slice(0, p.rows).forEach((entry, i) => {
+      bytes.set(entry.locations, SONG_OFFSET + i * ROW_BYTES);
+      bytes[SONG_OFFSET + i * ROW_BYTES + 64] = entry.repeats;
     });
-    view.setUint16(SONG_OFFSET + 16640, Math.min(256, p.entries.length), true);
-    view.setUint32(SONG_OFFSET + 16644, 1, true);   // SONG_END_STOP
-    text(SONG_OFFSET + 16648, p.title.replace(/^\d+\s*/, '').toUpperCase().replace(/[^ -~]/g, ' ').slice(0, 8), 9);
+    view.setUint16(SONG_OFFSET + TRAILER, Math.min(p.rows, p.entries.length), true);
+    view.setUint32(SONG_OFFSET + TRAILER + 4, 1, true);   // SONG_END_STOP
+    text(SONG_OFFSET + TRAILER + 8, p.title.replace(/^\d+\s*/, '').toUpperCase().replace(/[^ -~]/g, ' ').slice(0, 8), 9);
     for (let t = 0; t < NUM_TRACKS; t++) bytes.set(KIT_DEFAULT, KIT_OFFSET + t * KIT_BYTES);
     view.setUint32(0, 0x52425448, true);            // 'RBTH'
-    bytes[4] = 7;
+    bytes[4] = VERSION;
     bytes.fill(0xff, 5, 8);
     let crc = crc32(0xffffffff, bytes.subarray(PAT_OFFSET, PAT_OFFSET + PATTERN_BYTES * LOCATIONS));
     crc = crc32(crc, bytes.subarray(SONG_OFFSET, SONG_OFFSET + SONG_BYTES));
@@ -358,7 +372,7 @@
     say('VALUE долго → селектор; кнопка 10 — LOAD: «' + p.title + '», ' + p.tracks.length + ' треков');
     press(VALUE_SW, 620, 200);
     press({ op: 'step', index: 9 }, 80, 400);
-    say('TRACK долго → цепочка песни; кнопка 2 — режим Song (' + Math.min(256, p.entries.length) + ' строк, ' + p.played + ' тактов)');
+    say('TRACK долго → цепочка песни; кнопка 2 — режим Song (' + Math.min(p.rows, p.entries.length) + ' строк, ' + p.played + ' тактов)');
     press(TRACK_SW, 620, 200);
     press({ op: 'step', index: 1 }, 80, 200);
     press(VALUE_SW, 80, 200);
@@ -371,7 +385,7 @@
     return { actions, playAt };
   }
 
-  const api = { plan, store, show, layout: { PAT_OFFSET, SONG_OFFSET, KIT_OFFSET, PATTERN_BYTES, SONG_BYTES, STORE_BYTES } };
+  const api = { plan, store, show, layoutFor, layout: layoutFor(384) };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MidiClips = api;
 })(globalThis);

@@ -165,7 +165,7 @@ Pico's BOOTSEL drive. Hold VALUE to enter SELECT PATTERN and press step 14
 to open MIDI SONG. PLAY starts and stops. TRACK changes the page of eight
 source tracks. Steps 1–8 mute, holding a step solos, and VALUE returns to
 SELECT PATTERN. The slot holds up to 1 MiB, 64 source tracks, and
-2,147,483,647 microseconds. The v7 clip save area precedes the MIDI slot. Eight-track v4–v6 saves remain at the end of flash.
+2,147,483,647 microseconds. The v8 clip save area precedes the MIDI slot. Eight-track v4–v6 saves remain at the end of flash.
 MUTE and SOLO address the tracks on the page selected with TRACK.
 
 The timed player preserves note and controller events at their original
@@ -196,9 +196,11 @@ so every part sits on the pads to launch and MUTE by hand afterwards:
   Controllers and pitch bend are not carried over. The song's bars run to
   the end of its track chunks, and further if a note is quantised past it.
 - The bars in their order are the Song-mode chain, consecutive equal bars one
-  row with repeats. The chain holds 256 rows; a longer song plays up to the
-  bar where its 257th row would begin, and the log says how far (five of the
-  eight Twisted songs stop 4–79 bars before their end).
+  row with repeats. The chain holds as many rows as the core does
+  (`Device.songEntries()`: 384, or 256 in a core built before the export); a
+  longer song plays up to the bar where the row past them would begin, and
+  the log says how far. All eight Twisted songs fit 384 rows (Sham, the
+  longest, needs 355); at 256, five of them stopped early.
 - MIDI channels: the drums on 10, the Midi Gate part on 16, every other part
   on 1–9 or 11–15. The busiest parts get a channel each while there are
   channels left, a part with its own TAL preset too; the others share one
@@ -208,8 +210,8 @@ so every part sits on the pads to launch and MUTE by hand afterwards:
   knobs and level of its busiest part, and gates the voices of gated parts
   with channel 16, as the full arrangement does.
 
-The page writes the result into the simulated flash as a version 7 save
-(`Device.writeStore`), and the artist turns VALUE to the song's tempo (the
+The page writes the result into the simulated flash as a version 8 save, or
+version 7 for a 256-row core (`Device.writeStore`), and the artist turns VALUE to the song's tempo (the
 device plays one: the tempo the song keeps longest, all its stretches summed,
 within 20–300 BPM), loads
 the save with LOAD (step 10 in SELECT PATTERN), switches to Song mode in the

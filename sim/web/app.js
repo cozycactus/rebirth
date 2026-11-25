@@ -1851,7 +1851,7 @@
       $('log').replaceChildren();
       if (pads) {
         if (!rig) throw Error('Нет звукового движка.');
-        const plan = MidiClips.plan(song);
+        const plan = MidiClips.plan(song, { rows: device.songEntries() });
         device.writeStore(MidiClips.store(plan));
         phase = 'midi-loading';
         const player = await rig.midiParts(channelSong(plan));
@@ -1866,7 +1866,7 @@
         say('info', '«' + plan.title + '»: ' + plan.tracks.length + ' треков, ' + plan.channels.length +
             ' MIDI-каналов синтов + барабаны на 10-м; вне сетки 1/16 сдвинуто нот: ' + plan.lost.offGrid +
             ', слито на одном шаге: ' + plan.lost.merged + ', CC и Pitch Bend не перенесены: ' + plan.lost.controllers +
-            (plan.lost.entries ? '. В цепочку прибора вошли 256 строк из ' + plan.entries.length +
+            (plan.lost.entries ? '. В цепочку прибора вошли ' + plan.rows + ' строк из ' + plan.entries.length +
              ': песня играет до такта ' + plan.played + ' из ' + plan.bars : '') +
             '. После песни пады играют партии в режиме Pattern: VALUE долго, TRACK долго, кнопка 3.');
         phase = 'prep';
