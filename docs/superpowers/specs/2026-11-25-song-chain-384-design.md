@@ -1,7 +1,8 @@
 # Song Chain of 384 Rows — Design
 
 Date: 2026-11-25. Status: draft for review, revised after an independent review
-(Gemini, DeepSeek, Grok; see "Review changes"). The project owner decided the
+(Gemini, DeepSeek, Grok; see "Review changes"), and built on branch
+`claude/song-512` (not yet reviewed as code). The project owner decided the
 goal and its size: the Song-mode chain grows from 256 to 384 rows
 (`MAX_SONG_ENTRIES`), so a MIDI song laid out as the device's clips fits whole
 (a first draft proposed 512; the owner chose 384 for the RP2040's RAM). Clips
@@ -36,7 +37,8 @@ fits (`MidiClips.plan` in Node):
 2. Saves in format 7 and eight-track saves (formats 4-6) still load, under both
    enum sizes (the device's `-fshort-enums` and the host's 4-byte enums).
 3. A song edit holds the lock for less time at 384 rows than today at 256, and
-   less than one MIDI byte time (320 us) on the RP2040.
+   less than one MIDI byte time (320 us) in the RP2040 Release build (the Debug
+   build, at -Og, does not unroll the copy: about 0.73 ms).
 4. The simulator's clips mode writes as many rows as its core holds, in that
    core's save format; all eight Twisted songs play whole on the new core.
 
@@ -320,6 +322,9 @@ was checked against the code; G = Gemini, D = DeepSeek, K = Grok.
 | Continue reads `song.length` under the playback lock only (K6) | noted | unchanged: a `uint16_t`, not moved bytes |
 
 ## Implementation notes
+
+- The long-clips design (PR #18, branch `claude/long-clips-design`) also calls
+  its save "format v8"; whichever of the two lands second renumbers.
 
 - The artist check (`sim/test/artist_check.js`) counted a set's bars from the
   first note's end less its three bytes. When PLAY lands just before a pulse,
