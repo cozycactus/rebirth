@@ -37,8 +37,7 @@ fits (`MidiClips.plan` in Node):
 2. Saves in format 7 and eight-track saves (formats 4-6) still load, under both
    enum sizes (the device's `-fshort-enums` and the host's 4-byte enums).
 3. A song edit holds the lock for less time at 384 rows than today at 256, and
-   less than one MIDI byte time (320 us) in the RP2040 Release build (the Debug
-   build, at -Og, does not unroll the copy: about 0.73 ms).
+   less than one MIDI byte time (320 us) on the RP2040, Release and Debug.
 4. The simulator's clips mode writes as many rows as its core holds, in that
    core's save format; all eight Twisted songs play whole on the new core.
 
@@ -130,34 +129,44 @@ The first commit, before the constant changes:
   read by name unchanged. Asserts: size 68, alignment 4,
   `offsetof(song_entry_t, repeats) == 64`.
 - `_pad` is padding: append and insert write the whole row (pad 0), validation
-  ignores it, the CRC covers it **(call)**.
+  ignores it, the CRC covers it **(call)**. Rows past the song stay zero:
+  `song_clear()` and `song_remove()` zero what they vacate (outside the lock:
+  Core 1 reads only the song's rows), and a save and a format 8 load clear
+  any padding or stale row left (`song_canonicalise()`).
 - `song_move_rows(dst, src, rows)` replaces the 4 `memmove` calls: rows in the
-  direction the overlap needs, each row copied as 17 word loads and stores
-  (unrolled). A row's source and destination never overlap (a shift is at
-  least one row), so the direction only matters between rows.
-  `__no_inline_not_in_flash_func` (RAM, never inlined into a flash caller);
-  under GCC, `optimize("no-tree-loop-distribute-patterns", "no-tree-vectorize")`
-  so it is not turned into a `memmove` call or a vectorised copy with an
-  alignment fallback; Clang builds (Emscripten, macOS host) get the plain loop.
-  Exposed in `sequencer.h` with a "caller holds `seq_lock`" contract so host
-  tests can call it.
-- In the linked RP2040 Release build (disassembly): `song_move_rows()` sits in
-  RAM (192 bytes), reached from `song_insert_patterns()` and `song_remove()`
-  through a veneer (`song_move()` has no caller in the firmware and is dropped
-  by the linker). A row is 17 `ldr`/`str` pairs plus 5-6 loop instructions:
-  about 75 cycles a row, 4.4 a word, 1.1 a byte, by instruction count.
+  direction the overlap needs, each row copied as 17 word loads and stores,
+  written out in the source (four groups of four words through locals, then
+  the last; `_Static_assert(SONG_ROW_WORDS == 17)`), so Debug at -Og copies as
+  Release does. A row's source and destination never overlap (a shift is at
+  least one row), so the direction only matters between rows; it is chosen by
+  comparing the addresses as integers, and a single row may come from another
+  array. `__no_inline_not_in_flash_func` (RAM, never inlined into a flash
+  caller), `noclone` under GCC (no second copy for one row). No `optimize`
+  attribute: the written-out words are not turned into a `memmove` call (no
+  call in the helper in any build); a per-file `-fno-tree-vectorize`
+  (`CMakeLists.txt`) keeps -O3 from growing it to 660 bytes. New rows are built
+  before `seq_lock` is taken and stored with this copy, as is `song_move()`'s
+  held row: no flash `memset`/`memcpy` runs under the lock. Exposed in
+  `sequencer.h` with its contract so host tests can call it.
+- In the linked RP2040 builds (disassembly): `song_move_rows()` sits in RAM
+  (196 bytes Release, 240 Debug), reached from `song_insert_patterns()` and
+  `song_remove()` through a veneer (`song_move()` has no caller in the firmware
+  and is dropped by the linker). Release: a row is 17 `ldr`/`str` pairs plus 6-7
+  loop instructions, about 75 cycles, 4.4 a word, 1.1 a byte. Debug: 12-17 loop
+  instructions, 80-85 cycles a row, about 4.9 a word. By instruction count.
 
   | Edit at the front of a full song, RP2040 at 125 MHz | Bytes moved | Lock held |
   |---|---:|---:|
   | Today: 256 rows of 65, `memmove` | 16,575 | 0.93-1.19 ms |
   | 384 rows of 65, `memmove` (not chosen) | 24,895 | 1.39-1.79 ms |
-  | **384 rows of 68, `song_move_rows()`** | 26,044 | **about 0.23 ms** |
+  | **384 rows of 68, `song_move_rows()`, Release** | 26,044 | **about 0.23 ms** |
+  | 384 rows of 68, `song_move_rows()`, Debug | 26,044 | about 0.25-0.26 ms |
 
   One pulse is 2.08 ms at 300 BPM. A hold delays at most one pulse by that
   much. Core 0's MIDI receive runs with the UART FIFO off (`midi_out.c:213`):
   a byte every 320 us, one kept in the holding register; at 0.23 ms none is
   lost, against 2-3 today. Cost: 1,152 bytes of rows plus the helper's code in
-  RAM (about 200 bytes).
+  RAM (196-240 bytes on the RP2040).
 
 ### 4. Format 8 (coordinator)
 
@@ -179,10 +188,14 @@ rule (unpadded payload bytes, header last).
   `song_valid()` checks a `song_t` (length <= 384), `song_v7_valid()` a
   `song_v7_t` (<= 256); the pattern and kit checks are shared.
 - **Load** picks the first valid of format 8, format 7, eight-track and
-  branches on that kind: format 8 copies the song whole; format 7 zeroes
+  branches on that kind: format 8 copies the song whole and clears its padding
+  and unused rows; format 7 zeroes
   `g_seq.song` and copies `length`, `end_mode`, `name` and each row's
   locations and repeats by field, kits from `V7_KIT_OFFSET`, and returns
-  `LOADED OK` **(call)**; eight-track as today (`OLD SAVE LOADED`).
+  `LOADED OK` **(call)**; eight-track as today (`OLD SAVE LOADED`). Then
+  `transport_song_loaded()`: in Song mode the position goes to the new song's
+  start, as PLAY sets it, so a Continue is not refused for a position past a
+  shorter song's end; in other modes only the song position is cleared.
 - **`flash_storage_is_valid()`** is format 8 or 7 or eight-track. **Save**
   writes format 8 and verifies format 8 alone.
 - **Cost.** 37 more pages than format 7 (about +15 ms at 0.4 ms a page); the
@@ -213,15 +226,15 @@ rule (unpadded payload bytes, header last).
 
 `__HeapLimit` - `end` in bytes, including the 2,048-byte `.heap` reserve. The
 first two 384 columns are trial builds of the record change alone; "as built"
-is the implementation, `song_move_rows()` in RAM included (192 bytes on the
-RP2040 Release build, 88 Debug, 278 on the RP2350). Today's Debug figure is
-computed.
+is the implementation after the code review, `song_move_rows()` in RAM
+included (196 bytes on the RP2040 Release build, 240 Debug, 230 on the
+RP2350). Today's Debug figure is computed.
 
 | Build | Today | 384 rows of 65 | 384 rows of 68 | As built |
 |---|---:|---:|---:|---:|
 | RP2040 Release (`firmware-release`) | 20,712 | 12,392 | 11,240 | **11,048** |
-| RP2040 Debug (`firmware-debug`, CI) | 27,292 | 18,972 | 17,820 | **17,740** |
-| RP2350 (`pico2-release`, `revb-rp2354b`, `revb-rp2350b`) | 282,312 | 273,992 | 272,840 | **272,560** |
+| RP2040 Debug (`firmware-debug`, CI) | 27,292 | 18,972 | 17,820 | **17,580** |
+| RP2350 (`pico2-release`, `revb-rp2354b`, `revb-rp2350b`) | 282,312 | 273,992 | 272,840 | **272,608** |
 
 `g_seq` grows from 149,640 to 159,112 bytes. No board has its own limit; the
 flash map is the same on every board.
@@ -335,6 +348,29 @@ was checked against the code; G = Gemini, D = DeepSeek, K = Grok.
   takes the tick grid from the first Clocks; it passes on the master core too.
 - `sim_dbg_song()` (rows and the playing row) lets the checks see the chain:
   after LOAD Sham's chain is 355 rows, and the check follows it to row 354.
+
+## Code review
+
+Three models read the built branch (DeepSeek, Gemini, Grok; Codex was
+unavailable); none found a blocker. Changes:
+
+- The row copy is written out in C (Debug no longer about 0.73 ms), new rows
+  are built outside the lock, the `optimize` attribute gave way to a per-file
+  `-fno-tree-vectorize` and `noclone`, directions compare integers (Gemini 1
+  and 2, DeepSeek 4).
+- Unused rows and padding stay zero, and a save and a format 8 load clear them
+  (DeepSeek 1).
+- `offsetof` asserts for the eight-track and format 8 song records; the
+  eight-track test image's song is written byte by byte; rows 256-383 checked
+  after eight-track and format 7 loads (all three).
+- A load resets the song position (Gemini 5, pre-existing).
+- Tests: SPP to row 301 step 5 and Continue; format 7 with a shorter song and
+  stale rows, `name[8]`, a kit byte, padding on every row; format 8 `name[8]`,
+  a cleared song saved (Gemini 3, DeepSeek 6).
+- Simulator: `layoutFor()` own keys only, one `sim_dbg_song()` per `inspect()`,
+  the 256-row case called Device's fallback, not an older core (DeepSeek 3,
+  Grok 2, Gemini 4). Running an older wasm core was not added.
+- Doc nits (Gemini 6, DeepSeek 7).
 
 ## Open questions
 
