@@ -3347,6 +3347,30 @@ static void test_slow_click_moves_note_editor_and_song_by_one(void) {
     CHECK(g_seq.song.entries[1].repeats == 2);
 }
 
+// The song editor past row 255: the cursor stops at the last row, a full
+// chain takes no insert, and delete and insert work at the end.
+static void test_song_editor_past_row_255(void) {
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) CHECK(song_append((uint8_t)(row % MAX_PATTERNS), 1));
+    press_encoder(1, BTN_LONG_PRESS);
+    press_encoder(0, BTN_LONG_PRESS);
+    CHECK(ui.mode == UI_SONG_EDIT && ui.song_cursor == 0);
+    for (unsigned i = 0; i < 4; i++) turn(0, 100);
+    CHECK(ui.song_cursor == MAX_SONG_ENTRIES - 1);
+    turn(0, 1);
+    CHECK(ui.song_cursor == MAX_SONG_ENTRIES - 1);
+    press_encoder(0, BTN_LONG_PRESS);                   // insert: the chain is full
+    CHECK(g_seq.song.length == MAX_SONG_ENTRIES && ui.song_cursor == MAX_SONG_ENTRIES - 1);
+    press_encoder(1, BTN_LONG_PRESS);                   // delete the last row
+    CHECK(g_seq.song.length == MAX_SONG_ENTRIES - 1 && ui.song_cursor == MAX_SONG_ENTRIES - 2);
+    press_encoder(0, BTN_LONG_PRESS);                   // insert after the cursor
+    CHECK(g_seq.song.length == MAX_SONG_ENTRIES && ui.song_cursor == MAX_SONG_ENTRIES - 1);
+    turn(0, -100);
+    CHECK(ui.song_cursor == MAX_SONG_ENTRIES - 101);
+    press_encoder(1, BTN_LONG_PRESS);                   // delete row 283
+    CHECK(g_seq.song.length == MAX_SONG_ENTRIES - 1);
+    CHECK(g_seq.song.entries[MAX_SONG_ENTRIES - 101].pattern_index[0] == (MAX_SONG_ENTRIES - 100) % MAX_PATTERNS);
+}
+
 // Numbers accelerate on a fast turn; choices move one per click however fast.
 static void test_fast_clicks_accelerate_numbers_only(void) {
     float bpm = g_seq.transport.bpm;
@@ -5674,6 +5698,7 @@ int main(int argc, char **argv) {
     RUN(test_slow_click_moves_kit_config_by_one);
     RUN(test_slow_click_moves_synth_and_drum_config_by_one);
     RUN(test_slow_click_moves_note_editor_and_song_by_one);
+    RUN(test_song_editor_past_row_255);
     RUN(test_fast_clicks_accelerate_numbers_only);
     RUN(test_fast_clicks_in_editors);
     RUN(test_grid_tap_toggles_on_release);

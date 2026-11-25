@@ -90,6 +90,68 @@ TEST(test_song_append_full) {
     ASSERT_EQ(g_seq.song.length, MAX_SONG_ENTRIES);
 }
 
+/* A full chain whose every row differs from its neighbours in every track. */
+static uint8_t full_location(unsigned row, unsigned track) {
+    return (uint8_t)((row * 7 + track * 3) % MAX_PATTERNS);
+}
+static uint8_t full_repeats(unsigned row) { return (uint8_t)(1 + row % 255); }
+
+static void fill_full_song(void) {
+    reset_song();
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) {
+        uint8_t locations[NUM_TRACKS];
+        for (unsigned t = 0; t < NUM_TRACKS; t++) locations[t] = full_location(row, t);
+        ASSERT_TRUE(song_append_patterns(locations, full_repeats(row)));
+    }
+}
+
+/* Row `row` holds the full song's row `original`, padding 0. */
+static void assert_full_row(unsigned row, unsigned original) {
+    const song_entry_t *e = &g_seq.song.entries[row];
+    for (unsigned t = 0; t < NUM_TRACKS; t++) ASSERT_EQ(e->pattern_index[t], full_location(original, t));
+    ASSERT_EQ(e->repeats, full_repeats(original));
+    ASSERT_EQ(e->_pad[0] | e->_pad[1] | e->_pad[2], 0);
+}
+
+TEST(test_song_full_chain_shifts) {
+    fill_full_song();
+    ASSERT_FALSE(song_insert(0, 1, 1));               /* full */
+    ASSERT_TRUE(song_remove(0));                      /* 383 rows move down */
+    ASSERT_EQ(g_seq.song.length, MAX_SONG_ENTRIES - 1);
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES - 1; row++) assert_full_row(row, row + 1);
+    uint8_t first[NUM_TRACKS];
+    for (unsigned t = 0; t < NUM_TRACKS; t++) first[t] = full_location(0, t);
+    ASSERT_TRUE(song_insert_patterns(0, first, full_repeats(0)));  /* 383 rows move up */
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) assert_full_row(row, row);
+
+    ASSERT_TRUE(song_move(0, MAX_SONG_ENTRIES - 1));
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES - 1; row++) assert_full_row(row, row + 1);
+    assert_full_row(MAX_SONG_ENTRIES - 1, 0);
+    ASSERT_TRUE(song_move(MAX_SONG_ENTRIES - 1, 0));
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) assert_full_row(row, row);
+
+    /* The last row out and back in at the end. */
+    ASSERT_TRUE(song_remove(MAX_SONG_ENTRIES - 1));
+    uint8_t last[NUM_TRACKS];
+    for (unsigned t = 0; t < NUM_TRACKS; t++) last[t] = full_location(MAX_SONG_ENTRIES - 1, t);
+    ASSERT_TRUE(song_insert_patterns(MAX_SONG_ENTRIES - 1, last, full_repeats(MAX_SONG_ENTRIES - 1)));
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) assert_full_row(row, row);
+}
+
+/* A row written over old bytes still has its padding 0. */
+TEST(test_song_rows_are_written_whole) {
+    reset_song();
+    memset(g_seq.song.entries, 0xA5, sizeof(g_seq.song.entries));
+    ASSERT_TRUE(song_append(3, 2));
+    ASSERT_TRUE(song_insert(0, 4, 1));
+    for (unsigned row = 0; row < 2; row++) {
+        const song_entry_t *e = &g_seq.song.entries[row];
+        ASSERT_EQ(e->_pad[0] | e->_pad[1] | e->_pad[2], 0);
+    }
+    assert_entry_pattern_all(0, 4);
+    assert_entry_pattern_all(1, 3);
+}
+
 /* ── song_insert ───────────────────────────────────────── */
 
 TEST(test_song_insert_at_start) {
@@ -459,6 +521,8 @@ int main(void) {
     RUN(test_song_append_patterns_per_track);
     RUN(test_song_append_rejects_invalid);
     RUN(test_song_append_full);
+    RUN(test_song_full_chain_shifts);
+    RUN(test_song_rows_are_written_whole);
 
     /* song_insert */
     RUN(test_song_insert_at_start);
