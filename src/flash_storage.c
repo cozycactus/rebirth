@@ -61,16 +61,36 @@ typedef struct {
     char name[9];
     uint32_t kit_steps[OLD_TRACKS][STEPS_PER_PATTERN];
 } pattern_v6_t;
+// The song records of formats 4-7 held 256 rows, whatever the live song holds.
+// Each keeps the enum of the ABI that wrote it: one byte on the device
+// (-fshort-enums), four on the host and in the simulator.
+#define OLD_SONG_ENTRIES 256
 typedef struct {
-    struct { uint8_t pattern_index[OLD_TRACKS], repeats; } entries[MAX_SONG_ENTRIES];
+    struct { uint8_t pattern_index[OLD_TRACKS], repeats; } entries[OLD_SONG_ENTRIES];
     uint16_t length;
     song_end_mode_t end_mode;
     char name[9];
 } old_song_t;
+typedef struct {
+    uint8_t pattern_index[NUM_TRACKS];
+    uint8_t repeats;
+} song_entry_v7_t;
+typedef struct {
+    song_entry_v7_t entries[OLD_SONG_ENTRIES];
+    uint16_t length;
+    song_end_mode_t end_mode;
+    char name[9];
+} song_v7_t;
 
+#define SHORT_ENUMS (sizeof(song_end_mode_t) == 1)
+_Static_assert(sizeof(old_song_t) == (SHORT_ENUMS ? 2316 : 2324), "legacy song ABI");
+_Static_assert(sizeof(song_entry_v7_t) == 65, "v7 song row");
+_Static_assert(sizeof(song_v7_t) == (SHORT_ENUMS ? 16652 : 16660), "v7 song ABI");
+_Static_assert(offsetof(song_v7_t, length) == 16640, "v7 song ABI");
+_Static_assert(offsetof(song_v7_t, end_mode) == (SHORT_ENUMS ? 16642 : 16644), "v7 song ABI");
+_Static_assert(offsetof(song_v7_t, name) == (SHORT_ENUMS ? 16643 : 16648), "v7 song ABI");
 #if defined(__arm__)
 _Static_assert(sizeof(pattern_v5_t) == 459 && sizeof(pattern_v6_t) == 972, "legacy pattern ABI");
-_Static_assert(sizeof(old_song_t) == 2316, "legacy song ABI");
 #endif
 #define V5_PAT_BYTES    (sizeof(pattern_v5_t) * MAX_PATTERNS)
 #define V5_SONG_OFFSET  (PAT_OFFSET + PAGE_ROUND(V5_PAT_BYTES))
@@ -206,7 +226,7 @@ static bool old_image_valid(const uint8_t *base) {
     if (h->magic != MAGIC || (h->version != 4 && h->version != 5 && h->version != 6)) return false;
     const bool kit = h->version == 6;
     const old_song_t *song = (const old_song_t *)(base + (kit ? V6_SONG_OFFSET : V5_SONG_OFFSET));
-    if (song->length > MAX_SONG_ENTRIES || song->name[8] ||
+    if (song->length > OLD_SONG_ENTRIES || song->name[8] ||
         (song->end_mode != SONG_END_LOOP && song->end_mode != SONG_END_STOP)) return false;
     for (unsigned i = 0; i < song->length; i++)
         for (unsigned t = 0; t < OLD_TRACKS; t++)

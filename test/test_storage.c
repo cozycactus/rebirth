@@ -20,6 +20,9 @@ static bool all_inputs_resynced(unsigned times) {
 
 #define IMG (fake_flash + STORE_OFFSET)
 #define OLD_BYTES (128u * 1024)
+// Where a format 7 save put its song and its kits.
+#define V7_GOLDEN_SONG_BYTES (sizeof(song_end_mode_t) == 1 ? 16652u : 16660u)
+#define V7_GOLDEN_KITS (sizeof(song_end_mode_t) == 1 ? 148736u : 167168u)
 
 // No eight-track save: a load has only the current slot to go by.
 static void no_old_save(void) {
@@ -78,6 +81,7 @@ static void write_legacy_image(uint8_t version) {
         memcpy(old + PAT_OFFSET + i * stride, &record, stride);
     }
     old_song_t song = {0};
+    CHECK(g_seq.song.length <= OLD_SONG_ENTRIES);
     song.length = g_seq.song.length;
     song.end_mode = g_seq.song.end_mode;
     memcpy(song.name, g_seq.song.name, sizeof(song.name));
@@ -99,10 +103,43 @@ static void write_legacy_image(uint8_t version) {
     }
 }
 
+static void reseal_golden_v7(void) {
+    uint32_t crc = crc32_update(UINT32_MAX, IMG + PAT_OFFSET, PAT_BYTES);
+    crc = crc32_update(crc, IMG + SONG_OFFSET, V7_GOLDEN_SONG_BYTES);
+    ((store_header_t *)IMG)->checksum = ~crc32_update(crc, IMG + V7_GOLDEN_KITS, KIT_BYTES);
+}
+
 // Recompute the current checksum after a test edited the image.
 static void reseal_v7(void) {
     store_header_t *header = (store_header_t *)IMG;
     header->checksum = payload_checksum(IMG + PAT_OFFSET, IMG + SONG_OFFSET, IMG + KIT_OFFSET);
+}
+
+// A format 7 save as the format 7 firmware wrote it, byte by byte at the
+// offsets it used, from RAM: 256 rows of 65 bytes, then length, end mode and
+// name (a one-byte enum on the device, four bytes on the host), kits after the
+// page-rounded song. Built from raw offsets, not from song_v7_t.
+static void write_v7_image(void) {
+    CHECK(g_seq.song.length <= 256);
+    CHECK(SONG_OFFSET + PAGE_ROUND(V7_GOLDEN_SONG_BYTES) == V7_GOLDEN_KITS);
+    memset(IMG, 0xff, STORE_ERASE);
+    memcpy(IMG + PAT_OFFSET, g_seq.patterns, PAT_BYTES);
+    uint8_t *song = IMG + SONG_OFFSET;
+    memset(song, 0, V7_GOLDEN_SONG_BYTES);
+    for (unsigned i = 0; i < g_seq.song.length; i++) {
+        memcpy(song + i * 65, g_seq.song.entries[i].pattern_index, NUM_TRACKS);
+        song[i * 65 + 64] = g_seq.song.entries[i].repeats;
+    }
+    song[16640] = (uint8_t)g_seq.song.length;
+    song[16641] = (uint8_t)(g_seq.song.length >> 8);
+    bool short_enums = sizeof(song_end_mode_t) == 1;
+    song[short_enums ? 16642 : 16644] = (uint8_t)g_seq.song.end_mode;
+    memcpy(song + (short_enums ? 16643 : 16648), g_seq.song.name, 9);
+    memcpy(IMG + V7_GOLDEN_KITS, g_seq.kit_config, KIT_BYTES);
+    store_header_t *header = (store_header_t *)IMG;
+    header->magic = MAGIC;
+    header->version = 7;
+    reseal_golden_v7();
 }
 
 static pattern_t *img_patterns(void) { return (pattern_t *)(IMG + PAT_OFFSET); }
@@ -185,6 +222,18 @@ static void fill_project(bool with_kits) {
         c->vel_max = (uint8_t)(32 + t);
         c->flam_pulses = (uint8_t)(KIT_FLAM_MIN + t % KIT_FLAM_MAX);
     }
+}
+
+// Grows the song to `rows` rows, each with its own locations and repeats.
+static void fill_song_rows(unsigned rows) {
+    for (unsigned entry = g_seq.song.length; entry < rows; entry++) {
+        uint8_t locations[NUM_TRACKS];
+        for (uint8_t t = 0; t < NUM_TRACKS; t++) {
+            locations[t] = (uint8_t)((entry * 5 + t * 3 + 1) % MAX_PATTERNS);
+        }
+        CHECK(song_append_patterns(locations, (uint8_t)(1 + entry % 255)));
+    }
+    CHECK(g_seq.song.length == rows);
 }
 
 // Leaves nothing in RAM that a load could pass off as loaded.
@@ -343,8 +392,62 @@ static void test_legacy_images(void) {
     CHECK(!flash_storage_is_valid());
     // A song past the limit in a v4 image is rejected.
     write_legacy_image(LEGACY_VERSION);
-    ((old_song_t *)((fake_flash + OLD_STORE) + V5_SONG_OFFSET))->length = MAX_SONG_ENTRIES + 1;
+    ((old_song_t *)((fake_flash + OLD_STORE) + V5_SONG_OFFSET))->length = OLD_SONG_ENTRIES + 1;
     CHECK(!flash_storage_load());
+}
+
+// A format 7 save of a full 256-row song loads whole, with every row past it
+// empty; a damaged one is no save.
+static void test_v7_image(void) {
+    fill_project(true);
+    fill_song_rows(256);
+    ram_take();
+    no_old_save();
+    write_v7_image();
+    scribble_ram();
+    CHECK(flash_storage_is_valid());
+    CHECK(flash_storage_load() == FLASH_LOAD_OK);
+    for (uint8_t i = 0; i < MAX_PATTERNS; i++) CHECK(patterns_equal(&g_seq.patterns[i], &snap.patterns[i]));
+    CHECK(songs_equal(&g_seq.song, &snap.song));
+    CHECK(memcmp(g_seq.kit_config, snap.kits, sizeof(snap.kits)) == 0);
+    static const song_entry_t empty;
+    for (unsigned i = 256; i < MAX_SONG_ENTRIES; i++) {
+        CHECK(memcmp(&g_seq.song.entries[i], &empty, sizeof(empty)) == 0);
+    }
+
+    // Damaged: a length past 256, a location out of range in row 255, an end
+    // mode out of range (each resealed), a flipped byte (not resealed).
+    uint8_t *song = IMG + SONG_OFFSET;
+    const unsigned end_mode_at = sizeof(song_end_mode_t) == 1 ? 16642 : 16644;
+    for (int bad = 0; bad < 4; bad++) {
+        write_v7_image();
+        if (bad == 0) { song[16640] = 1; song[16641] = 1; }           // 257
+        if (bad == 1) song[255 * 65 + 63] = MAX_PATTERNS;
+        if (bad == 2) song[end_mode_at] = 2;
+        if (bad != 3) reseal_golden_v7();
+        else song[100 * 65 + 7] ^= 1;
+        ram_take();
+        CHECK(!flash_storage_is_valid());
+        CHECK(flash_storage_load() == FLASH_LOAD_FAILED);
+        CHECK(ram_unchanged());
+    }
+    // Next to an eight-track save, a damaged format 7 gives the eight-track one.
+    fill_project(true);
+    ram_take();
+    write_legacy_image(6);
+    write_v7_image();
+    song[3] ^= 1;
+    scribble_ram();
+    CHECK(flash_storage_load() == FLASH_LOAD_OLD_SAVE);
+    check_migrated(6);
+    // A 256-row eight-track song loads whole.
+    fill_project(true);
+    fill_song_rows(256);
+    ram_take();
+    write_legacy_image(6);
+    scribble_ram();
+    CHECK(flash_storage_load() == FLASH_LOAD_OLD_SAVE);
+    check_migrated(6);
 }
 
 // ─── A current slot with no valid save, next to an old save ────
@@ -605,7 +708,7 @@ int main(void) {
     write_legacy_image(LEGACY_VERSION);
     CHECK(flash_storage_load());
     old_song_t *saved_song = (old_song_t *)(fake_flash + OLD_STORE + V5_SONG_OFFSET);
-    saved_song->length = MAX_SONG_ENTRIES + 1;
+    saved_song->length = OLD_SONG_ENTRIES + 1;
     CHECK(!flash_storage_load());
     CHECK(g_seq.song.length == 1);
     saved_song->length = 1;
@@ -623,12 +726,13 @@ int main(void) {
     test_load_resyncs_panel_input();
     test_v7_round_trip();
     test_legacy_images();
+    test_v7_image();
     test_load_falls_back_on_the_old_save();
     test_v6_rejections();
     test_copies_one_pattern_per_lock_section();
     puts("PASS storage round-trip, playback guard, checksum, legacy validation, "
          "interrupted save, late MIDI before erase, resync after save and load, "
-         "v6 kits, v4/v5/v6 migration, fallback on the old save, v6 rejections, "
+         "v6 kits, v4/v5/v6 migration, a format 7 save, fallback on the old save, v6 rejections, "
          "one pattern per lock section");
     return 0;
 }
