@@ -139,8 +139,11 @@ The first commit, before the constant changes:
   alignment fallback; Clang builds (Emscripten, macOS host) get the plain loop.
   Exposed in `sequencer.h` with a "caller holds `seq_lock`" contract so host
   tests can call it.
-- Estimate from a prototype compiled for the Cortex-M0+ at -O3 (to be
-  re-measured on the linked build): about 75 cycles per row, 1.1 a byte.
+- In the linked RP2040 Release build (disassembly): `song_move_rows()` sits in
+  RAM (192 bytes), reached from `song_insert_patterns()` and `song_remove()`
+  through a veneer (`song_move()` has no caller in the firmware and is dropped
+  by the linker). A row is 17 `ldr`/`str` pairs plus 5-6 loop instructions:
+  about 75 cycles a row, 4.4 a word, 1.1 a byte, by instruction count.
 
   | Edit at the front of a full song, RP2040 at 125 MHz | Bytes moved | Lock held |
   |---|---:|---:|
@@ -206,16 +209,17 @@ rule (unpadded payload bytes, header last).
 
 ## RAM
 
-`__HeapLimit` - `end` in bytes, including the 2,048-byte `.heap` reserve; the
-384 columns are measured from trial builds of the record change alone (the
-final figures, with `song_move_rows()`, are re-measured on the implementation).
-Today's Debug figure is computed.
+`__HeapLimit` - `end` in bytes, including the 2,048-byte `.heap` reserve. The
+first two 384 columns are trial builds of the record change alone; "as built"
+is the implementation, `song_move_rows()` in RAM included (192 bytes on the
+RP2040 Release build, 88 Debug, 278 on the RP2350). Today's Debug figure is
+computed.
 
-| Build | Today | 384 rows of 65 | 384 rows of 68 (chosen) |
-|---|---:|---:|---:|
-| RP2040 Release (`firmware-release`) | 20,712 | 12,392 | 11,240 |
-| RP2040 Debug (`firmware-debug`, CI) | 27,292 | 18,972 | 17,820 |
-| RP2350 (`pico2-release`, `revb-rp2354b`, `revb-rp2350b`) | 282,312 | 273,992 | 272,840 |
+| Build | Today | 384 rows of 65 | 384 rows of 68 | As built |
+|---|---:|---:|---:|---:|
+| RP2040 Release (`firmware-release`) | 20,712 | 12,392 | 11,240 | **11,048** |
+| RP2040 Debug (`firmware-debug`, CI) | 27,292 | 18,972 | 17,820 | **17,740** |
+| RP2350 (`pico2-release`, `revb-rp2354b`, `revb-rp2350b`) | 282,312 | 273,992 | 272,840 | **272,560** |
 
 `g_seq` grows from 149,640 to 159,112 bytes. No board has its own limit; the
 flash map is the same on every board.
@@ -228,8 +232,11 @@ short (Sham's set ends on bar 257, `:86`; "256 rows stored", `:137`). This
 branch stays on `origin/master`; its simulator work is one commit, last. If #31
 merges first, that commit is rebased: `chain()` slices `p.rows`, its tests build
 plans with `rows: 256`, and `midi_live_check.js` reads the trailer from
-`layoutFor(256)`. The exact conflicting hunks are listed in the implementation
-report.
+`layoutFor(256)`. A trial merge (`git merge-tree`) conflicts in three files:
+`midi_clips.js` (the plan's return fields, `store()` beside the new `chain()`,
+the song record writes, `show()`'s caption, the exported `api`), `app.js` (the
+plan and `writeStore` in the pads launch, the "вошли … строк" log line) and
+`sim/README.md` (the chain paragraph).
 
 ## Tests
 
@@ -304,13 +311,25 @@ was checked against the code; G = Gemini, D = DeepSeek, K = Grok.
 | 3.5x claim (D13) | confirmed | table now 0.93-1.19 ms -> about 0.23 ms |
 | Unroll to clear 320 us (G5) | confirmed | rows copied as 17 unrolled words |
 | "newlib-nano" (D14) | refuted in part | the build links full newlib (`nosys.specs`); its ARMv6-M `memmove` as linked is byte-wise backward, verified by disassembly |
-| RAM helper missing from the table (D21, G5) | confirmed | re-measured on the implementation |
+| RAM helper missing from the table (D21, G5) | confirmed | "as built" column |
 | `write_legacy_image()` overflow (G6, D15) | confirmed | bound checked |
 | Pad bytes not zeroed (K7, D16, G7) | confirmed | whole row written; round trip checks 0 |
 | Test plan gaps (G8, D9, D10, D11, D20) | confirmed | Tests section |
 | `test_song.c` cited for live position edits (G8) | confirmed | `test_playback.c:706-745` |
 | Docs list (G9, D19) | confirmed | Docs section |
 | Continue reads `song.length` under the playback lock only (K6) | noted | unchanged: a `uint16_t`, not moved bytes |
+
+## Implementation notes
+
+- The artist check (`sim/test/artist_check.js`) counted a set's bars from the
+  first note's end less its three bytes. When PLAY lands just before a pulse,
+  Start and the first Clock are still on the wire and delay that note by up to
+  640 us, past the check's 500 us margin, and a CV part's bars read one step
+  rotated. The 384-row save stalls the device about 15 ms longer and moved one
+  show's PLAY there (afterglow, "Два пика" and "Гипноз"). The check now also
+  takes the tick grid from the first Clocks; it passes on the master core too.
+- `sim_dbg_song()` (rows and the playing row) lets the checks see the chain:
+  after LOAD Sham's chain is 355 rows, and the check follows it to row 354.
 
 ## Open questions
 
