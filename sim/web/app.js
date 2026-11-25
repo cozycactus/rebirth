@@ -35,6 +35,9 @@
   // A performed clips song ('live') may build the hands while it loads: the
   // launch serial of that start, 0 otherwise (buildable).
   let buildDuringLoad = 0;
+  // The channel voices of a clips song while its start still waits (the
+  // hands' build): endShow stops them if the start is abandoned there.
+  let loadingPlayer = null;
   // The part that plays alone in the full arrangement (its track), or null:
   // set by a part panel's solo box, dropped when that panel's part or parts
   // change and when the song ends.
@@ -1869,11 +1872,17 @@
         // else this show gets the ring.
         if (performed) buildDuringLoad = request;
         const player = await rig.midiParts(channelSong(plan));
+        loadingPlayer = player;
         if (performed && handsWanted() && !handLayer && request === launchSerial) {
           await Promise.race([loadHands(), new Promise(resolve => setTimeout(resolve, 4000))]);
         }
-        buildDuringLoad = 0;
-        if (request !== launchSerial) { player.stop(ctx.currentTime); return; }
+        // Only this start's window: a later start may have opened its own.
+        if (buildDuringLoad === request) buildDuringLoad = 0;
+        if (request !== launchSerial) {
+          player.stop(ctx.currentTime);
+          if (loadingPlayer === player) loadingPlayer = null;
+          return;
+        }
         const run = MidiClips.show(plan, device.now() + 300000, live ? { moves: live.moves, bars: live.setEnd } : undefined);
         const barUs = Math.floor(60000000 / (plan.bpm * 96)) * 24 * 16;
         show = { actions: run.actions, prepEnd: run.playAt - 200000, t0: run.t0 ?? run.playAt, barUs,
@@ -1881,6 +1890,7 @@
         Artist.schedule(show, device, hands, io);
         padsRun = { plan, player, held: new Set(), performed,
                     channels: new Set([...plan.channels.map(c => c.channel), plan.gateChannel]) };
+        loadingPlayer = null;
         const bars = live ? Math.min(live.setEnd, plan.played) : plan.played;
         say('info', '«' + plan.title + '»: ' + plan.tracks.length + ' треков, ' + plan.channels.length +
             ' MIDI-каналов синтов + барабаны на 10-м; вне сетки 1/16 сдвинуто нот: ' + plan.lost.offGrid +
@@ -1888,7 +1898,7 @@
             (plan.lost.entries ? '. В цепочку прибора вошли 256 строк из ' + plan.entries.length +
              ': песня играет до такта ' + bars + ' из ' + plan.bars : '') +
             (live ? (bars < plan.played ? ', артист обрезал цепочку по последней фразе' : '') + '. Партия MUTE: ' +
-             (run.moves.length ? run.moves.length + ' приёмов' : 'нет (не нашлось бочки на первой странице или такта 4/4 подряд)') : '') +
+             (run.moves.length ? run.moves.length + ' приёмов' : 'нет (' + noMoves(live) + ')') : '') +
             '. После песни пады играют партии в режиме Pattern: VALUE долго, TRACK долго, кнопка 3.');
         phase = 'prep';
         speed = 1;                // the artist loads it at a hand's pace
@@ -1925,8 +1935,16 @@
         refreshMidiParts();
       }
     } catch (error) {
+      if (buildDuringLoad === request) buildDuringLoad = 0;
       if (request === launchSerial) endShow(error.message);
     }
+  }
+  // Why a performed song has no MUTE part, for the log.
+  function noMoves(live) {
+    if (!live.groups.kick.some(t => t < 16)) return 'нет бочки на страницах 1–2';
+    if (!live.stretches.length) return 'нет тактов 4/4';
+    if (!live.moves.length) return 'ни один приём не прошёл правила: партии не звучат ровно, смена части или связанная нота';
+    return 'ни один приём не успевается в темпе песни';
   }
   // One SH-101 voice per MIDI channel of the laid-out song, with the preset,
   // knobs and level of the busiest part on that channel; the gate channel
@@ -1958,6 +1976,7 @@
     launchSerial++;
     clearSolo();
     if (phase === 'prep') stopPads();   // stopped before the song was loaded
+    if (loadingPlayer) { loadingPlayer.stop(ctx.currentTime); loadingPlayer = null; }   // ... or while it waits
     midiRun?.player?.stop(ctx.currentTime);
     midiRun = null;
     hands.clear();
