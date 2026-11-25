@@ -462,6 +462,9 @@ for (const file of require('fs').readdirSync(LIBRARY).filter(f => f.endsWith('.m
   const show = { actions: run.actions, prepEnd: run.actions[0].t - 1, end: run.end };
   where = { song: song.title, form: 'clips', score: 'MUTE' };
   const before = failures.length;
+  if (run.moves.length !== live.moves.length) {
+    fail(0, '-', '(1) ' + (live.moves.length - run.moves.length) + ' of the script\'s moves do not fit the show');
+  }
   const plan = HandPlan.build(show.actions), tab = table(show.actions);
   assigned(plan, tab);
   sums.intervals += tab.intervals.length;
@@ -469,6 +472,11 @@ for (const file of require('fs').readdirSync(LIBRARY).filter(f => f.endsWith('.m
   sums.groups += tab.groups.length;
   sums.nearPairs += tab.pairs.filter(p => p.apart <= NEAR_TRACKS).length;
   sums.farPairs += tab.pairs.filter(p => p.apart > NEAR_TRACKS).length;
+  sums.copies += tab.copies.length;
+  sums.holds += tab.holds.length;
+  sums.inner += tab.holds.reduce((n, h) => n + h.inner.filter(x => !x.edges).length, 0);
+  sums.innerRuns += tab.holds.reduce((n, h) => n + h.inner.filter(x => x.edges).length, 0);
+  for (const k of ['nested', 'farInHold', 'secondCopy', 'bigGroup']) sums[k] += tab[k];
   const line = song.title + ' clips MUTE: ' + tab.intervals.length + ' touches, ' + tab.runs.length + ' turns, posed and travelled: ' +
     posed(show, plan, tab, stats, true);
   stats.posed++;

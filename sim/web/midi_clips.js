@@ -287,11 +287,14 @@
     // Musical bar lines from the time signatures; a chain bar is usable when
     // it starts on one of a 4/4 bar. Runs of usable bars are the stretches,
     // each with its own phrase grid.
-    const meters = p.meters && p.meters.length ? p.meters.slice() : [{ tick: 0, num: 4, den: 4 }];
+    // A time signature that makes no bar (a zero numerator, a denominator
+    // past 1/64) is left out: the one before it goes on, 4/4 at the start.
+    const valid = m => m.num >= 1 && m.den >= 1 && m.den <= 64 && m.num * barTicks / m.den >= 1;
+    const meters = (p.meters || []).filter(valid);
+    if (!meters.length || meters[0].tick > 0) meters.unshift({ tick: 0, num: 4, den: 4 });
     const usable = new Set();
-    if (meters[0].tick > 0) meters.unshift({ tick: 0, num: 4, den: 4 });
     meters.forEach((m, k) => {
-      const until = k + 1 < meters.length ? meters[k + 1].tick : P * barTicks;
+      const until = Math.min(k + 1 < meters.length ? meters[k + 1].tick : P * barTicks, P * barTicks);
       const len = m.num * barTicks / m.den;
       for (let t = m.tick; t < until; t += len) if (m.num === 4 && m.den === 4 && t % barTicks === 0) usable.add(t / barTicks);
     });
@@ -313,19 +316,23 @@
       }
       for (let b = a; b < e; b++) if (b % 8 === phase) lines.push(b);
     }
-    // The set ends on the last phrase line inside a chain that is cut short.
+    // The set ends on the last phrase line inside a chain that is cut short,
+    // when that line is in its last 8 bars; else (no 4/4 there) the chain
+    // plays out.
     let setEnd = P;
     if (P < p.bars) {
-      const inside = lines.filter(b => b <= P);
+      const inside = lines.filter(b => b <= P && b >= P - 8);
       if (inside.length) setEnd = Math.max(...inside);
     }
 
-    const pick = test => T.map((t, i) => i).filter(i => i < 16 && T[i].role !== 'gate' && test(T[i], i));
+    // The groups over every track, continuations (+2) included; a move with
+    // a track past page 2 is not made, so a group is never muted in part.
+    const pick = test => T.map((t, i) => i).filter(i => T[i].role !== 'gate' && test(T[i]));
     const groups = {
-      kick: pick((t, i) => i < 8 && t.role === 'kick'),
-      hats: pick((t, i) => i < 8 && [42, 44, 46].includes(t.drum)),
-      snare: pick((t, i) => i < 8 && [38, 40].includes(t.drum) && !/fill/i.test(t.name)),
-      bass: pick((t, i) => i >= 8 && t.role === 'bass'),
+      kick: pick(t => t.role === 'kick'),
+      hats: pick(t => [42, 44, 46].includes(t.drum)),
+      snare: pick(t => [38, 40].includes(t.drum) && !/fill/i.test(t.name)),
+      bass: pick(t => t.role === 'bass'),
     };
     const tieInto = (t, b) => {
       const cell = T[t].cells[b * STEPS], prior = T[t].cells[b * STEPS - 1];
@@ -349,6 +356,7 @@
         if (!these) return null;
         tracks.push(...these);
       }
+      if (tracks.some(t => t >= 16)) return null;
       if (tracks.some(t => tieInto(t, start) || tieInto(t, end))) return null;
       return { kind, press, start, end, tracks };
     };
@@ -485,7 +493,9 @@
     say('VALUE долго → селектор; кнопка 10 — LOAD: «' + p.title + '», ' + p.tracks.length + ' треков');
     press(VALUE_SW, 620, 200);
     press({ op: 'step', index: 9 }, 80, 400);
-    say('TRACK долго → цепочка песни; кнопка 2 — режим Song (' + Math.min(256, p.entries.length) + ' строк, ' + p.played + ' тактов)');
+    const rows = chain(p, opts && opts.bars);
+    say('TRACK долго → цепочка песни; кнопка 2 — режим Song (' + rows.length + ' строк, ' +
+        rows.reduce((n, e) => n + e.repeats, 0) + ' тактов)');
     press(TRACK_SW, 620, 200);
     press({ op: 'step', index: 1 }, 80, 200);
     press(VALUE_SW, 80, 200);
@@ -542,11 +552,12 @@
             if (last) t = last + 100000;
             out.push({ op: 'say', kind: 'device', text: 'TRACK: страница ' + (pg + 1), t });
             const dir = pg > shown ? 1 : -1;
+            let edge = t;
             for (let d = 0; d < 8; d++) {
-              for (let e = 0; e < 4; e++) { out.push({ op: 'edge', enc: 0, dir, t }); t += 3000; }
+              for (let e = 0; e < 4; e++) { edge = t; out.push({ op: 'edge', enc: 0, dir, t }); t += 3000; }
               t += 13000;
             }
-            t += 80000 - 13000;
+            t = edge + 80000;
             shown = pg;
           }
           const cols = tracks.filter(x => x >> 3 === pg).map(x => x & 7).sort((x, y) => x - y);
@@ -567,13 +578,14 @@
     };
     const actions = loading.slice(), kept = [];
     for (const m of opts.moves) {
-      const turns = new Set(m.tracks.map(t => t >> 3)).size > 1;
+      // A change turns the page when it needs a page other than the one shown.
+      const turns = () => new Set([page, ...m.tracks.map(t => t >> 3)]).size > 1;
       const names = m.tracks.map(name).join(', ');
       const before = page;
-      const off = change(m.start, m.tracks, turns ? 2 : 4, 0, 'MUTE ' + names + ': ' + KIND[m.kind][0] + ', с такта ' + (m.start + 1));
+      const off = change(m.start, m.tracks, turns() ? 2 : 4, 0, 'MUTE ' + names + ': ' + KIND[m.kind][0] + ', с такта ' + (m.start + 1));
       if (!off) continue;
       page = off.page;
-      const back = change(m.end, m.tracks, turns ? 2 : m.end - m.start === 1 ? 2 : 4, at(m.start, 1) + 100000,
+      const back = change(m.end, m.tracks, turns() ? 2 : m.end - m.start === 1 ? 2 : 4, at(m.start, 1) + 100000,
         'MUTE ' + names + ': ' + KIND[m.kind][1] + ' такта ' + (m.end + 1));
       if (!back) { page = before; continue; }
       page = back.page;

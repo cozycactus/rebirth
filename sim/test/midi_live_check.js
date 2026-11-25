@@ -36,9 +36,32 @@ const SHAM = [
   ['hats', 237, 241, [5]], ['drop', 247, 249, [1, 10]],
 ];
 
+// The groups as the spec defines them, built here apart from mutes():
+// every track of the role or drum note, the gate left out.
+function specGroups(plan) {
+  const all = test => plan.tracks.map((t, i) => i).filter(i => plan.tracks[i].role !== 'gate' && test(plan.tracks[i]));
+  return {
+    kick: all(t => t.role === 'kick'),
+    hats: all(t => [42, 44, 46].includes(t.drum)),
+    snare: all(t => [38, 40].includes(t.drum) && !/fill/i.test(t.name)),
+    bass: all(t => t.role === 'bass'),
+  };
+}
+
+// A one-track SMF: the given meta events at tick 0, then one note.
+function smf(metas) {
+  const body = [];
+  for (const m of metas) body.push(0, 0xff, ...m);
+  body.push(0, 0x90, 60, 100, 0x83, 0x60, 0x80, 60, 0, 0, 0xff, 0x2f, 0);
+  const len = body.length;
+  return new Uint8Array([0x4d, 0x54, 0x68, 0x64, 0, 0, 0, 6, 0, 0, 0, 1, 1, 0xe0,
+    0x4d, 0x54, 0x72, 0x6b, len >>> 24, (len >>> 16) & 255, (len >>> 8) & 255, len & 255, ...body]);
+}
+
 (async () => {
   // 1. Time signatures: seven songs in 4/4 throughout, Are You Sponged with
-  //    two 6/4 bars (chain bars of 4 beats: at 119 and 126.5).
+  //    two 6/4 bars (chain bars of 4 beats: at 119 and 126.5); one that
+  //    makes no bar (numerator 0, denominator 2^200) is left out.
   for (const song of songs) {
     assert.ok(song.meters.length >= 1 && song.meters[0].tick === 0, song.title + ': a time signature at the start');
     const odd = song.meters.filter(m => m.num !== 4 || m.den !== 4);
@@ -47,9 +70,12 @@ const SHAM = [
       assert.deepEqual(odd.map(m => [m.num, m.den, m.tick / bar]), [[6, 4, 119], [6, 4, 126.5]], 'Are You Sponged: its 6/4 bars');
     } else assert.deepEqual(odd, [], song.title + ': 4/4 throughout');
   }
+  const bad = MidiSongs.read(smf([[0x58, 4, 0, 2, 24, 8], [0x58, 4, 3, 200, 24, 8], [0x58, 4, 4, 2, 24, 8]]), 'meters.mid');
+  assert.deepEqual(bad.meters, [{ tick: 0, num: 4, den: 4 }], 'a time signature that makes no bar is left out');
 
-  // 2. The mute script.
+  // 2. The mute script. The plain images are taken before mutes() runs.
   const plans = songs.map(song => MidiClips.plan(song));
+  const images = plans.map(plan => MidiClips.store(plan));
   const lives = plans.map(plan => {
     const before = JSON.stringify(plan);
     const live = MidiClips.mutes(plan);
@@ -59,9 +85,11 @@ const SHAM = [
   const sham = songs.indexOf(byNumber('05'));
   assert.equal(lives[sham].setEnd, 257, 'Sham: the set ends on chain bar 257, the last phrase line in the chain');
   assert.deepEqual(lives[sham].moves.map(m => [m.kind, m.start, m.end, m.tracks]), SHAM, 'Sham: the spec\'s table');
-  plans.forEach((plan, i) => {
-    const live = lives[i], on = (t, b) => plan.tracks[t].cells.slice(b * 16, b * 16 + 16).some(c => c && (c.flags & 1));
+  assert.deepEqual(specGroups(plans[sham]), { kick: [1], hats: [5, 6], snare: [2], bass: [10] }, 'Sham: the spec\'s groups');
+  const checkScript = (plan, live) => {
+    const on = (t, b) => b >= 0 && b < plan.played && plan.tracks[t].cells.slice(b * 16, b * 16 + 16).some(c => c && (c.flags & 1));
     const change = b => plan.tracks.reduce((n, t, k) => n + (t.role !== 'gate' && on(k, b) !== on(k, b - 1) ? 1 : 0), 0);
+    const groups = specGroups(plan);
     let prior = -Infinity;
     for (const m of live.moves) {
       const what = plan.title + ' ' + m.kind + ' back on ' + (m.end + 1);
@@ -70,16 +98,16 @@ const SHAM = [
       assert.ok(m.end <= live.setEnd - 8, what + ': 8 bars before the end at least');
       assert.ok(live.stretches.some(([a, e]) => m.press >= a && m.end < e), what + ': inside one 4/4 stretch');
       for (const t of m.tracks) {
-        assert.ok(t > 0 && t < 16 && plan.tracks[t].role !== 'gate', what + ': track ' + t + ' on pages 1-2, not the gate');
+        assert.ok(t >= 0 && t < 16 && plan.tracks[t].role !== 'gate', what + ': track ' + t + ' on pages 1-2, not the gate');
         for (let b = m.press; b <= m.end; b++) assert.ok(on(t, b), what + ': track ' + t + ' plays in bar ' + (b + 1));
         for (const b of [m.start, m.end]) {
           const c = plan.tracks[t].cells[b * 16], p = plan.tracks[t].cells[b * 16 - 1];
           assert.ok(!(c && p && p.note === c.note && (p.flags & 8)), what + ': no tie into bar ' + (b + 1));
         }
       }
-      const groups = m.kind === 'drop' ? ['kick', 'bass'] : [m.kind === 'kick' ? 'kick' : m.kind];
-      for (const g of groups) {
-        for (const t of live.groups[g]) {
+      // Never half a group: every track of it that plays in the span is muted.
+      for (const g of m.kind === 'drop' ? ['kick', 'bass'] : [m.kind]) {
+        for (const t of groups[g]) {
           let any = false;
           for (let b = m.press; b <= m.end; b++) any = any || on(t, b);
           assert.equal(m.tracks.includes(t), any, what + ': ' + g + ' track ' + t + (any ? ' plays and is muted' : ' is silent and left alone'));
@@ -88,32 +116,68 @@ const SHAM = [
       for (let b = m.start; b < m.end; b++) assert.ok(change(b) <= 2, what + ': no section change in bar ' + (b + 1));
       prior = m.end;
     }
-  });
+  };
+  plans.forEach((plan, i) => checkScript(plan, lives[i]));
   const sponged = songs.indexOf(byNumber('07'));
   assert.deepEqual(lives[sponged].stretches, [[0, 119], [128, 255]], 'Are You Sponged: nothing across its 6/4 bars');
+
+  // Made-up songs from Sham's plan: meters that make no bar (as 4/4), a
+  // long song in 5/4 from bar 1 (no moves, the chain not cut to nothing),
+  // a hats continuation on page 2 (muted with the hats, a page turn) and
+  // on page 3 (no hats move while it plays).
+  {
+    const base = plans[sham];
+    const broken = MidiClips.mutes({ ...base, meters: [{ tick: 0, num: 0, den: 4 }, { tick: 0, num: 3, den: 2 ** 200 }] });
+    assert.deepEqual(broken.moves, lives[sham].moves, 'meters that make no bar count as 4/4');
+    const odd = { ...base, meters: [{ tick: 0, num: 4, den: 4 }, { tick: 1920, num: 5, den: 4 }] };
+    const oddLive = MidiClips.mutes(odd);
+    assert.equal(oddLive.moves.length, 0, '5/4 from bar 1: no moves');
+    assert.equal(oddLive.setEnd, base.played, '5/4 from bar 1: the chain is not cut');
+    const oddImage = MidiClips.store(odd, { bars: oddLive.setEnd });
+    assert.equal(new DataView(oddImage.buffer).getUint16(MidiClips.layout.SONG_OFFSET + 16640, true), 256, '5/4 from bar 1: 256 rows stored');
+    for (const at of [8, 20]) {
+      const tracks = base.tracks.slice();
+      tracks[at] = { ...tracks[5], name: 'Hats CH +2' };
+      const plan = { ...base, tracks, title: 'Sham with Hats CH +2 on track ' + at };
+      const live = MidiClips.mutes(plan);
+      checkScript(plan, live);
+      const hats = live.moves.filter(m => m.kind === 'hats');
+      if (at === 8) {
+        assert.ok(hats.length && hats.every(m => m.tracks.includes(5) && m.tracks.includes(8)), 'a page-2 hats continuation is muted with the hats');
+        const run = MidiClips.show(plan, 600000, { moves: live.moves, bars: live.setEnd });
+        assert.deepEqual(run.moves, live.moves, 'with the continuation every move fits, page turns and all');
+      } else assert.ok(hats.every(m => !m.tracks.includes(5)), 'no hats move while a page-3 continuation plays');
+    }
+  }
   console.log('SCRIPT ' + plans.map((p, i) => p.title.replace(/^\d+ /, '') + ' ' + lives[i].moves.length).join(', '));
 
-  // 3. The plain clips mode: today's show and store.
+  // 3. The plain clips mode: today's show and store; the performed show's
+  //    loading the same but for the chain it announces, and every move kept.
   for (let i = 0; i < plans.length; i++) {
     const plan = plans[i], live = lives[i];
     const plain = MidiClips.show(plan, 600000);
     assert.deepEqual(Object.keys(plain).sort(), ['actions', 'playAt'], plan.title + ': the plain show has no t0 or end');
     const performed = MidiClips.show(plan, 600000, { moves: live.moves, bars: live.setEnd });
-    assert.deepEqual(performed.actions.slice(0, plain.actions.length), plain.actions, plan.title + ': the loading as in the plain show');
+    const loading = performed.actions.slice(0, plain.actions.length);
+    const chainSay = a => a.op === 'say' && a.text.startsWith('TRACK долго');
+    assert.deepEqual(loading.map(a => chainSay(a) ? { ...a, text: '' } : a), plain.actions.map(a => chainSay(a) ? { ...a, text: '' } : a),
+      plan.title + ': the loading as in the plain show');
     assert.equal(performed.playAt, plain.playAt);
-    const image = MidiClips.store(plan);
-    assert.deepEqual(MidiClips.store(plan, undefined), image, plan.title + ': store(plan) as today');
+    assert.deepEqual(performed.moves, live.moves, plan.title + ': every move of the script fits');
+    assert.deepEqual(MidiClips.store(plan), images[i], plan.title + ': store(plan) as before mutes() ran');
     const cut = MidiClips.store(plan, { bars: live.setEnd }), view = new DataView(cut.buffer);
     const L = MidiClips.layout, rows = view.getUint16(L.SONG_OFFSET + 16640, true);
     let bars = 0;
     for (let r = 0; r < rows; r++) bars += cut[L.SONG_OFFSET + r * 65 + 64];
     assert.equal(bars, Math.min(live.setEnd, plan.played), plan.title + ': the stored chain holds the set\'s bars');
+    assert.ok(loading.some(a => chainSay(a) && a.text.includes('(' + rows + ' строк, ' + bars + ' тактов)')), plan.title + ': the chain announced as stored');
   }
 
   // 4. On the core.
   const core = await Core();
   const device = new Device(core);
-  if (!device.features().quantMutes) {
+  const onCore = !!device.features().quantMutes;
+  if (!onCore) {
     console.log('SKIP the performance on the core: this firmware\'s MUTE does not wait for the launch point');
   } else {
     for (let i = 0; i < plans.length; i++) performOnCore(device, plans[i], lives[i]);
@@ -125,18 +189,28 @@ const SHAM = [
   has(/const handsShown = [\s\S]*?!\(padsRun && !padsRun\.performed\);/, 'handsShown hides the hands only for a clips run that is not performed');
   has(/function planHands\(\)[\s\S]*?\|\| \(padsRun && !padsRun\.performed\)\) return;/, 'planHands plans a performed clips run');
   has(/const buildable = [\s\S]*?\(phase === 'midi-loading' && buildDuringLoad === launchSerial\)/, 'buildable allows the build while a performed song loads');
+  has(/liveOption\.disabled = !can\.quantMutes;/, 'the performed mode offered only when MUTE waits for the bar line');
+  has(/if \(loadingPlayer\) \{ loadingPlayer\.stop\(ctx\.currentTime\); loadingPlayer = null; \}/, 'endShow stops the voices of a start that waits');
   const start = src.indexOf('async function startMidiSong'), end = src.indexOf('function channelSong', start);
   assert.ok(start > 0 && end > start, 'app.js: startMidiSong, then channelSong');
   const body = src.slice(start, end), at = s => body.indexOf(s);
-  const order = ['buildDuringLoad = request', 'await rig.midiParts(channelSong(plan))', 'buildDuringLoad = 0',
-    'Artist.schedule(show', 'performed,', "phase = 'prep'", 'generation++', 'planHands()'];
-  order.forEach((s, k) => {
-    assert.ok(at(s) > 0, 'app.js startMidiSong: no "' + s + '"');
-    if (k) assert.ok(at(s) > at(order[k - 1]), 'app.js startMidiSong: "' + s + '" must come after "' + order[k - 1] + '"');
-  });
+  const order = ["const performed = $('midi-song-mode').value === 'live'", 'if (performed) buildDuringLoad = request',
+    'await rig.midiParts(channelSong(plan))', 'loadingPlayer = player',
+    'if (performed && handsWanted() && !handLayer && request === launchSerial)',
+    'Promise.race([loadHands(), new Promise(resolve => setTimeout(resolve, 4000))])',
+    'if (buildDuringLoad === request) buildDuringLoad = 0', 'if (request !== launchSerial)', 'player.stop(ctx.currentTime)',
+    'Artist.schedule(show', 'performed,', 'loadingPlayer = null', "phase = 'prep'", 'if (performed) {', 'generation++', 'planHands()',
+    '} catch (error) {', 'if (buildDuringLoad === request) buildDuringLoad = 0;\n      if (request === launchSerial) endShow'];
+  let from = 0;
+  for (const s of order) {
+    const k = body.indexOf(s, from);
+    assert.ok(k > 0, 'app.js startMidiSong: no "' + s + '" after the previous step');
+    from = k + s.length;
+  }
   assert.ok(/t0: run\.t0/.test(body) && /end: run\.end/.test(body), 'app.js startMidiSong: the show\'s t0 and end from MidiClips.show');
-  console.log('PASS live MUTE: time signatures, the script on all ' + songs.length + ' songs and Sham\'s table, the plain mode ' +
-    'unchanged, the performance on the core, the page\'s wiring');
+  console.log('PASS live MUTE: time signatures, the script on all ' + songs.length + ' songs and Sham\'s table, made-up meters and ' +
+    'continuations, the plain mode unchanged, ' + (onCore ? 'the performance on the core' : 'NOT the performance on the core (skipped)') +
+    ', the page\'s wiring');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 
 // One song performed from boot. The checks read the actions and the device,
@@ -166,7 +240,7 @@ function performOnCore(device, plan, live) {
     assert.ok(near.length <= 2 && Math.max(...near.map(x => x.track)) - Math.min(...near.map(x => x.track)) <= 2,
       title + ': at most two MUTE keys at once, two columns apart');
   }
-  assert.ok(run.end > run.t0 + bars * barUs, title + ': the show ends after the chain');
+  assert.equal(run.end, run.t0 + bars * barUs + 1500000, title + ': the show ends 1.5 s after the chain');
 
   Artist.schedule(run, device, null, null);
   let startT = null, stop = null, late = 0;
@@ -200,6 +274,7 @@ function performOnCore(device, plan, live) {
     const track = Math.floor(focus / 8) * 8 + a.track, bar = Math.ceil((a.t - startT) / barUs);
     assert.ok(!(landing.get(track) > a.t), title + ': track ' + track + ' pressed while its change waits');
     landing.set(track, downbeat(bar));
+    assert.ok(a.t <= downbeat(bar) - 60000, title + ': track ' + track + ' pressed 60 ms before its downbeat at least');
     presses.push({ track, bar });
   }
   // The script's mutes, bar by bar, from the kept moves.

@@ -57,7 +57,11 @@
           const size = variable();
           if (pos + size > end) throw Error('Оборванное метасобытие MIDI.');
           if (meta === 0x03) title = decoder.decode(bytes.subarray(pos, pos + size)).trim() || title;
-          if (meta === 0x58 && size >= 2) meters.push({ tick, num: bytes[pos], den: 2 ** bytes[pos + 1] });
+          // A time signature as written; one that makes no bar (numerator 0,
+          // denominator past 1/64) is left out.
+          if (meta === 0x58 && size >= 2 && bytes[pos] > 0 && bytes[pos + 1] <= 6) {
+            meters.push({ tick, num: bytes[pos], den: 2 ** bytes[pos + 1] });
+          }
           if (meta === 0x51 && size === 3) {
             const us = bytes[pos] * 65536 + bytes[pos + 1] * 256 + bytes[pos + 2];
             if (us) tempos.push({ tick, track, us });
