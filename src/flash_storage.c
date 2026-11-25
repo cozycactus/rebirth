@@ -16,13 +16,15 @@
 
 // ─── Flash layout ──────────────────────────────────────────────
 //
-// v7 lives immediately before the MIDI Song slot. A new save leaves the
-// last 128 KiB intact so the original eight-track firmware can still read it.
+// v8 lives immediately before the MIDI Song slot, in the slot v7 used. A new
+// save leaves the last 128 KiB intact so the original eight-track firmware can
+// still read it.
 //
-// A load takes the v7 save when it is valid and the eight-track save
-// otherwise. A v7 save cut short by a power loss leaves its slot looking
-// exactly like one that was never written, so "no valid v7 save" is one case,
-// whatever the reason, and the load's result says which save it gave.
+// A load takes the v8 save when it is valid, else a v7 save in the same slot,
+// else the eight-track save. A save cut short by a power loss leaves its slot
+// looking exactly like one that was never written, so "no valid save in the
+// slot" is one case, whatever the reason, and the load's result says which
+// save it gave.
 #define FLASH_PAGE      256u
 #define STORE_OFFSET    0x000b0000u
 #define STORE_RESERVED  0x00030000u
@@ -61,29 +63,64 @@ typedef struct {
     char name[9];
     uint32_t kit_steps[OLD_TRACKS][STEPS_PER_PATTERN];
 } pattern_v6_t;
+// The song records of formats 4-7 held 256 rows, whatever the live song holds.
+// Each keeps the enum of the ABI that wrote it: one byte on the device
+// (-fshort-enums), four on the host and in the simulator.
+#define OLD_SONG_ENTRIES 256
 typedef struct {
-    struct { uint8_t pattern_index[OLD_TRACKS], repeats; } entries[MAX_SONG_ENTRIES];
+    struct { uint8_t pattern_index[OLD_TRACKS], repeats; } entries[OLD_SONG_ENTRIES];
     uint16_t length;
     song_end_mode_t end_mode;
     char name[9];
 } old_song_t;
+typedef struct {
+    uint8_t pattern_index[NUM_TRACKS];
+    uint8_t repeats;
+} song_entry_v7_t;
+typedef struct {
+    song_entry_v7_t entries[OLD_SONG_ENTRIES];
+    uint16_t length;
+    song_end_mode_t end_mode;
+    char name[9];
+} song_v7_t;
 
+#define SHORT_ENUMS (sizeof(song_end_mode_t) == 1)
+_Static_assert(sizeof(old_song_t) == (SHORT_ENUMS ? 2316 : 2324), "legacy song ABI");
+_Static_assert(sizeof(((old_song_t *)0)->entries[0]) == 9, "legacy song row");
+_Static_assert(offsetof(old_song_t, length) == 2304, "legacy song ABI");
+_Static_assert(offsetof(old_song_t, end_mode) == (SHORT_ENUMS ? 2306 : 2308), "legacy song ABI");
+_Static_assert(offsetof(old_song_t, name) == (SHORT_ENUMS ? 2307 : 2312), "legacy song ABI");
+_Static_assert(offsetof(song_entry_v7_t, repeats) == 64, "v7 song row");
+_Static_assert(sizeof(song_entry_v7_t) == 65, "v7 song row");
+_Static_assert(sizeof(song_v7_t) == (SHORT_ENUMS ? 16652 : 16660), "v7 song ABI");
+_Static_assert(offsetof(song_v7_t, length) == 16640, "v7 song ABI");
+_Static_assert(offsetof(song_v7_t, end_mode) == (SHORT_ENUMS ? 16642 : 16644), "v7 song ABI");
+_Static_assert(offsetof(song_v7_t, name) == (SHORT_ENUMS ? 16643 : 16648), "v7 song ABI");
 #if defined(__arm__)
 _Static_assert(sizeof(pattern_v5_t) == 459 && sizeof(pattern_v6_t) == 972, "legacy pattern ABI");
-_Static_assert(sizeof(old_song_t) == 2316, "legacy song ABI");
 #endif
+// Format 8: 384 rows of 68 bytes.
+_Static_assert(sizeof(song_t) == (SHORT_ENUMS ? 26124 : 26132), "v8 song ABI");
+_Static_assert(offsetof(song_t, length) == 26112, "v8 song ABI");
+_Static_assert(offsetof(song_t, end_mode) == (SHORT_ENUMS ? 26114 : 26116), "v8 song ABI");
+_Static_assert(offsetof(song_t, name) == (SHORT_ENUMS ? 26115 : 26120), "v8 song ABI");
 #define V5_PAT_BYTES    (sizeof(pattern_v5_t) * MAX_PATTERNS)
 #define V5_SONG_OFFSET  (PAT_OFFSET + PAGE_ROUND(V5_PAT_BYTES))
 #define V6_PAT_BYTES    (sizeof(pattern_v6_t) * MAX_PATTERNS)
 #define V6_SONG_OFFSET  (PAT_OFFSET + PAGE_ROUND(V6_PAT_BYTES))
 #define V6_KIT_OFFSET   (V6_SONG_OFFSET + PAGE_ROUND(sizeof(old_song_t)))
+// Format 7: the same patterns and kits, its song 256 rows of 65 bytes.
+#define V7_SONG_BYTES   sizeof(song_v7_t)
+#define V7_KIT_OFFSET   (SONG_OFFSET + PAGE_ROUND(V7_SONG_BYTES))
+_Static_assert(V7_KIT_OFFSET == (SHORT_ENUMS ? 148736u : 167168u), "v7 kit offset");
 _Static_assert(HDR_SIZE + PAT_SIZE + SONG_SIZE + KIT_SIZE <= STORE_RESERVED,
                "64-track save exceeds its flash slot");
 
 // ─── Header ────────────────────────────────────────────────────
 
 #define MAGIC   0x52425448u     // 'RBTH'
-#define VERSION 7u
+#define VERSION 8u
+#define V7_VERSION 7u
 #define V5_VERSION 5u
 #define LEGACY_VERSION 4u
 
@@ -134,11 +171,18 @@ static uint32_t crc32_update(uint32_t crc, const void *data, size_t length) {
     return crc;
 }
 
-// Version 7: patterns + song + kit settings.
-static uint32_t payload_checksum(const void *patterns, const void *song, const void *kits) {
+// Versions 8 and 7: patterns + song + kit settings, each song its own size.
+static uint32_t checksum_with_song(const void *patterns, const void *song, size_t song_bytes,
+                                   const void *kits) {
     uint32_t crc = crc32_update(UINT32_MAX, patterns, PAT_BYTES);
-    crc = crc32_update(crc, song, SONG_BYTES);
+    crc = crc32_update(crc, song, song_bytes);
     return ~crc32_update(crc, kits, KIT_BYTES);
+}
+static uint32_t payload_checksum(const void *patterns, const void *song, const void *kits) {
+    return checksum_with_song(patterns, song, SONG_BYTES, kits);
+}
+static uint32_t payload_checksum_v7(const void *patterns, const void *song, const void *kits) {
+    return checksum_with_song(patterns, song, V7_SONG_BYTES, kits);
 }
 
 // Version 5: legacy patterns + song.
@@ -146,8 +190,31 @@ static uint32_t payload_checksum_v5(const void *patterns, const void *song) {
     return ~crc32_update(crc32_update(UINT32_MAX, patterns, V5_PAT_BYTES), song, sizeof(old_song_t));
 }
 
+// Each format's song record is checked as its own type; the padding of a v8
+// row is not checked (the CRC covers it).
 static bool song_valid(const song_t *song) {
     if (song->length > MAX_SONG_ENTRIES || song->name[8] != '\0') return false;
+    if (song->end_mode != SONG_END_LOOP && song->end_mode != SONG_END_STOP) return false;
+    for (uint16_t entry = 0; entry < song->length; entry++) {
+        for (uint8_t track = 0; track < NUM_TRACKS; track++) {
+            if (song->entries[entry].pattern_index[track] >= MAX_PATTERNS) return false;
+        }
+    }
+    return true;
+}
+
+// What a save holds and a load leaves past the song's rows and in their
+// padding: zeros. The song edits keep it so (song.c); this also clears what a
+// save made elsewhere left there. Called on the stopped sequencer's song.
+static void song_canonicalise(song_t *song) {
+    for (uint16_t i = 0; i < MAX_SONG_ENTRIES; i++) {
+        if (i >= song->length) memset(&song->entries[i], 0, sizeof(song->entries[i]));
+        else memset(song->entries[i]._pad, 0, sizeof(song->entries[i]._pad));
+    }
+}
+
+static bool song_v7_valid(const song_v7_t *song) {
+    if (song->length > OLD_SONG_ENTRIES || song->name[8] != '\0') return false;
     if (song->end_mode != SONG_END_LOOP && song->end_mode != SONG_END_STOP) return false;
     for (uint16_t entry = 0; entry < song->length; entry++) {
         for (uint8_t track = 0; track < NUM_TRACKS; track++) {
@@ -180,9 +247,7 @@ static bool pattern_core_valid(const step_t steps[][STEPS_PER_PATTERN], const tr
     return true;
 }
 
-static bool payload_valid(const pattern_t *patterns, const song_t *song,
-                          const kit_config_t *kits) {
-    if (!song_valid(song)) return false;
+static bool patterns_and_kits_valid(const pattern_t *patterns, const kit_config_t *kits) {
     for (uint8_t pattern = 0; pattern < MAX_PATTERNS; pattern++) {
         const pattern_t *p = &patterns[pattern];
         if (!pattern_core_valid(p->steps, p->tracks, p->track_length, NUM_TRACKS,
@@ -201,12 +266,17 @@ static bool payload_valid(const pattern_t *patterns, const song_t *song,
     return true;
 }
 
+static bool payload_valid(const pattern_t *patterns, const song_t *song,
+                          const kit_config_t *kits) {
+    return song_valid(song) && patterns_and_kits_valid(patterns, kits);
+}
+
 static bool old_image_valid(const uint8_t *base) {
     const store_header_t *h = (const store_header_t *)base;
     if (h->magic != MAGIC || (h->version != 4 && h->version != 5 && h->version != 6)) return false;
     const bool kit = h->version == 6;
     const old_song_t *song = (const old_song_t *)(base + (kit ? V6_SONG_OFFSET : V5_SONG_OFFSET));
-    if (song->length > MAX_SONG_ENTRIES || song->name[8] ||
+    if (song->length > OLD_SONG_ENTRIES || song->name[8] ||
         (song->end_mode != SONG_END_LOOP && song->end_mode != SONG_END_STOP)) return false;
     for (unsigned i = 0; i < song->length; i++)
         for (unsigned t = 0; t < OLD_TRACKS; t++)
@@ -241,8 +311,8 @@ static bool old_image_valid(const uint8_t *base) {
 #endif
 
 #ifndef MOCK_HARDWARE
-// The v7 save in its own slot, whatever the eight-track slot holds.
-static bool current_image_valid(void) {
+// The v8 save in its own slot, whatever the eight-track slot holds.
+static bool v8_image_valid(void) {
     const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
     const store_header_t *h = (const store_header_t *)base;
     if (h->magic != MAGIC || h->version != VERSION) return false;
@@ -252,11 +322,32 @@ static bool current_image_valid(void) {
     return payload_valid(patterns, song, kits) &&
            h->checksum == payload_checksum(patterns, song, kits);
 }
+
+// A v7 save in the same slot: its song and kits where v7 put them.
+static bool v7_image_valid(void) {
+    const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
+    const store_header_t *h = (const store_header_t *)base;
+    if (h->magic != MAGIC || h->version != V7_VERSION) return false;
+    const pattern_t *patterns = (const pattern_t *)(base + PAT_OFFSET);
+    const song_v7_t *song = (const song_v7_t *)(base + SONG_OFFSET);
+    const kit_config_t *kits = (const kit_config_t *)(base + V7_KIT_OFFSET);
+    return song_v7_valid(song) && patterns_and_kits_valid(patterns, kits) &&
+           h->checksum == payload_checksum_v7(patterns, song, kits);
+}
+
+typedef enum { IMAGE_NONE, IMAGE_V8, IMAGE_V7, IMAGE_OLD } image_kind_t;
+
+static image_kind_t valid_image(void) {
+    if (v8_image_valid()) return IMAGE_V8;
+    if (v7_image_valid()) return IMAGE_V7;
+    if (old_image_valid((const uint8_t *)(XIP_BASE + OLD_STORE))) return IMAGE_OLD;
+    return IMAGE_NONE;
+}
 #endif
 
 bool flash_storage_is_valid(void) {
 #ifndef MOCK_HARDWARE
-    return current_image_valid() || old_image_valid((const uint8_t *)(XIP_BASE + OLD_STORE));
+    return valid_image() != IMAGE_NONE;
 #else
     return false;
 #endif
@@ -269,6 +360,7 @@ static bool save_stopped(void) {
     if (g_seq.transport.state != TRANSPORT_STOPPED) return false;
 #ifndef MOCK_HARDWARE
     if (!payload_valid(g_seq.patterns, &g_seq.song, g_seq.kit_config)) return false;
+    song_canonicalise(&g_seq.song);
     // Build the 256-byte header page
     static store_header_t hdr;
     memset(&hdr, 0xFF, sizeof(hdr));    // 0xFF = erased flash default
@@ -302,8 +394,8 @@ static bool save_stopped(void) {
     multicore_lockout_end_blocking();
     // Whether or not the new save validates.
     resync_inputs();
-    // The save just written: an eight-track save next to it is no success.
-    return current_image_valid();
+    // The save just written: a v7 or eight-track save next to it is no success.
+    return v8_image_valid();
 #else
     return false;
 #endif
@@ -314,8 +406,9 @@ static flash_load_t load_stopped(void) {
 #ifndef MOCK_HARDWARE
     const uint8_t *base = (const uint8_t *)(XIP_BASE + STORE_OFFSET);
     const uint8_t *old = (const uint8_t *)(XIP_BASE + OLD_STORE);
-    bool current = current_image_valid();
-    if (!current && !old_image_valid(old)) return FLASH_LOAD_FAILED;
+    image_kind_t kind = valid_image();
+    if (kind == IMAGE_NONE) return FLASH_LOAD_FAILED;
+    bool current = kind != IMAGE_OLD;       // v8 or v7: the same pattern records
     bool v6 = !current && ((const store_header_t *)old)->version == 6;
     midi_wait_output_idle();
     for (uint8_t i = 0; i < MAX_PATTERNS; i++) {
@@ -338,9 +431,22 @@ static flash_load_t load_stopped(void) {
         }
         seq_unlock(lock);
     }
-    if (current) {
+    if (kind == IMAGE_V8) {
         memcpy(&g_seq.song, base + SONG_OFFSET, SONG_BYTES);
+        song_canonicalise(&g_seq.song);
         memcpy(g_seq.kit_config, base + KIT_OFFSET, KIT_BYTES);
+    } else if (kind == IMAGE_V7) {
+        // Field by field: a v7 row is 65 bytes, a v8 row 68.
+        const song_v7_t *song = (const song_v7_t *)(base + SONG_OFFSET);
+        memset(&g_seq.song, 0, sizeof(g_seq.song));
+        g_seq.song.length = song->length;
+        g_seq.song.end_mode = song->end_mode;
+        memcpy(g_seq.song.name, song->name, sizeof(song->name));
+        for (unsigned i = 0; i < song->length; i++) {
+            memcpy(g_seq.song.entries[i].pattern_index, song->entries[i].pattern_index, NUM_TRACKS);
+            g_seq.song.entries[i].repeats = song->entries[i].repeats;
+        }
+        memcpy(g_seq.kit_config, base + V7_KIT_OFFSET, KIT_BYTES);
     } else {
         const old_song_t *song = (const old_song_t *)(old + (v6 ? V6_SONG_OFFSET : V5_SONG_OFFSET));
         memset(&g_seq.song, 0, sizeof(g_seq.song));
@@ -359,6 +465,7 @@ static flash_load_t load_stopped(void) {
             sequencer_refresh_track_playback(track, pattern);
         }
     }
+    transport_song_loaded();
     resync_inputs();
     return current ? FLASH_LOAD_OK : FLASH_LOAD_OLD_SAVE;
 #else

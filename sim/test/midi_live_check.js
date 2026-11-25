@@ -11,7 +11,9 @@
 //   4. on the wasm core (skipped without quantised MUTE), every song from
 //      boot: the actions of the performance, every change on its downbeat,
 //      the mutes in every bar, every note start of the plan less the muted
-//      cells and nothing else, the shortened chain stopping on its bar;
+//      cells and nothing else, the chain stopping on its bar: each song
+//      whole in the core's 384 rows, and Sham as a 256-row core lays it out,
+//      cut on its last phrase line (a version 7 image, the fallback loads it);
 //   5. app.js's wiring of the mode (read from its source, as hands_unit.js
 //      reads its panel: when it fails, it names the edit to make).
 
@@ -29,11 +31,16 @@ const songs = fs.readdirSync(LIBRARY).filter(f => f.endsWith('.mid')).sort()
   .map(f => MidiSongs.read(new Uint8Array(fs.readFileSync(path.join(LIBRARY, f))), f));
 const byNumber = n => songs.find(s => s.title.startsWith(n));
 
-// Sham's script, 0-based chain bars: muted from `start`, back on `end`.
-const SHAM = [
+// Sham's script, 0-based chain bars: muted from `start`, back on `end`. In
+// the 384-row chain the whole song (361 bars) plays and the set runs to its
+// end; in 256 rows the chain stops after bar 262 and the set on bar 257.
+const SHAM_256 = [
   ['kick', 40, 41, [1]], ['kick', 56, 57, [1]], ['hats', 77, 81, [5, 6]], ['drop', 87, 89, [1, 10]],
   ['kick', 96, 97, [1]], ['snare', 135, 137, [2]], ['snare', 151, 153, [2]], ['kick', 208, 209, [1]],
   ['hats', 237, 241, [5]], ['drop', 247, 249, [1, 10]],
+];
+const SHAM = [...SHAM_256,
+  ['kick', 264, 265, [1]], ['hats', 277, 281, [5, 6]], ['hats', 317, 321, [5, 6]], ['hats', 333, 337, [5, 6]],
 ];
 
 // The groups as the spec defines them, built here apart from mutes():
@@ -59,6 +66,11 @@ function smf(metas) {
 }
 
 (async () => {
+  const core = await Core();
+  const device = new Device(core);
+  const ROWS = device.songEntries();
+  assert.equal(ROWS, 384, 'the core holds 384 chain rows');
+
   // 1. Time signatures: seven songs in 4/4 throughout, Are You Sponged with
   //    two 6/4 bars (chain bars of 4 beats: at 119 and 126.5); one that
   //    makes no bar (numerator 0, denominator 2^200) is left out.
@@ -74,7 +86,7 @@ function smf(metas) {
   assert.deepEqual(bad.meters, [{ tick: 0, num: 4, den: 4 }], 'a time signature that makes no bar is left out');
 
   // 2. The mute script. The plain images are taken before mutes() runs.
-  const plans = songs.map(song => MidiClips.plan(song));
+  const plans = songs.map(song => MidiClips.plan(song, { rows: ROWS }));
   const images = plans.map(plan => MidiClips.store(plan));
   const lives = plans.map(plan => {
     const before = JSON.stringify(plan);
@@ -83,8 +95,17 @@ function smf(metas) {
     return live;
   });
   const sham = songs.indexOf(byNumber('05'));
-  assert.equal(lives[sham].setEnd, 257, 'Sham: the set ends on chain bar 257, the last phrase line in the chain');
-  assert.deepEqual(lives[sham].moves.map(m => [m.kind, m.start, m.end, m.tracks]), SHAM, 'Sham: the spec\'s table');
+  plans.forEach((plan, i) => {
+    assert.equal(plan.played, plan.bars, plan.title + ': the whole song is in the chain');
+    assert.equal(lives[i].setEnd, plan.played, plan.title + ': the set runs to the end of the song');
+  });
+  assert.deepEqual(lives[sham].moves.map(m => [m.kind, m.start, m.end, m.tracks]), SHAM, 'Sham: the spec\'s table at 384 rows');
+  // The cut path: Sham in 256 rows.
+  const sham256 = MidiClips.plan(songs[sham], { rows: 256 }), image256 = MidiClips.store(sham256);
+  const live256 = MidiClips.mutes(sham256);
+  assert.equal(sham256.played, 262, 'Sham in 256 rows: the chain plays 262 bars');
+  assert.equal(live256.setEnd, 257, 'Sham in 256 rows: the set ends on chain bar 257, the last phrase line in the chain');
+  assert.deepEqual(live256.moves.map(m => [m.kind, m.start, m.end, m.tracks]), SHAM_256, 'Sham in 256 rows: the spec\'s table');
   assert.deepEqual(specGroups(plans[sham]), { kick: [1], hats: [5, 6], snare: [2], bass: [10] }, 'Sham: the spec\'s groups');
   const checkScript = (plan, live) => {
     const on = (t, b) => b >= 0 && b < plan.played && plan.tracks[t].cells.slice(b * 16, b * 16 + 16).some(c => c && (c.flags & 1));
@@ -118,23 +139,29 @@ function smf(metas) {
     }
   };
   plans.forEach((plan, i) => checkScript(plan, lives[i]));
+  checkScript(sham256, live256);
   const sponged = songs.indexOf(byNumber('07'));
   assert.deepEqual(lives[sponged].stretches, [[0, 119], [128, 255]], 'Are You Sponged: nothing across its 6/4 bars');
 
   // Made-up songs from Sham's plan: meters that make no bar (as 4/4), a
-  // long song in 5/4 from bar 1 (no moves, the chain not cut to nothing),
+  // long song in 5/4 from bar 1 (no moves; in 256 rows the chain is not cut
+  // to nothing),
   // a hats continuation on page 2 (muted with the hats, a page turn) and
   // on page 3 (no hats move while it plays).
   {
     const base = plans[sham];
     const broken = MidiClips.mutes({ ...base, meters: [{ tick: 0, num: 0, den: 4 }, { tick: 0, num: 3, den: 2 ** 200 }] });
     assert.deepEqual(broken.moves, lives[sham].moves, 'meters that make no bar count as 4/4');
-    const odd = { ...base, meters: [{ tick: 0, num: 4, den: 4 }, { tick: 1920, num: 5, den: 4 }] };
-    const oddLive = MidiClips.mutes(odd);
-    assert.equal(oddLive.moves.length, 0, '5/4 from bar 1: no moves');
-    assert.equal(oddLive.setEnd, base.played, '5/4 from bar 1: the chain is not cut');
-    const oddImage = MidiClips.store(odd, { bars: oddLive.setEnd });
-    assert.equal(new DataView(oddImage.buffer).getUint16(MidiClips.layout.SONG_OFFSET + 16640, true), 256, '5/4 from bar 1: 256 rows stored');
+    for (const from of [base, sham256]) {
+      const odd = { ...from, meters: [{ tick: 0, num: 4, den: 4 }, { tick: 1920, num: 5, den: 4 }] };
+      const oddLive = MidiClips.mutes(odd);
+      const what = '5/4 from bar 1 in ' + from.rows + ' rows: ';
+      assert.equal(oddLive.moves.length, 0, what + 'no moves');
+      assert.equal(oddLive.setEnd, from.played, what + 'the chain is not cut');
+      const oddImage = MidiClips.store(odd, { bars: oddLive.setEnd }), L = MidiClips.layoutFor(from.rows);
+      assert.equal(new DataView(oddImage.buffer).getUint16(L.SONG_OFFSET + L.TRAILER, true), Math.min(from.rows, from.entries.length),
+        what + 'every row stored');
+    }
     for (const at of [8, 20]) {
       const tracks = base.tracks.slice();
       tracks[at] = { ...tracks[5], name: 'Hats CH +2' };
@@ -149,12 +176,13 @@ function smf(metas) {
       } else assert.ok(hats.every(m => !m.tracks.includes(5)), 'no hats move while a page-3 continuation plays');
     }
   }
-  console.log('SCRIPT ' + plans.map((p, i) => p.title.replace(/^\d+ /, '') + ' ' + lives[i].moves.length).join(', '));
+  console.log('SCRIPT ' + plans.map((p, i) => p.title.replace(/^\d+ /, '') + ' ' + lives[i].moves.length).join(', ') +
+    '; Sham in 256 rows ' + live256.moves.length);
 
   // 3. The plain clips mode: today's show and store; the performed show's
   //    loading the same but for the chain it announces, and every move kept.
-  for (let i = 0; i < plans.length; i++) {
-    const plan = plans[i], live = lives[i];
+  const all = [...plans.map((plan, i) => [plan, lives[i], images[i]]), [sham256, live256, image256]];
+  for (const [plan, live, image] of all) {
     const plain = MidiClips.show(plan, 600000);
     assert.deepEqual(Object.keys(plain).sort(), ['actions', 'playAt'], plan.title + ': the plain show has no t0 or end');
     const performed = MidiClips.show(plan, 600000, { moves: live.moves, bars: live.setEnd });
@@ -164,23 +192,23 @@ function smf(metas) {
       plan.title + ': the loading as in the plain show');
     assert.equal(performed.playAt, plain.playAt);
     assert.deepEqual(performed.moves, live.moves, plan.title + ': every move of the script fits');
-    assert.deepEqual(MidiClips.store(plan), images[i], plan.title + ': store(plan) as before mutes() ran');
+    assert.deepEqual(MidiClips.store(plan), image, plan.title + ': store(plan) as before mutes() ran');
     const cut = MidiClips.store(plan, { bars: live.setEnd }), view = new DataView(cut.buffer);
-    const L = MidiClips.layout, rows = view.getUint16(L.SONG_OFFSET + 16640, true);
+    const L = MidiClips.layoutFor(plan.rows), rows = view.getUint16(L.SONG_OFFSET + L.TRAILER, true);
+    assert.equal(cut[4], L.VERSION, plan.title + ': a version ' + L.VERSION + ' image for ' + plan.rows + ' rows');
     let bars = 0;
-    for (let r = 0; r < rows; r++) bars += cut[L.SONG_OFFSET + r * 65 + 64];
+    for (let r = 0; r < rows; r++) bars += cut[L.SONG_OFFSET + r * L.ROW_BYTES + 64];
     assert.equal(bars, Math.min(live.setEnd, plan.played), plan.title + ': the stored chain holds the set\'s bars');
     assert.ok(loading.some(a => chainSay(a) && a.text.includes('(' + rows + ' строк, ' + bars + ' тактов)')), plan.title + ': the chain announced as stored');
   }
 
   // 4. On the core.
-  const core = await Core();
-  const device = new Device(core);
   const onCore = !!device.features().quantMutes;
   if (!onCore) {
     console.log('SKIP the performance on the core: this firmware\'s MUTE does not wait for the launch point');
   } else {
     for (let i = 0; i < plans.length; i++) performOnCore(device, plans[i], lives[i]);
+    performOnCore(device, sham256, live256);
   }
 
   // 5. app.js's wiring.
@@ -325,5 +353,6 @@ function performOnCore(device, plan, live) {
   assert.equal(info.midiOverflow, 0);
   assert.equal(info.fatal, null);
   console.log('LIVE ' + title + ': ' + moves.length + ' moves, ' + presses.length + ' MUTE presses, ' + edges.length / 32 +
-    ' page turns, stops after bar ' + bars + (bars < plan.played ? ' (the chain would play ' + plan.played + ')' : ''));
+    ' page turns, stops after bar ' + bars + (bars < plan.played ? ' (the chain would play ' + plan.played + ')' : '') +
+    ' (' + plan.rows + ' rows)');
 }

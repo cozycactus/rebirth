@@ -6,6 +6,7 @@
 #define __isr
 #define __time_critical_func(name) name
 #define __not_in_flash_func(name) name
+#define __no_inline_not_in_flash_func(name) __attribute__((noinline)) name
 #define GPIO_IN 0
 #define GPIO_OUT 1
 #define GPIO_FUNC_UART 2

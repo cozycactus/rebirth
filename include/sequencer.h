@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 // ─── Configuration ──────────────────────────────────────────────
 
@@ -15,7 +16,7 @@ typedef uint64_t track_mask_t;
 #define PATTERN_BANKS       4
 #define PATTERNS_PER_BANK   8
 #define MAX_PATTERNS        (PATTERN_BANKS * PATTERNS_PER_BANK)
-#define MAX_SONG_ENTRIES    256
+#define MAX_SONG_ENTRIES    384
 #define NO_QUEUED_PATTERN   0xFF
 #define PPQN                96      // Pulses per quarter note
 #define PULSES_PER_STEP     (PPQN / 4)  // 24 pulses per 16th note at 96 PPQN
@@ -145,11 +146,20 @@ typedef struct {
     uint32_t       kit_steps[KIT_TRACK_SLOTS][STEPS_PER_PATTERN]; // Kit step words
 } pattern_t;
 
-// Song mode
-typedef struct {
-    uint8_t pattern_index[NUM_TRACKS]; // Pattern location per track/section
-    uint8_t repeats;        // How many times (1–255, 0 = skip)
+// Song mode. A row is 17 words, so song_move_rows() shifts rows by words; the
+// fields are read and written by name, the words only by that copy.
+#define SONG_ROW_WORDS      17
+typedef union {
+    struct {
+        uint8_t pattern_index[NUM_TRACKS]; // Pattern location per track/section
+        uint8_t repeats;    // How many times (1–255, 0 = skip)
+        uint8_t _pad[3];    // Written 0 by the edits; a save and a load clear it
+    };
+    uint32_t words[SONG_ROW_WORDS];
 } song_entry_t;
+_Static_assert(sizeof(song_entry_t) == 4 * SONG_ROW_WORDS && _Alignof(song_entry_t) == 4,
+               "a song row is whole words");
+_Static_assert(offsetof(song_entry_t, repeats) == NUM_TRACKS, "repeats follows the locations");
 
 typedef enum {
     SONG_END_LOOP,          // Loop back to start
@@ -271,6 +281,8 @@ void sequencer_core1_entry(void);
 void transport_start(void);
 void transport_stop(void);
 void transport_continue(void);
+// After a project load (stopped): the song position starts over in the new song.
+void transport_song_loaded(void);
 void transport_set_bpm(float bpm);
 void transport_set_mode(play_mode_t mode);
 void transport_set_launch_quant(launch_quant_t q);  // ignores q >= COUNT
@@ -331,6 +343,10 @@ bool song_insert_patterns(uint16_t position, const uint8_t pattern_index[NUM_TRA
                           uint8_t repeats);
 bool song_remove(uint16_t position);
 bool song_move(uint16_t from, uint16_t to);
+// Moves `rows` whole rows from src to dst, a word at a time, from RAM on the
+// device. For song.c's list edits, under seq_lock. dst and src are rows of one
+// song_entry_t array (they may overlap), or, for a single row, any two rows.
+void song_move_rows(song_entry_t *dst, const song_entry_t *src, uint16_t rows);
 void song_clear(void);
 void song_set_end_mode(song_end_mode_t mode);
 

@@ -77,6 +77,7 @@ int sim_flash_store_size(void);
 uint8_t *sim_midi_song_slot(void);
 int sim_midi_song_capacity(void);
 int sim_midi_song_open(void);                   // enter the hardware player's screen
+int sim_song_entries(void);                     // rows the Song-mode chain holds (MAX_SONG_ENTRIES)
 
 // ─── Inspection: for checks and the on-screen meters only. The scripted
 // artist must not read these; it sees the OLED and the lights. ──
@@ -90,6 +91,7 @@ uint32_t sim_dbg_kit_step(int location, int track, int step);
 int sim_dbg_track_length(int location, int track);
 uint32_t sim_dbg_track_config(int track);       // type | MIDI ch<<8 | gate%<<16 | output<<24 | CV pair<<26
 int sim_dbg_mutes(void);
+uint32_t sim_dbg_song(void);                    // chain rows | playing row<<16
 uint32_t sim_dbg_overruns(void);
 int sim_dbg_midi_overflow(void);
 uint32_t sim_dbg_midi_in_overruns(void);         // bytes lost in the UART's one-byte receiver

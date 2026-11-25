@@ -1,4 +1,5 @@
 #include <string.h>
+#include "pico/stdlib.h"
 #include "sequencer.h"
 #include "kit.h"
 
@@ -15,6 +16,55 @@ pattern_t *seq_playing_pattern(uint8_t track) {
 }
 
 // ─── Song editing ───────────────────────────────────────────────
+
+// A list edit shifts every row after the edit point with Core 0's interrupts
+// off (seq_lock), and Core 1's timer waits on the lock every pulse. The rows
+// are whole words, so each is copied as 17 word loads and stores, unrolled in
+// the source so that every build (Debug at -Og too) copies a row the same way,
+// from RAM and never inlined into a caller in flash; the C library's memmove
+// copies these rows a byte at a time. GCC does not turn the unrolled words
+// into a memmove call; CMakeLists.txt keeps it from vectorising this file,
+// which would triple the copy's size in RAM. A row's source and destination
+// never overlap (a shift is at least one row), so only the order of the rows
+// depends on the overlap. Nothing else runs from flash under the lock: a new
+// row is built before it is taken and stored with this copy.
+_Static_assert(SONG_ROW_WORDS == 17, "song_move_rows() copies 17 words a row");
+#define COPY_4_WORDS(d, s, i) do {                                                  \
+        uint32_t w0 = (s)[(i)], w1 = (s)[(i) + 1], w2 = (s)[(i) + 2], w3 = (s)[(i) + 3]; \
+        (d)[(i)] = w0; (d)[(i) + 1] = w1; (d)[(i) + 2] = w2; (d)[(i) + 3] = w3;            \
+    } while (0)
+#define COPY_ROW(dst, src) do {                                                     \
+        uint32_t *d_ = (dst)->words;                                                \
+        const uint32_t *s_ = (src)->words;                                          \
+        COPY_4_WORDS(d_, s_, 0);                                                    \
+        COPY_4_WORDS(d_, s_, 4);                                                    \
+        COPY_4_WORDS(d_, s_, 8);                                                    \
+        COPY_4_WORDS(d_, s_, 12);                                                   \
+        d_[16] = s_[16];                                                            \
+    } while (0)
+
+// One copy in RAM: GCC would otherwise add a second, specialised for one row.
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((noclone))
+#endif
+void __no_inline_not_in_flash_func(song_move_rows)(song_entry_t *dst, const song_entry_t *src,
+                                                   uint16_t rows) {
+    if (!rows || dst == src) return;
+    // As integers: a single row may come from another array (a row built on
+    // the stack), where comparing the pointers themselves is undefined.
+    if ((uintptr_t)dst < (uintptr_t)src) {
+        for (uint16_t r = 0; r < rows; r++) COPY_ROW(&dst[r], &src[r]);
+    } else {
+        for (uint16_t r = rows; r--;) COPY_ROW(&dst[r], &src[r]);
+    }
+}
+
+// A whole new row, padding 0, built before the lock is taken.
+static void make_row(song_entry_t *row, const uint8_t pattern_index[NUM_TRACKS], uint8_t repeats) {
+    memset(row, 0, sizeof(*row));
+    memcpy(row->pattern_index, pattern_index, sizeof(row->pattern_index));
+    row->repeats = repeats;
+}
 
 // While Song mode plays, list edits keep the playing entry where it is, so the
 // entry that follows it in the edited list plays next. Caller holds seq_lock.
@@ -41,15 +91,15 @@ bool song_append_patterns(const uint8_t pattern_index[NUM_TRACKS], uint8_t repea
         if (pattern_index[track] >= MAX_PATTERNS) return false;
     }
 
+    song_entry_t row;
+    make_row(&row, pattern_index, repeats);
     uint32_t lock_state = seq_lock();
     if (g_seq.song.length >= MAX_SONG_ENTRIES) {
         seq_unlock(lock_state);
         return false;
     }
 
-    song_entry_t *e = &g_seq.song.entries[g_seq.song.length];
-    memcpy(e->pattern_index, pattern_index, sizeof(e->pattern_index));
-    e->repeats = repeats;
+    song_move_rows(&g_seq.song.entries[g_seq.song.length], &row, 1);
     g_seq.song.length++;
     seq_unlock(lock_state);
     return true;
@@ -73,6 +123,8 @@ bool song_insert_patterns(uint16_t position, const uint8_t pattern_index[NUM_TRA
         if (pattern_index[track] >= MAX_PATTERNS) return false;
     }
 
+    song_entry_t row;
+    make_row(&row, pattern_index, repeats);
     uint32_t lock_state = seq_lock();
     if (g_seq.song.length >= MAX_SONG_ENTRIES || position > g_seq.song.length) {
         seq_unlock(lock_state);
@@ -82,15 +134,10 @@ bool song_insert_patterns(uint16_t position, const uint8_t pattern_index[NUM_TRA
     // Shift entries after position
     uint16_t count = g_seq.song.length - position;
     if (count > 0) {
-        memmove(&g_seq.song.entries[position + 1],
-                &g_seq.song.entries[position],
-                count * sizeof(song_entry_t));
+        song_move_rows(&g_seq.song.entries[position + 1], &g_seq.song.entries[position], count);
     }
 
-    memcpy(g_seq.song.entries[position].pattern_index,
-           pattern_index,
-           sizeof(g_seq.song.entries[position].pattern_index));
-    g_seq.song.entries[position].repeats = repeats;
+    song_move_rows(&g_seq.song.entries[position], &row, 1);
     g_seq.song.length++;
     transport_t *t = playing_song_transport();
     if (t && position <= t->song_position) t->song_position++;
@@ -107,11 +154,10 @@ bool song_remove(uint16_t position) {
 
     uint16_t count = g_seq.song.length - position - 1;
     if (count > 0) {
-        memmove(&g_seq.song.entries[position],
-                &g_seq.song.entries[position + 1],
-                count * sizeof(song_entry_t));
+        song_move_rows(&g_seq.song.entries[position], &g_seq.song.entries[position + 1], count);
     }
     g_seq.song.length--;
+    uint16_t vacated = g_seq.song.length;
     transport_t *t = playing_song_transport();
     if (t && position < t->song_position) {
         t->song_position--;
@@ -122,6 +168,9 @@ bool song_remove(uint16_t position) {
         t->song_position = (position > 0) ? (uint16_t)(position - 1) : g_seq.song.length;
     }
     seq_unlock(lock_state);
+    // Rows past the length are Core 0's alone (Core 1 reads only the song's
+    // rows), and they stay zero, as a save writes them.
+    memset(&g_seq.song.entries[vacated], 0, sizeof(g_seq.song.entries[vacated]));
     return true;
 }
 
@@ -136,18 +185,17 @@ bool song_move(uint16_t from, uint16_t to) {
         return true;
     }
 
-    song_entry_t tmp = g_seq.song.entries[from];
+    song_entry_t tmp;
+    song_move_rows(&tmp, &g_seq.song.entries[from], 1);
 
     if (from < to) {
-        memmove(&g_seq.song.entries[from],
-                &g_seq.song.entries[from + 1],
-                (to - from) * sizeof(song_entry_t));
+        song_move_rows(&g_seq.song.entries[from], &g_seq.song.entries[from + 1],
+                       (uint16_t)(to - from));
     } else {
-        memmove(&g_seq.song.entries[to + 1],
-                &g_seq.song.entries[to],
-                (from - to) * sizeof(song_entry_t));
+        song_move_rows(&g_seq.song.entries[to + 1], &g_seq.song.entries[to],
+                       (uint16_t)(from - to));
     }
-    g_seq.song.entries[to] = tmp;
+    song_move_rows(&g_seq.song.entries[to], &tmp, 1);
     transport_t *t = playing_song_transport();
     if (t && t->song_position < g_seq.song.length) {
         uint16_t pos = t->song_position;
@@ -169,6 +217,8 @@ void song_clear(void) {
     g_seq.song.length = 0;
     g_seq.song.name[0] = '\0';
     seq_unlock(lock_state);
+    // Outside the lock, as in song_remove(): no row is the song's now.
+    memset(g_seq.song.entries, 0, sizeof(g_seq.song.entries));
 }
 
 void song_set_end_mode(song_end_mode_t mode) {

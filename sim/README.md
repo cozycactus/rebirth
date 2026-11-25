@@ -165,7 +165,7 @@ Pico's BOOTSEL drive. Hold VALUE to enter SELECT PATTERN and press step 14
 to open MIDI SONG. PLAY starts and stops. TRACK changes the page of eight
 source tracks. Steps 1–8 mute, holding a step solos, and VALUE returns to
 SELECT PATTERN. The slot holds up to 1 MiB, 64 source tracks, and
-2,147,483,647 microseconds. The v7 clip save area precedes the MIDI slot. Eight-track v4–v6 saves remain at the end of flash.
+2,147,483,647 microseconds. The v8 clip save area precedes the MIDI slot. Eight-track v4–v6 saves remain at the end of flash.
 MUTE and SOLO address the tracks on the page selected with TRACK.
 
 The timed player preserves note and controller events at their original
@@ -196,9 +196,12 @@ so every part sits on the pads to launch and MUTE by hand afterwards:
   Controllers and pitch bend are not carried over. The song's bars run to
   the end of its track chunks, and further if a note is quantised past it.
 - The bars in their order are the Song-mode chain, consecutive equal bars one
-  row with repeats. The chain holds 256 rows; a longer song plays up to the
-  bar where its 257th row would begin, and the log says how far (five of the
-  eight Twisted songs stop 6–99 bars before their end; Sham at bar 262 of 361).
+  row with repeats. The chain holds as many rows as the core does
+  (`Device.songEntries()`: 384, or 256 in a core built before the export); a
+  longer song plays up to the bar where the row past them would begin, and
+  the log says how far. All eight Twisted songs fit 384 rows (Sham, the
+  longest, needs 355); at 256, five of them stopped 6–99 bars before their
+  end (Sham at bar 262 of 361).
 - MIDI channels: the drums on 10, the Midi Gate part on 16, every other part
   on 1–9 or 11–15. The busiest parts get a channel each while there are
   channels left, a part with its own TAL preset too; the others share one
@@ -208,8 +211,8 @@ so every part sits on the pads to launch and MUTE by hand afterwards:
   knobs and level of its busiest part, and gates the voices of gated parts
   with channel 16, as the full arrangement does.
 
-The page writes the result into the simulated flash as a version 7 save
-(`Device.writeStore`), and the artist turns VALUE to the song's tempo (the
+The page writes the result into the simulated flash as a version 8 save, or
+version 7 for a 256-row core (`Device.writeStore`), and the artist turns VALUE to the song's tempo (the
 device plays one: the tempo the song keeps longest, all its stretches summed,
 within 20–300 BPM), loads
 the save with LOAD (step 10 in SELECT PATTERN), switches to Song mode in the
@@ -226,8 +229,10 @@ image is for the simulator only: a song for the board needs that layout
 (and a way to put it there, as the MIDI Song UF2 does for its slot).
 
 `sim/test/midi_clips_check.js` checks the save layout against one the
-firmware writes, LOAD of every Twisted song, and that two of them, one
-longer than the chain, sound every note start at its step on its channel,
+firmware writes, LOAD of every Twisted song at 384 rows, SAVE after a load,
+and that two of them (Contains LSD; Sham whole, and again cut at 256 rows from
+a version 7 image through the format 7 fallback) sound every note start at
+its step on its channel,
 as the plan has it and as the MIDI file has it, read apart: some note of
 each part at each of its steps, and no note the file does not start there.
 It also launches another clip from a part's pad after the chain and hears
@@ -259,14 +264,17 @@ finished track. The moves come from the layout (`MidiClips.mutes`, spec
   or for the return of a one-bar move) with a little jitter; the quantised
   MUTE lands them on the downbeat. The bass is on page 2: a drop turns TRACK
   by 8 tracks and back.
-- A chain cut short at 256 rows is cut further at its last phrase line (if
-  that line is in its last 8 bars), so the device stops itself on a phrase
-  (Sham: after bar 257). The plain mode keeps its 256 rows.
+- In 384 rows every Twisted song plays whole and the set runs to the song's
+  end. A chain cut short (an older core's 256 rows) is cut further at its
+  last phrase line (if that line is in its last 8 bars), so the device stops
+  itself on a phrase (Sham in 256 rows: after bar 257); the plain mode keeps
+  every row the chain holds.
 
-Sham gets 10 moves (26 MUTE presses, 4 page turns), the eight songs 7–15.
+Sham gets 14 moves over its 361 bars (40 MUTE presses, 4 page turns; 10 in
+256 rows), the eight songs 7–18.
 The hands play this mode, loading included. `sim/test/midi_live_check.js`
-checks the time signatures, Sham's moves against the spec's table and the
-rules on all eight songs, that the plain mode's show and save are
+checks the time signatures, Sham's moves against the spec's tables (384 and
+256 rows) and the rules on all eight songs, that the plain mode's show and save are
 unchanged, and on the core that every change lands on its downbeat, the
 mutes of every bar, every note start of the plan less the muted bars and
 nothing else, and the stop; it also reads `app.js` for the mode's wiring.

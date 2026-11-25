@@ -457,7 +457,8 @@ Artist.SONGS.forEach((song, si) => {
 const LIBRARY = path.join(web, 'songs', 'twisted', 'Midi Files');
 for (const file of require('fs').readdirSync(LIBRARY).filter(f => f.endsWith('.mid')).sort()) {
   const song = MidiSongs.read(new Uint8Array(require('fs').readFileSync(path.join(LIBRARY, file))), file);
-  const clips = MidiClips.plan(song), live = MidiClips.mutes(clips);
+  // The chain the core holds (sim/check.sh passes it, as it reads it from the core).
+  const clips = MidiClips.plan(song, { rows: +process.env.ROWS || 384 }), live = MidiClips.mutes(clips);
   const run = MidiClips.show(clips, 600000, { moves: live.moves, bars: live.setEnd });
   const show = { actions: run.actions, prepEnd: run.actions[0].t - 1, end: run.end };
   where = { song: song.title, form: 'clips', score: 'MUTE' };

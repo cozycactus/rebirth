@@ -33,7 +33,16 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
   const advance = us => device.runUntil(device.now() + us);
   const tap = (key, held = 80000) => { key(true); advance(held); key(false); advance(90000); };
   const selector = () => tap(down => device.encoderSwitch(1, down), 700000);
-  const L = MidiClips.layout;
+  // The chain length and save layout this core has (384 rows, version 8).
+  assert.equal(device.songEntries(), 384, 'the core reports its chain length');
+  // Device's fallback only (no older wasm core is run here): a core without
+  // the export is taken for 256 rows.
+  assert.equal(Device.prototype.songEntries.call({ core: {} }), 256, 'Device reads a missing export as 256 rows');
+  assert.throws(() => MidiClips.layoutFor(512), 'no other chain length');
+  assert.throws(() => MidiClips.layoutFor('256'), 'a number, not a string');
+  assert.throws(() => MidiClips.layoutFor('toString'), 'no inherited key');
+  assert.equal(MidiClips.plan(songs[0]).rows, 384, 'plan() lays out for 384 rows unless told');
+  const L = MidiClips.layoutFor(device.songEntries());
 
   // 1. The layout: a save the firmware writes itself reads back with these
   //    offsets, and its checksum is the one computed over them.
@@ -42,7 +51,7 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
   tap(down => device.step(8, down));          // SAVE
   const saved = store(core), view = new DataView(saved.buffer);
   assert.equal(view.getUint32(0, true), 0x52425448, 'the firmware saved');
-  assert.equal(saved[4], 7, 'version 7');
+  assert.equal(saved[4], L.VERSION, 'version ' + L.VERSION);
   const PAT_BYTES = L.PATTERN_BYTES * 32;
   let crc = crc32(0xffffffff, saved.subarray(L.PAT_OFFSET, L.PAT_OFFSET + PAT_BYTES));
   crc = crc32(crc, saved.subarray(L.SONG_OFFSET, L.SONG_OFFSET + L.SONG_BYTES));
@@ -57,7 +66,11 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
 
   // The plans: the tempo kept longest, the bars to the end of the file, and
   // an image whose patterns and song record sit where the firmware's do.
-  const plans = songs.map(song => MidiClips.plan(song));
+  const plans = songs.map(song => MidiClips.plan(song, { rows: L.ROWS }));
+  plans.forEach(plan => {
+    assert.equal(plan.lost.entries, 0, plan.title + ': the whole chain fits ' + L.ROWS + ' rows');
+    assert.equal(plan.played, plan.bars, plan.title + ': every bar plays');
+  });
   assert.equal(plans[5].bpm, 147, 'Snarled Up: the tempo it keeps longest, not its first');
   assert.equal(plans[0].bars, 235, 'Contains LSD: 235 bars, its file ending on a bar line');
   {
@@ -67,8 +80,9 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
       assert.equal(image[at + 4161], saved[L.PAT_OFFSET + 4161], 'swing as the firmware saves it (50, straight)');
       assert.equal(image[at + 4096], 16, 'pattern length');
     }
-    assert.equal(iv.getUint16(L.SONG_OFFSET + 16640, true), Math.min(256, plans[0].entries.length), 'song length');
-    assert.equal(iv.getUint32(L.SONG_OFFSET + 16644, true), 1, 'song ends with Stop');
+    assert.equal(iv.getUint16(L.SONG_OFFSET + L.TRAILER, true), plans[0].entries.length, 'song length');
+    assert.equal(iv.getUint32(L.SONG_OFFSET + L.TRAILER + 4, true), 1, 'song ends with Stop');
+    assert.equal(image[L.SONG_OFFSET + 64], plans[0].entries[0].repeats, 'repeats at byte 64 of a row');
   }
 
   // 2. LOAD takes every song's image; its clips and routing are what the plan says.
@@ -97,17 +111,30 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
       }
     });
     assert.equal(device.inspect().fatal, null);
-    console.log('LOAD ' + songs[i].title + ': ' + plan.tracks.length + ' tracks, ' + Math.min(256, plan.entries.length) +
+    assert.equal(device.inspect().songLength, plan.entries.length, plan.title + ': LOAD gave the whole chain');
+    if (i === 4) {
+      // SAVE after the load writes the chain back as the image had it.
+      const image = MidiClips.store(plan);
+      tap(down => device.step(8, down));      // SAVE
+      const back = store(core);
+      assert.equal(back[4], L.VERSION, plan.title + ': saved again as version ' + L.VERSION);
+      assert.deepEqual(back.subarray(L.SONG_OFFSET, L.SONG_OFFSET + L.SONG_BYTES),
+        image.subarray(L.SONG_OFFSET, L.SONG_OFFSET + L.SONG_BYTES), plan.title + ': SAVE writes the loaded chain');
+    }
+    console.log('LOAD ' + songs[i].title + ': ' + plan.tracks.length + ' tracks, ' + Math.min(plan.rows, plan.entries.length) +
       ' chain rows' + (plan.lost.entries ? ' (' + plan.entries.length + ' needed: plays ' + plan.played + ' of ' + plan.bars + ' bars)' : ''));
   });
 
-  // 3. The artist loads and starts two songs, one that fits the chain and one
-  //    that does not; every note start of the bars it plays sounds on time,
-  //    as the plan has it and as the MIDI file has it.
-  assert.equal(plans[0].lost.entries, 0, plans[0].title + ' fits the chain');
-  assert.ok(plans[4].lost.entries > 0, plans[4].title + ' is longer than the chain');
-  for (const index of [0, 4]) {
-    const plan = plans[index];
+  // 3. The artist loads and starts songs; every note start of the bars it
+  //    plays sounds on time, as the plan has it and as the MIDI file has it:
+  //    Contains LSD, then Sham whole, then Sham as a 256-row core lays it out,
+  //    cut short, as a version 7 image that this core loads through its
+  //    fallback.
+  const sham256 = MidiClips.plan(songs[4], { rows: 256 });
+  assert.ok(sham256.lost.entries > 0 && sham256.played === 262, sham256.title + ': 256 rows play 262 bars');
+  assert.equal(MidiClips.store(sham256)[4], 7, 'a 256-row plan is a version 7 image');
+  assert.equal(plans[4].played, 361, plans[4].title + ': 384 rows play all 361 bars');
+  for (const [index, plan] of [[0, plans[0]], [4, plans[4]], [4, sham256]]) {
     device.boot(false);
     device.writeStore(MidiClips.store(plan));
     const run = MidiClips.show(plan);
@@ -116,10 +143,11 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
     device.drain();
     const stepUs = Math.floor(60000000 / (plan.bpm * 96)) * 24;
     const notes = [];
-    let start = null, stop = null;
+    let start = null, stop = null, lastRow = 0;
     const until = run.playAt + (plan.played + 2) * 16 * stepUs;
     while (device.now() < until) {
       device.runUntil(device.now() + 500000);
+      if (device.inspect().state !== 0) lastRow = Math.max(lastRow, device.inspect().songPosition);
       for (const e of device.drain()) {
         if (e.type !== 'midi') continue;
         if (e.status === 0xFA) start = e.t;
@@ -130,6 +158,7 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
     assert.notEqual(start, null, plan.title + ': PLAY started the chain');
     assert.ok(Math.abs(device.inspect().bpm - plan.bpm) < 0.06, plan.title + ': the tempo the artist set (' + device.inspect().bpm.toFixed(2) + ')');
     assert.equal(device.inspect().state, 0, plan.title + ': the chain stops at its end');
+    assert.equal(lastRow, Math.min(plan.rows, plan.entries.length) - 1, plan.title + ': it played up to its last row (' + lastRow + ')');
     assert.ok(stop !== null && Math.abs(stop - start - plan.played * 16 * stepUs) < stepUs,
       plan.title + ': it stops after ' + plan.played + ' bars');
     const want = new Map();
@@ -194,7 +223,7 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
   //    in the song editor), a pad picks a part's clip and PLAY plays it on
   //    that part's channel.
   {
-    const plan = plans[4];
+    const plan = sham256;                      // the plan section 3 loaded last
     const long = enc => tap(down => device.encoderSwitch(enc, down), 700000);
     long(1);                                   // VALUE long: SELECT PATTERN
     long(0);                                   // TRACK long: the song editor
@@ -235,6 +264,7 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
     assert.ok(song, 'parts.json: a song "' + title + '"');
     for (const name of Object.keys(parts)) assert.ok(song.tracks.some(t => t.name === name), 'parts.json: ' + title + ' has "' + name + '"');
   }
-  console.log('PASS MIDI songs as clips: the save layout, LOAD of all ' + songs.length + ' songs, two played note for note ' +
-    'against the plan and the file, a clip launched from its pad, parts.json');
+  console.log('PASS MIDI songs as clips: the save layout, LOAD of all ' + songs.length + ' songs, SAVE after a load, ' +
+    'two songs played note for note against the plan and the file (one whole at 384 rows and cut at 256 from a ' +
+    'version 7 image), a clip launched from its pad, parts.json');
 })().catch(error => { console.error(error); process.exitCode = 1; });

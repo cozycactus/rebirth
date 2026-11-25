@@ -1861,7 +1861,7 @@
       $('log').replaceChildren();
       if (pads) {
         if (!rig) throw Error('Нет звукового движка.');
-        const plan = MidiClips.plan(song);
+        const plan = MidiClips.plan(song, { rows: device.songEntries() });
         // Performed: the MUTE part derived from the layout, and the chain cut
         // at the set's last phrase line, so the device stops there itself.
         const live = performed ? MidiClips.mutes(plan) : null;
@@ -1895,7 +1895,7 @@
         say('info', '«' + plan.title + '»: ' + plan.tracks.length + ' треков, ' + plan.channels.length +
             ' MIDI-каналов синтов + барабаны на 10-м; вне сетки 1/16 сдвинуто нот: ' + plan.lost.offGrid +
             ', слито на одном шаге: ' + plan.lost.merged + ', CC и Pitch Bend не перенесены: ' + plan.lost.controllers +
-            (plan.lost.entries ? '. В цепочку прибора вошли 256 строк из ' + plan.entries.length +
+            (plan.lost.entries ? '. В цепочку прибора вошли ' + plan.rows + ' строк из ' + plan.entries.length +
              ': песня играет до такта ' + bars + ' из ' + plan.bars : '') +
             (live ? (bars < plan.played ? ', артист обрезал цепочку по последней фразе' : '') + '. Партия MUTE: ' +
              (run.moves.length ? run.moves.length + ' приёмов' : 'нет (' + noMoves(live) + ')') : '') +

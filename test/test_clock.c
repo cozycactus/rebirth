@@ -721,6 +721,31 @@ static void test_spp_past_the_end_of_a_song_that_stops(void) {
     CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
 }
 
+// An SPP into a chain longer than 256 rows lands on its row and step, and
+// Continue plays on from there into the next row.
+static void test_spp_past_row_255(void) {
+    reset(CLOCK_SOURCE_EXT);
+    build_arrangement(PLAY_MODE_SONG);
+    song_clear();
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) CHECK(song_append((uint8_t)(row % 3), 1));
+    uint32_t t = now() + 1000;
+    uint32_t last = clocks(t, T145, 8);
+    const uint16_t spp = 301 * 16 + 5;
+    wire(last + 1000, 0xF2);
+    wire(last + 1320, spp & 0x7F);
+    wire(last + 1640, spp >> 7);
+    CHECK(g_seq.transport.song_position == 301);
+    CHECK(g_seq.transport.current_pattern[0] == 301 % 3);
+    CHECK(g_seq.transport.current_step == 5);
+    wire(last + 2000, MIDI_CONTINUE);
+    last = clocks(last + T145, T145, 6 * 4);           // four steps
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+    CHECK(g_seq.transport.song_position == 301);
+    clocks(last + T145, T145, 6 * 8);                  // past the bar line
+    CHECK(g_seq.transport.song_position == 302);
+    CHECK(g_seq.transport.current_pattern[0] == 302 % 3);
+}
+
 static void test_a_song_that_ends_is_not_restarted_by_clocks(void) {
     reset(CLOCK_SOURCE_EXT);
     set_note(0, 0, 0, 60, 0);
@@ -1024,6 +1049,7 @@ int main(void) {
     RUN(test_spp_in_pattern_mode);
     RUN(test_spp_in_song_mode);
     RUN(test_spp_past_the_end_of_a_song_that_stops);
+    RUN(test_spp_past_row_255);
     RUN(test_a_song_that_ends_is_not_restarted_by_clocks);
     RUN(test_spp_while_playing_is_ignored);
     RUN(test_ext_stops_on_a_lost_clock);

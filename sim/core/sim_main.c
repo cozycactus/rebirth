@@ -97,6 +97,7 @@ int sim_dac_full_scale_mv(void) { return CV_DAC_FULL_SCALE_MV; }
 uint8_t *sim_midi_song_slot(void) { return (uint8_t *)(XIP_BASE + MIDI_SONG_FLASH_OFFSET); }
 int sim_midi_song_capacity(void) { return MIDI_SONG_FLASH_BYTES; }
 int sim_midi_song_open(void) { return ui_open_midi_song(); }
+int sim_song_entries(void) { return MAX_SONG_ENTRIES; }
 
 // ─── Inspection ─────────────────────────────────────────────────
 
@@ -122,6 +123,7 @@ uint32_t sim_dbg_track_config(int track) {
            ((uint32_t)c->cv_channel << 26);
 }
 int sim_dbg_mutes(void) { return seq_get_track_mutes(); }
+uint32_t sim_dbg_song(void) { return g_seq.song.length | (uint32_t)g_seq.transport.song_position << 16; }
 int sim_dbg_clock_source(void) { return g_seq.clock_source; }
 int sim_dbg_clock_state(void) {
     transport_snapshot_t snap;

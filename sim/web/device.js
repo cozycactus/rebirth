@@ -67,6 +67,11 @@
       return { lastNote: !!(bits & 1), midiIn: !!(bits & 2), padKeys: !!(bits & 4), quantMutes: !!(bits & 8),
                extClock: !!(bits & 16) };
     }
+    // The rows its Song-mode chain holds: 384, or 256 in a core older than the
+    // export (whose save format is 7).
+    songEntries() {
+      return this.core._sim_song_entries ? this.core._sim_song_entries() : 256;
+    }
     // Whether this firmware reads its DIN input at all (older builds do not).
     midiInListening() {
       return !!(this.core._sim_midi_in_listening && this.core._sim_midi_in_listening());
@@ -167,6 +172,7 @@
     inspect() {
       const c = this.core;
       const fatal = c._sim_dbg_fatal();
+      const song = c._sim_dbg_song ? c._sim_dbg_song() : -1;
       return {
         state: c._sim_dbg_transport_state(),
         bpm: c._sim_dbg_bpm(),
@@ -185,6 +191,9 @@
         clockPresent: c._sim_dbg_clock_state ? !!(c._sim_dbg_clock_state() & 4) : false,
         extBpm: c._sim_dbg_ext_tenths ? c._sim_dbg_ext_tenths() / 10 : 0,
         extLosses: c._sim_dbg_ext_losses ? c._sim_dbg_ext_losses() : 0,
+        // The Song-mode chain (absent in an older core): its rows and the row playing.
+        songLength: song < 0 ? -1 : song & 0xffff,
+        songPosition: song < 0 ? -1 : song >>> 16,
         fatal: fatal ? c.UTF8ToString(fatal) : null,
       };
     }

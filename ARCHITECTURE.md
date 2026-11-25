@@ -431,23 +431,31 @@ lock at a step boundary where a change waits (Playback Rules).
 ## Storage
 
 The 2 MiB Pico flash reserves 192 KiB at offset `0xB0000` for project format
-7, 1 MiB at `0xE0000` for the timed MIDI Song and 128 KiB at `0x1E0000` for
+8, 1 MiB at `0xE0000` for the timed MIDI Song and 128 KiB at `0x1E0000` for
 legacy eight-track projects. The linker keeps the firmware below these slots.
 Saving requires stopped transport. After MIDI drains and the other core parks,
 flash is programmed directly from SRAM. The three payloads (patterns, song,
 kit settings) are page-aligned. CRC32 covers their unpadded bytes, and the
 validity header is programmed last.
 
-When the format-7 slot holds no valid project, the loader checks the old slot
-for formats 4, 5 and 6. It restores the original eight tracks, initializes the
+Format 8 holds a song of 384 rows of 68 bytes (64 locations, repeats, three
+bytes of padding: whole words, so a list edit shifts them by words). Format 7,
+in the same slot, held 256 rows of 65 bytes, its kits 9,472 bytes earlier (on
+the device). When the slot holds no valid format 8 project, the loader checks
+it for format 7, with that record's own size, offsets and CRC span, and copies
+the song row by row into the larger one (`LOADED OK`). The records of formats
+4-7 keep their own types (`old_song_t`, `song_v7_t`), sized for each enum width.
+
+When the slot holds no valid project of either format, the loader checks the
+old slot for formats 4, 5 and 6. It restores the original eight tracks, initializes the
 other 56 and expands each song entry. Version 6 also restores kit steps and
 settings. Loading validates the whole project before changing RAM.
 
-A format-7 slot whose save was cut short looks exactly like one that was never
-written, so the loader does not tell the two apart: with no valid format-7
-project it always falls back on the old slot, and the load reports which
-project it gave (`LOADED OK` or `OLD SAVE LOADED`). A save verifies the
-format-7 slot alone.
+A slot whose save was cut short looks exactly like one that was never
+written, so the loader does not tell the two apart: with no valid format-8 or
+format-7 project it always falls back on the old slot, and the load reports
+which project it gave (`LOADED OK` or `OLD SAVE LOADED`). A save verifies the
+format-8 slot alone; it erased any format-7 project there first.
 
 This is one save region. Power loss during erase/program may lose the previous
 save; an incomplete new save is rejected. Preserving the old save across power

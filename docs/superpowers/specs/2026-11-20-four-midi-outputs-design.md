@@ -410,8 +410,8 @@ key is passed through. Everything below works with physical ports.
 
 - `sequencer_state_t` gains `uint8_t track_port[NUM_TRACKS]`, under the shared
   lock like `kit_config`. `sequencer_init()` sets the defaults by group beside
-  `kit_config_defaults()`; `load_stopped()` sets them in the v7 and eight-track
-  branches (not `pattern_init()`: the port is not a location's), before it
+  `kit_config_defaults()`; `load_stopped()` sets them in the v9, v8, v7 and
+  eight-track branches (not `pattern_init()`: the port is not a location's), before it
   refreshes the prepared rows **(call)**.
 - `snapshot_row_locked()` reads the port and `prepare_row()` stores the
   physical port once per row, in the padding after `kind` and `length` (the
@@ -486,28 +486,33 @@ may use one port.
 
 ### Storage (`flash_storage.c`)
 
-- **Format v8** = the three v7 payloads unchanged, then a fourth,
-  `uint8_t track_port[NUM_TRACKS]` (64 bytes in one page, the 64 covered by the
-  CRC). Same slot at `0xB0000`: header 256 + patterns 131,584 + song 16,896 + kits
-  1,024 + ports 256 = 150,016 of 196,608 bytes (v7 uses 149,760). These are the
-  device figures (`-fshort-enums`); the simulator's 4-byte enums give the same
-  layout at larger offsets, ports at 168,192 **(call)**. `pattern_t`,
+- **Format v9** (renumbered 2026-11-25: v8 is the 384-row song chain,
+  `2026-11-25-song-chain-384-design.md`) = the three v8 payloads unchanged, then a
+  fourth, `uint8_t track_port[NUM_TRACKS]` (64 bytes in one page, the 64 covered by
+  the CRC). Same slot at `0xB0000`: header 256 + patterns 131,584 + song 26,368 +
+  kits 1,024 + ports 256 = 159,488 of 196,608 bytes (v8 uses 159,232), ports at
+  159,232. These are the device figures (`-fshort-enums`); the simulator's 4-byte
+  enums give the same layout at larger offsets, ports at 177,664 **(call)**. `pattern_t`,
   `track_config_t` and every legacy record stay byte-identical.
-- **Loader order.** A valid v8 in the slot; else a valid v7 in the same slot
-  (ports by group, reported as a normal load, `LOADED OK`); else the eight-track
+- **Loader order.** A valid v9 in the slot; else a valid v8 or v7 in the same
+  slot (ports by group, reported as a normal load, `LOADED OK`); else the eight-track
   slot, v4-v6, as today (ports by group, so A for T1-8; `OLD SAVE LOADED`).
   Validation rejects a port above 3; ports B-D are valid on a one-output board.
-- **Downgrade.** Firmware that knows only v7 does not read a v8 slot (its
-  loader requires version 7): it falls back to the eight-track save or reports
+- **Downgrade.** Firmware that knows only v8 and v7 does not read a v9 slot (its
+  loader requires version 8 or 7): it falls back to the eight-track save or reports
   a failed load, as every earlier format step did.
-- **Frozen records first.** `pattern_v5_t` and `pattern_v6_t` embed the live
-  `track_config_t` and `step_t`, and their size asserts (459, 972, `old_song_t`
-  2,316) run only under `__arm__`. Before the work starts the on-flash records
-  of v7 and older get their own typedefs (enums as `uint8_t`) with size and
-  offset asserts under the device ABI: v7 `pattern_t` is 4,108 bytes and
-  `song_t` 16,652 with `-fshort-enums` (4,684 and 16,660 with 4-byte enums).
-  Loading is tested with images written by the old writers (v5, v6, v7) built
-  with `-fshort-enums`; today's `write_legacy_image()` serializes live types.
+- **Frozen records first.** The song chain change froze the song records
+  (`old_song_t`, `song_v7_t`, asserted under both enum sizes). `pattern_v5_t` and
+  `pattern_v6_t` still embed the live `track_config_t` and `step_t`, and their
+  size asserts (459, 972) run only under `__arm__`. Before the work starts the
+  pattern records of v8 and older get their own typedefs, keeping each ABI's own
+  layout (a `uint8_t` enum would move the host and simulator offsets), with size
+  and offset asserts under both enum sizes: `pattern_t` is 4,108 bytes with
+  `-fshort-enums` and 4,684 with 4-byte enums.
+  Loading is tested with images written by the old writers (v5, v6, v7, v8)
+  built with `-fshort-enums`; today's `write_legacy_image()` serializes the
+  eight-track patterns from live types (its song record is written byte by
+  byte).
 - **Idle wait.** `midi_wait_output_idle()` waits for every present port: queue,
   real-time queue and Clock flag empty; then the PL011 path stays
   `uart_tx_wait_blocking`, and a PIO port waits for its TX FIFO empty and one
@@ -601,10 +606,10 @@ per-track block like the kit settings (chosen): one page, nothing else moves.
   a bus hangs); `clock_check.js` (Clock, Start, Stop and Continue out);
   `artist_check.js` (Clock, Start and Stop counts); `midi_clips_check.js` (the
   times of the first Start and Stop).
-- `midi_clips_check.js` also asserts that a firmware save is version 7, with
-  the CRC over three payloads: it moves to v8 and four **(call)**.
-  `sim/web/midi_clips.js` writes a v7 image, which the v7 fallback keeps loading
-  (ports by group).
+- `midi_clips_check.js` also asserts that a firmware save is version 8, with
+  the CRC over three payloads: it moves to v9 and four **(call)**.
+  `sim/web/midi_clips.js` writes a v8 image (v7 for a 256-row core), which the v8
+  and v7 fallbacks keep loading (ports by group).
 - `sim_dbg_track_config` gains the stored port at bit 28 (bits 28-31 are free),
   and `Device.trackConfig()` reads the port bits **(call)**;
   `sim_dbg_note_drops(port)` reads the counters. `sim/build.sh` gets feature bit
@@ -650,8 +655,8 @@ the PIO interrupt, and `fake_uart_run_until()` serves both by wire time **(call)
 - **Catch-up** (`test_clock`) **(call)**: the existing burst scenario (two kits
   flamming through bursts) with a port loaded near the table: no overflow, no
   stuck note, drops counted.
-- **Storage** (`test_storage`): v8 round trip; v4-v7 images written by the old
-  writers; a v8 save cut short; a port above 3; the idle wait on four ports
+- **Storage** (`test_storage`): v9 round trip; v4-v8 images written by the old
+  writers; a v9 save cut short; a port above 3; the idle wait on four ports
   (the fake flash erase checks that every port is idle **(call)**).
 - **UI** (`test_ui`): the Port rows, scrolling, the folded text; pass-through
   port and channel per note; a retrigger across ports refused or sent whole,

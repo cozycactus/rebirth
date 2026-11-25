@@ -744,6 +744,63 @@ static void test_moving_song_entry_keeps_playing_entry_anchor(void) {
     CHECK(g_seq.transport.current_pattern[0] == 2);
 }
 
+// A full chain of one-bar rows, each row's location its row number modulo 32.
+static void start_full_song(song_end_mode_t end) {
+    for (unsigned row = 0; row < MAX_SONG_ENTRIES; row++) CHECK(song_append((uint8_t)(row % MAX_PATTERNS), 1));
+    song_set_end_mode(end);
+    transport_set_mode(PLAY_MODE_SONG);
+    transport_start();
+    tick();
+}
+
+// Song mode plays on past row 255, to the last row and round, or to the stop.
+static void test_song_plays_past_row_255(void) {
+    start_full_song(SONG_END_LOOP);
+    uint32_t lock = seq_lock();
+    g_seq.transport.song_position = 254;
+    seq_unlock(lock);
+    play_song_entries(1);
+    CHECK(g_seq.transport.song_position == 255);
+    play_song_entries(1);
+    CHECK(g_seq.transport.song_position == 256);
+    CHECK(g_seq.transport.current_pattern[0] == 256 % MAX_PATTERNS);
+    lock = seq_lock();
+    g_seq.transport.song_position = MAX_SONG_ENTRIES - 2;
+    seq_unlock(lock);
+    play_song_entries(1);
+    CHECK(g_seq.transport.song_position == MAX_SONG_ENTRIES - 1);
+    CHECK(g_seq.transport.current_pattern[0] == (MAX_SONG_ENTRIES - 1) % MAX_PATTERNS);
+    play_song_entries(1);
+    CHECK(g_seq.transport.song_position == 0);
+    CHECK(g_seq.transport.state == TRANSPORT_PLAYING);
+
+    reset();
+    start_full_song(SONG_END_STOP);
+    lock = seq_lock();
+    g_seq.transport.song_position = MAX_SONG_ENTRIES - 1;
+    seq_unlock(lock);
+    play_song_entries(1);
+    CHECK(g_seq.transport.state == TRANSPORT_STOPPED);
+}
+
+// List edits while row 300 plays keep it playing and the row after it next.
+static void test_song_edits_past_row_255_keep_the_playing_row(void) {
+    start_full_song(SONG_END_LOOP);
+    CHECK(song_remove(MAX_SONG_ENTRIES - 1));
+    uint32_t lock = seq_lock();
+    g_seq.transport.song_position = 300;
+    seq_unlock(lock);
+    CHECK(song_remove(10));                 // 299 now holds the playing row (300)
+    CHECK(g_seq.transport.song_position == 299);
+    CHECK(song_insert(5, 7, 1));            // back to 300
+    CHECK(g_seq.transport.song_position == 300);
+    CHECK(song_move(301, 0));               // the row after it moves to the front
+    CHECK(g_seq.transport.song_position == 301);
+    play_song_entries(1);                   // so the row first after 301 (302) plays
+    CHECK(g_seq.transport.song_position == 302);
+    CHECK(g_seq.transport.current_pattern[0] == 302 % MAX_PATTERNS);
+}
+
 static void test_staging_overflow_never_sends_partial_message(void) {
     for (unsigned note = 0; note <= MIDI_STEP_BUFFER_BYTES / 3; note++) midi_buf_note_on(0, note % 128, 100);
     midi_buf_flush();
@@ -3174,6 +3231,8 @@ int main(void) {
     RUN(test_removing_playing_song_entry_moves_to_following_entry);
     RUN(test_removing_playing_first_song_entry_moves_to_following_entry);
     RUN(test_moving_song_entry_keeps_playing_entry_anchor);
+    RUN(test_song_plays_past_row_255);
+    RUN(test_song_edits_past_row_255_keep_the_playing_row);
     RUN(test_staging_overflow_never_sends_partial_message);
     RUN(test_running_status_within_burst);
     RUN(test_status_repeated_after_queue_ran_empty);

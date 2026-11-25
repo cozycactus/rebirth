@@ -1520,6 +1520,24 @@ void transport_stop(void) {
     playback_unlock(playback_irq_state);
 }
 
+// A project load replaced the song, stopped: the song position was the old
+// song's. In Song mode the position goes back to the new song's start, as PLAY
+// sets it, so a Continue starts the new song from its first row; in the other
+// modes only the song position is cleared.
+void transport_song_loaded(void) {
+    uint32_t playback_irq_state = playback_lock();
+    if (g_seq.transport.mode == PLAY_MODE_SONG) {
+        (void)reset_position_locked();
+    } else {
+        uint32_t lock_state = seq_lock();
+        transport_t *t = (transport_t *)&g_seq.transport;
+        t->song_position = 0;
+        t->song_repeat_count = 0;
+        seq_unlock(lock_state);
+    }
+    playback_unlock(playback_irq_state);
+}
+
 void transport_continue(void) {
     uint32_t playback_irq_state = playback_lock();
     if (g_seq.transport.state == TRANSPORT_PLAYING || g_seq.transport.mode == PLAY_MODE_MIDI_SONG ||

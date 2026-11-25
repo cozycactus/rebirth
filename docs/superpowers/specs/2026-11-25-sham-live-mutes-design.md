@@ -464,6 +464,21 @@ it to the other hand. Nobody has listened to the moves yet.
   with no ring; the plain clips mode on the same page showed the ring and
   no hands. No console error but the page's known 404s (`favicon.ico`,
   `local-songs/twisted/catalog.json`).
+- **With the 384-row chain** (`2026-11-25-song-chain-384-design.md`, merged
+  after this one): every Twisted song fits the chain whole, so nothing is
+  cut and every set runs to the end of its song; the rules are unchanged,
+  and "the last 8 bars" and the phrase-line end now apply to the song's own
+  end. Sham plays 361 bars with 14 moves (40 MUTE presses, 4 page turns):
+  the ten of the table above, then `kick` 264-265 [1], `hats` 277-281 [5, 6],
+  `hats` 317-321 [5, 6], `hats` 333-337 [5, 6] (0-based, as the table).
+  Moves and last bar per song, 384 rows (256 rows before): Contains LSD 7,
+  235 (7, 235); The Synths of Orpheus 15, 269 (15, 257); Centaurs Are Real
+  18, 356 (15, 275); A Magician Nevers Reveals His Tricks 9, 256 (9, 256);
+  It's a Sham, Man 14, 361 (10, 257); Snarled Up 13, 282 (13, 253); Are You
+  Sponged 11, 255 (11, 255); Sunstead 13, 281 (13, 260). The cut path stays
+  as built and tested: a 256-row plan (an older core's) still ends Sham's set
+  on bar 257 with the table above; `midi_live_check.js` performs it on the
+  new core from a version 7 image.
 
 ### Code review (DeepSeek DS1–DS14, Grok G1–G5)
 
