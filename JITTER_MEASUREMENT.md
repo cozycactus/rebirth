@@ -163,14 +163,16 @@ location):
 | `midi_send_*()`, `midi_output_overflowed()`, `midi_clear_output_queue()` | TX | one message or one batch copied in, then the drain as above |
 
 `flash_storage_load()` refuses while playing; the flash save and
-`midi_wait_output_idle()` run only when stopped. Stopped, the save and the load
-wait for MIDI output to go idle and then copy one location per `seq_lock()`
+`midi_wait_output_idle()` run only when stopped. Stopped, both wait for MIDI
+output to go idle. The save then programs flash straight from RAM with Core 1
+parked, taking no `seq_lock()`. The load copies one location per `seq_lock()`
 section (4,108 bytes), never the 128 KB of patterns in one section; the song
 and the kit settings follow without `seq_lock`.
 
 Song list edits are the exception. A song row is 17 words, and
-`song_move_rows()` (in RAM) copies each as 17 word loads and stores: about 75
-cycles a row in the RP2040 Release build. An insert, remove or move at the front
+`song_move_rows()` (in RAM) copies each as 17 word loads and stores, unrolled
+in the source: about 75 cycles a row in the RP2040 Release build and 80-85 in
+Debug. A new row is built before the lock and stored with the same copy. An insert, remove or move at the front
 of a full 384-row song keeps Core 0's interrupts off for about 0.23 ms at 125
 MHz (the C library's `memmove`, byte by byte at 7-9 cycles a byte, took
 0.93-1.19 ms for a full 256-row song of 65-byte rows). This is an estimate from

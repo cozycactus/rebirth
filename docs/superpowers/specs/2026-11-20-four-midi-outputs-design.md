@@ -410,8 +410,8 @@ key is passed through. Everything below works with physical ports.
 
 - `sequencer_state_t` gains `uint8_t track_port[NUM_TRACKS]`, under the shared
   lock like `kit_config`. `sequencer_init()` sets the defaults by group beside
-  `kit_config_defaults()`; `load_stopped()` sets them in the v8, v7 and eight-track
-  branches (not `pattern_init()`: the port is not a location's), before it
+  `kit_config_defaults()`; `load_stopped()` sets them in the v9, v8, v7 and
+  eight-track branches (not `pattern_init()`: the port is not a location's), before it
   refreshes the prepared rows **(call)**.
 - `snapshot_row_locked()` reads the port and `prepare_row()` stores the
   physical port once per row, in the padding after `kind` and `length` (the
@@ -509,8 +509,10 @@ may use one port.
   layout (a `uint8_t` enum would move the host and simulator offsets), with size
   and offset asserts under both enum sizes: `pattern_t` is 4,108 bytes with
   `-fshort-enums` and 4,684 with 4-byte enums.
-  Loading is tested with images written by the old writers (v5, v6, v7) built
-  with `-fshort-enums`; today's `write_legacy_image()` serializes live types.
+  Loading is tested with images written by the old writers (v5, v6, v7, v8)
+  built with `-fshort-enums`; today's `write_legacy_image()` serializes the
+  eight-track patterns from live types (its song record is written byte by
+  byte).
 - **Idle wait.** `midi_wait_output_idle()` waits for every present port: queue,
   real-time queue and Clock flag empty; then the PL011 path stays
   `uart_tx_wait_blocking`, and a PIO port waits for its TX FIFO empty and one

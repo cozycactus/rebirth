@@ -252,8 +252,8 @@ be its 30 s timeout, so look for "Timeout" first and rerun it alone):
   flipped CRC byte, a bad end mode is rejected and falls back or fails with RAM
   unchanged; a format-8 round trip with 384 rows and the pad bytes 0; length
   385, a bad location in row 383, a flipped byte in row 383 rejected; an
-  unknown version 9 rejected; a format-8 save cut short next to a valid format 7
-  is not a successful save; eight-track images v4-v6 as today; a 256-row
+  unknown version 9 rejected; a format-8 save cut short over a format 7 leaves
+  neither (the save erased the slot first); eight-track images v4-v6 as today; a 256-row
   eight-track song.
 - `test_song`: `song_move_rows()` against `memmove` (both directions, 0, 1 and
   383 rows); a full song of 384 rows: insert refused, remove row 0, move 0->383

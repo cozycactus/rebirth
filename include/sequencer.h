@@ -153,7 +153,7 @@ typedef union {
     struct {
         uint8_t pattern_index[NUM_TRACKS]; // Pattern location per track/section
         uint8_t repeats;    // How many times (1–255, 0 = skip)
-        uint8_t _pad[3];    // Always 0
+        uint8_t _pad[3];    // Written 0 by the edits; a save and a load clear it
     };
     uint32_t words[SONG_ROW_WORDS];
 } song_entry_t;
