@@ -222,12 +222,20 @@ function playSong(core, song, form) {
   // What is heard is what was programmed: in a bar where a clip plays whole,
   // the Note Ons on its channel are the clip's notes in step order, accents at
   // velocity 127. (A synth track's channel is its index.)
-  // Bars are counted from the first note on the wire, whose three bytes end
-  // 960 us after its tick: PLAY's debounce ends on a pass of the main loop, so
-  // the set starts a millisecond or two off the moment the script assumes.
+  // Bars are counted from the first tick of the set: PLAY's debounce ends on a
+  // pass of the main loop, so the set starts a millisecond or two off the
+  // moment the script assumes. The first note's three bytes end 960 us after
+  // its tick, or later when Start and the first Clock are still on the wire
+  // (they are when PLAY lands just before a pulse). The Clocks of the first
+  // bars give the tick grid itself: one every four pulses from the first tick,
+  // and the least delayed of them ends 320 us after its tick.
   const cvRises = show.song.cv ? cv.filter(e => e.high) : [];
   const cvFirst = cvRises[0]?.t ?? Infinity;
-  const origin = Math.min(firstNote === null ? Infinity : firstNote - 960, cvFirst);
+  const clockUs = show.barUs / 96;
+  const startAt = midi.find(m => m.status === 0xFA)?.t ?? Infinity;
+  const gridFirst = midi.filter(m => m.status === 0xF8 && m.t > startAt).slice(0, 32)
+    .reduce((min, m, k) => Math.min(min, m.t - 320 - k * clockUs), Infinity);
+  const origin = Math.min(firstNote === null ? Infinity : firstNote - 960, cvFirst, gridFirst);
   if (show.song.cv) {
     for (const [pair, track] of Artist.CV_TRACKS.entries()) {
       check(!perChannel[track], Artist.TRACK_NAME[track] + ' leaked to MIDI');
