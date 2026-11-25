@@ -214,7 +214,7 @@ so every part sits on the pads to launch and MUTE by hand afterwards:
 The page writes the result into the simulated flash as a version 8 save, or
 version 7 for a 256-row core (`Device.writeStore`), and the artist turns VALUE to the song's tempo (the
 device plays one: the tempo the song keeps longest, all its stretches summed,
-within 20–300 BPM), loads
+within 20–300 BPM; the song list shows the same tempo), loads
 the save with LOAD (step 10 in SELECT PATTERN), switches to Song mode in the
 song editor (step 2) and presses PLAY. After the song the clips stay on the
 pads, and the channel voices stay until the next start or a reboot. The

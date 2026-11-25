@@ -108,8 +108,16 @@
     };
     events.sort(sorted);
     for (const event of events) event.t = timeAt(event.tick);
+    // The song's tempo is the one it keeps longest, summed over its stretches
+    // (Snarled Up ramps through 75 BPM in its first bars and then stays at 147).
+    const kept = new Map();
+    map.forEach((t, i) => {
+      const ticks = Math.max(0, (map[i + 1]?.tick ?? duration) - t.tick);
+      kept.set(t.us, (kept.get(t.us) || 0) + ticks);
+    });
+    const us = [...kept].reduce((a, b) => b[1] > a[1] ? b : a)[0];
     const title = name.replace(/\.midi?$/i, '');
-    return { id: title, title, duration: timeAt(duration), lastTick: duration, bpm: 60000000 / map[0].us,
+    return { id: title, title, duration: timeAt(duration), lastTick: duration, bpm: 60000000 / us,
       ppqn, timeAt, tempos: map, tracks, events,
       meters: meters.sort((a, b) => a.tick - b.tick) };   // time signatures (FF 58), as in the file
   }

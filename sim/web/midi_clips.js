@@ -262,16 +262,9 @@
     }
 
     const played = entries.slice(0, rows).reduce((n, e) => n + e.repeats, 0);
-    // The device plays one tempo: the one the song keeps longest, summed over
-    // its stretches (Snarled Up ramps through 75 BPM in its first bars and
-    // then stays at 147), within the firmware's 20-300 BPM.
-    const kept = new Map();
-    song.tempos.forEach((t, i) => {
-      const ticks = Math.max(0, (song.tempos[i + 1]?.tick ?? song.lastTick) - t.tick);
-      kept.set(t.us, (kept.get(t.us) || 0) + ticks);
-    });
-    const us = [...kept].reduce((a, b) => b[1] > a[1] ? b : a)[0];
-    const bpm = Math.min(300, Math.max(20, Math.round(600000000 / us) / 10));
+    // The device plays one tempo: the song's, the one it keeps longest
+    // (midi_songs.js), to 0.1 BPM within the firmware's 20-300 BPM.
+    const bpm = Math.min(300, Math.max(20, Math.round(song.bpm * 10) / 10));
     return {
       title: song.title, bpm, bars, played, rows, tracks, entries, channels,
       ppqn: song.ppqn, meters: song.meters || [],
