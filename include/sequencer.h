@@ -341,8 +341,9 @@ bool song_insert_patterns(uint16_t position, const uint8_t pattern_index[NUM_TRA
                           uint8_t repeats);
 bool song_remove(uint16_t position);
 bool song_move(uint16_t from, uint16_t to);
-// Moves `rows` whole rows from src to dst (they may overlap), a word at a time,
-// from RAM on the device. For song.c's list edits, under seq_lock.
+// Moves `rows` whole rows from src to dst, a word at a time, from RAM on the
+// device. For song.c's list edits, under seq_lock. dst and src are rows of one
+// song_entry_t array (they may overlap), or, for a single row, any two rows.
 void song_move_rows(song_entry_t *dst, const song_entry_t *src, uint16_t rows);
 void song_clear(void);
 void song_set_end_mode(song_end_mode_t mode);

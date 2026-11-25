@@ -165,6 +165,14 @@ TEST(test_song_move_rows_matches_memmove) {
     memmove(&want[100], &want[3], 200 * sizeof(song_entry_t));
     song_move_rows(&got[5], &got[5], 10);
     ASSERT_EQ(memcmp(got, want, sizeof(got)), 0);
+    /* One row from another array, either way round in memory. */
+    song_entry_t one;
+    memset(&one, 0x3C, sizeof(one));
+    song_move_rows(&got[7], &one, 1);
+    memcpy(&want[7], &one, sizeof(one));
+    song_move_rows(&one, &got[9], 1);
+    ASSERT_EQ(memcmp(&one, &want[9], sizeof(one)), 0);
+    ASSERT_EQ(memcmp(got, want, sizeof(got)), 0);
 }
 
 /* A row written over old bytes still has its padding 0. */

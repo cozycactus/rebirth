@@ -55,6 +55,10 @@ add_executable(rp2040_sequencer
     src/shared_state.c
 )
 
+# song_move_rows() is 17 unrolled word copies a row; vectorised at -O3 it
+# grows from about 200 to 660 bytes of RAM for no gain on the Cortex-M0+.
+set_source_files_properties(src/song.c PROPERTIES COMPILE_OPTIONS -fno-tree-vectorize)
+
 target_include_directories(rp2040_sequencer PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
