@@ -261,6 +261,7 @@
     const bpm = Math.min(300, Math.max(20, Math.round(600000000 / us) / 10));
     return {
       title: song.title, bpm, bars, played, tracks, entries, channels,
+      ppqn: song.ppqn, meters: song.meters || [],
       gateChannel: GATE_CHANNEL, drumChannel: DRUM_CHANNEL,
       lost: {
         offGrid: tracks.reduce((n, t) => n + t.offGrid, 0),
@@ -271,6 +272,121 @@
     };
   }
 
+  // ─── The live MUTE part (docs/superpowers/specs/2026-11-25-sham-live-mutes-design.md) ───
+  // Moves derived from the layout: a kick roll before a section line, a drop
+  // (kick and bass) before a big one, a hats cut or the snare out inside a
+  // steady groove, each back on a phrase line. Chain bars are 0-based.
+  const LIVE = { SPACE: 8, GROOVE_SPACE: 16, SECTION: 4, BIG: 8, QUIET: 2, DROP_EVERY: 64, HATS: 4, SNARE: 2 };
+
+  function mutes(p) {
+    const P = p.played, T = p.tracks, barTicks = (p.ppqn || 480) * 4;
+    const sounds = T.map(t => Array.from({ length: P }, (_, b) => t.cells.slice(b * STEPS, (b + 1) * STEPS).some(c => c && (c.flags & ACTIVE))));
+    const on = (t, b) => b >= 0 && b < P && sounds[t][b];
+    const change = b => b < 1 ? 0 : T.reduce((n, t, i) => n + (t.role !== 'gate' && on(i, b) !== on(i, b - 1) ? 1 : 0), 0);
+
+    // Musical bar lines from the time signatures; a chain bar is usable when
+    // it starts on one of a 4/4 bar. Runs of usable bars are the stretches,
+    // each with its own phrase grid.
+    // A time signature that makes no bar (a zero numerator, a denominator
+    // past 1/64) is left out: the one before it goes on, 4/4 at the start.
+    const valid = m => m.num >= 1 && m.den >= 1 && m.den <= 64 && m.num * barTicks / m.den >= 1;
+    const meters = (p.meters || []).filter(valid);
+    if (!meters.length || meters[0].tick > 0) meters.unshift({ tick: 0, num: 4, den: 4 });
+    const usable = new Set();
+    meters.forEach((m, k) => {
+      const until = Math.min(k + 1 < meters.length ? meters[k + 1].tick : P * barTicks, P * barTicks);
+      const len = m.num * barTicks / m.den;
+      for (let t = m.tick; t < until; t += len) if (m.num === 4 && m.den === 4 && t % barTicks === 0) usable.add(t / barTicks);
+    });
+    const stretches = [];
+    for (let b = 0; b < P;) {
+      if (!usable.has(b)) { b++; continue; }
+      let e = b;
+      while (e < P && usable.has(e)) e++;
+      stretches.push([b, e]);
+      b = e;
+    }
+    const lines = [];
+    for (const [a, e] of stretches) {
+      let best = -1, phase = 0;
+      for (let f = 0; f < 8; f++) {
+        let sum = 0;
+        for (let b = a; b < e; b++) if (b >= 1 && b % 8 === f) sum += change(b);
+        if (sum > best) { best = sum; phase = f; }
+      }
+      for (let b = a; b < e; b++) if (b % 8 === phase) lines.push(b);
+    }
+    // The set ends on the last phrase line inside a chain that is cut short,
+    // when that line is in its last 8 bars; else (no 4/4 there) the chain
+    // plays out.
+    let setEnd = P;
+    if (P < p.bars) {
+      const inside = lines.filter(b => b <= P && b >= P - 8);
+      if (inside.length) setEnd = Math.max(...inside);
+    }
+
+    // The groups over every track, continuations (+2) included; a move with
+    // a track past page 2 is not made, so a group is never muted in part.
+    const pick = test => T.map((t, i) => i).filter(i => T[i].role !== 'gate' && test(T[i]));
+    const groups = {
+      kick: pick(t => t.role === 'kick'),
+      hats: pick(t => [42, 44, 46].includes(t.drum)),
+      snare: pick(t => [38, 40].includes(t.drum) && !/fill/i.test(t.name)),
+      bass: pick(t => t.role === 'bass'),
+    };
+    const tieInto = (t, b) => {
+      const cell = T[t].cells[b * STEPS], prior = T[t].cells[b * STEPS - 1];
+      return !!(b > 0 && cell && prior && prior.note === cell.note && (prior.flags & TIE));
+    };
+    // A group's tracks that play anywhere from the press bar to the return,
+    // each of them in every one of those bars; else null.
+    const whole = (group, press, end) => {
+      const tracks = groups[group].filter(t => { for (let b = press; b <= end; b++) if (on(t, b)) return true; return false; });
+      if (!tracks.length) return null;
+      for (const t of tracks) for (let b = press; b <= end; b++) if (!on(t, b)) return null;
+      return tracks;
+    };
+    const make = (kind, names, start, end) => {
+      const press = start - 1;
+      if (!stretches.some(([a, e]) => press >= a && end < e)) return null;
+      for (let b = start; b < end; b++) if (change(b) > LIVE.QUIET) return null;
+      const tracks = [];
+      for (const name of names) {
+        const these = whole(name, press, end);
+        if (!these) return null;
+        tracks.push(...these);
+      }
+      if (tracks.some(t => t >= 16)) return null;
+      if (tracks.some(t => tieInto(t, start) || tieInto(t, end))) return null;
+      return { kind, press, start, end, tracks };
+    };
+
+    const moves = [];
+    let prior = -Infinity, lastDrop = -Infinity, count = 0;
+    for (const L of lines) {
+      if (L < prior + LIVE.SPACE || L > setEnd - LIVE.SPACE) continue;
+      const c = change(L);
+      let m = null;
+      if (c >= LIVE.SECTION) {
+        if (c >= LIVE.BIG && groups.bass.length && L - lastDrop >= LIVE.DROP_EVERY) m = make('drop', ['kick', 'bass'], L - 2, L);
+        if (!m) m = make('kick', ['kick'], L - 1, L);
+      } else if (c <= LIVE.QUIET && L >= prior + LIVE.GROOVE_SPACE) {
+        let steady = groups.kick.length > 0;
+        for (let b = L - 8; b <= L && steady; b++) steady = groups.kick.some(t => on(t, b));
+        if (steady) {
+          const hats = () => groups.hats.length ? make('hats', ['hats'], L - LIVE.HATS, L) : null;
+          const snare = () => groups.snare.length ? make('snare', ['snare'], L - LIVE.SNARE, L) : null;
+          m = count++ % 2 === 0 ? hats() || snare() : snare() || hats();
+        }
+      }
+      if (!m) continue;
+      moves.push(m);
+      prior = L;
+      if (m.kind === 'drop') lastDrop = L;
+    }
+    return { setEnd, stretches, groups, moves };
+  }
+
   function crc32(crc, bytes) {
     for (const byte of bytes) {
       crc ^= byte;
@@ -279,7 +395,23 @@
     return crc >>> 0;
   }
 
-  function store(p) {
+  // The save image. With opts.bars (the performed mode) the chain keeps only
+  // the rows of its first opts.bars bars, so the device stops there.
+  function chain(p, bars) {
+    const entries = p.entries.slice(0, 256);
+    if (bars === undefined) return entries;
+    const out = [];
+    let n = 0;
+    for (const e of entries) {
+      if (n >= bars) break;
+      const repeats = Math.min(e.repeats, bars - n);
+      out.push(repeats === e.repeats ? e : { ...e, repeats });
+      n += repeats;
+    }
+    return out;
+  }
+
+  function store(p, opts) {
     const bytes = new Uint8Array(STORE_BYTES).fill(0xff);
     const view = new DataView(bytes.buffer);
     const text = (at, s, size) => {
@@ -311,11 +443,12 @@
       text(at + 4162, ('P' + (loc + 1)).padEnd(8, ' '), 9);
     }
     bytes.fill(0, SONG_OFFSET, SONG_OFFSET + SONG_BYTES);
-    p.entries.slice(0, 256).forEach((entry, i) => {
+    const rows = chain(p, opts && opts.bars);
+    rows.forEach((entry, i) => {
       bytes.set(entry.locations, SONG_OFFSET + i * 65);
       bytes[SONG_OFFSET + i * 65 + 64] = entry.repeats;
     });
-    view.setUint16(SONG_OFFSET + 16640, Math.min(256, p.entries.length), true);
+    view.setUint16(SONG_OFFSET + 16640, rows.length, true);
     view.setUint32(SONG_OFFSET + 16644, 1, true);   // SONG_END_STOP
     text(SONG_OFFSET + 16648, p.title.replace(/^\d+\s*/, '').toUpperCase().replace(/[^ -~]/g, ' ').slice(0, 8), 9);
     for (let t = 0; t < NUM_TRACKS; t++) bytes.set(KIT_DEFAULT, KIT_OFFSET + t * KIT_BYTES);
@@ -330,8 +463,10 @@
   }
 
   // The panel moves that load it and play the chain: tempo, LOAD, Song mode,
-  // back to the Session view, PLAY. Actions in Artist.schedule's form.
-  function show(p, start = 600000) {
+  // back to the Session view, PLAY. Actions in Artist.schedule's form. With
+  // opts.moves (mutes()) the artist then performs them with MUTE until the
+  // chain, cut at opts.bars (store with the same bars), stops by itself.
+  function show(p, start = 600000, opts) {
     const actions = [];
     let t = start;
     const push = a => actions.push({ ...a, t });
@@ -358,7 +493,9 @@
     say('VALUE долго → селектор; кнопка 10 — LOAD: «' + p.title + '», ' + p.tracks.length + ' треков');
     press(VALUE_SW, 620, 200);
     press({ op: 'step', index: 9 }, 80, 400);
-    say('TRACK долго → цепочка песни; кнопка 2 — режим Song (' + Math.min(256, p.entries.length) + ' строк, ' + p.played + ' тактов)');
+    const rows = chain(p, opts && opts.bars);
+    say('TRACK долго → цепочка песни; кнопка 2 — режим Song (' + rows.length + ' строк, ' +
+        rows.reduce((n, e) => n + e.repeats, 0) + ' тактов)');
     press(TRACK_SW, 620, 200);
     press({ op: 'step', index: 1 }, 80, 200);
     press(VALUE_SW, 80, 200);
@@ -368,10 +505,99 @@
     const playAt = t;
     wait(80);
     push({ op: 'play', down: false });
-    return { actions, playAt };
+    if (!opts || !opts.moves) return { actions, playAt };
+    return perform(p, actions, playAt, opts);
   }
 
-  const api = { plan, store, show, layout: { PAT_OFFSET, SONG_OFFSET, KIT_OFFSET, PATTERN_BYTES, SONG_BYTES, STORE_BYTES } };
+  // The MUTE part after PLAY. Each move is two changes, each landing on a
+  // downbeat: pressed on beat 4 of the bar before (beat 2 when the page
+  // turns, beat 2 of the muted bar for the return of a one-bar move) plus
+  // 40-160 ms, seeded by the title; at most two keys at once, two columns
+  // apart; a page turn of 8 TRACK detents 100 ms after the last press on the
+  // old page (the other hand turns while that one lifts). The last press is
+  // 60 ms before the downbeat at least, else a beat earlier but after the
+  // mute it returns from has landed, else the move is not made.
+  const START_US = 23000;           // PLAY to the first step (artist.js START_LATENCY_US)
+  const KIND = {
+    kick: ['бочка уходит на такт перед новой частью', 'бочка возвращается с сильной долей'],
+    drop: ['бочка и бас уходят на два такта перед дропом', 'бочка и бас возвращаются вместе: дроп'],
+    hats: ['хэты уходят на четыре такта', 'хэты возвращаются с фразой'],
+    snare: ['малый уходит на два такта', 'малый возвращается с фразой'],
+  };
+  function perform(p, loading, playAt, opts) {
+    const stepUs = Math.floor(60000000 / (p.bpm * 96)) * 24, barUs = stepUs * 16, beatUs = stepUs * 4;
+    const t0 = playAt + START_US;
+    const at = (bar, beat) => t0 + bar * barUs + (beat - 1) * beatUs;
+    let seed = [...p.title].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0, 2166136261);
+    const rnd = () => {
+      seed = (seed + 0x6D2B79F5) >>> 0;
+      let x = seed;
+      x = Math.imul(x ^ (x >>> 15), x | 1);
+      x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+      return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+    };
+    const name = t => p.tracks[t].name;
+    let page = 0;
+    // One change landing on bar B: its actions, or null if it does not fit.
+    const change = (B, tracks, beat, after, text) => {
+      const pages = [...new Set(tracks.map(t => t >> 3))];
+      const jitter = Math.round((40 + 120 * rnd()) * 1000);
+      for (let b = beat; b >= 1; b--) {
+        let t = at(B - 1, b) + jitter;
+        if (t < after) continue;
+        const out = [{ op: 'say', kind: 'device', text, t }];
+        let shown = page, last = 0;
+        for (const pg of pages.includes(shown) ? [shown, ...pages.filter(x => x !== shown)] : pages) {
+          if (pg !== shown) {
+            if (last) t = last + 100000;
+            out.push({ op: 'say', kind: 'device', text: 'TRACK: страница ' + (pg + 1), t });
+            const dir = pg > shown ? 1 : -1;
+            let edge = t;
+            for (let d = 0; d < 8; d++) {
+              for (let e = 0; e < 4; e++) { edge = t; out.push({ op: 'edge', enc: 0, dir, t }); t += 3000; }
+              t += 13000;
+            }
+            t = edge + 80000;
+            shown = pg;
+          }
+          const cols = tracks.filter(x => x >> 3 === pg).map(x => x & 7).sort((x, y) => x - y);
+          for (let i = 0; i < cols.length;) {
+            const two = i + 1 < cols.length && cols[i + 1] - cols[i] <= 2 ? 2 : 1;
+            for (let k = 0; k < two; k++) {
+              out.push({ op: 'mute', track: cols[i + k], down: true, t: t + k * 12000 });
+              out.push({ op: 'mute', track: cols[i + k], down: false, t: t + k * 12000 + 80000 });
+              last = t + k * 12000;
+            }
+            i += two;
+            t = last + 150000;
+          }
+        }
+        if (last <= at(B, 1) - 60000) return { out, page: shown };
+      }
+      return null;
+    };
+    const actions = loading.slice(), kept = [];
+    for (const m of opts.moves) {
+      // A change turns the page when it needs a page other than the one shown.
+      const turns = () => new Set([page, ...m.tracks.map(t => t >> 3)]).size > 1;
+      const names = m.tracks.map(name).join(', ');
+      const before = page;
+      const off = change(m.start, m.tracks, turns() ? 2 : 4, 0, 'MUTE ' + names + ': ' + KIND[m.kind][0] + ', с такта ' + (m.start + 1));
+      if (!off) continue;
+      page = off.page;
+      const back = change(m.end, m.tracks, turns() ? 2 : m.end - m.start === 1 ? 2 : 4, at(m.start, 1) + 100000,
+        'MUTE ' + names + ': ' + KIND[m.kind][1] + ' такта ' + (m.end + 1));
+      if (!back) { page = before; continue; }
+      page = back.page;
+      actions.push(...off.out, ...back.out);
+      kept.push(m);
+    }
+    actions.sort((a, b) => a.t - b.t);
+    const bars = Math.min(opts.bars === undefined ? p.played : opts.bars, p.played);
+    return { actions, playAt, t0, end: t0 + bars * barUs + 1500000, moves: kept };
+  }
+
+  const api = { plan, mutes, store, show, layout: { PAT_OFFSET, SONG_OFFSET, KIT_OFFSET, PATTERN_BYTES, SONG_BYTES, STORE_BYTES } };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MidiClips = api;
 })(globalThis);

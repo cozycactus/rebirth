@@ -1,5 +1,7 @@
 // The hands' whole-show check, without a browser: every song in every
-// arrangement in all four scores (base, fw2, keys, pads: 240 shows), planned
+// arrangement in all four scores (base, fw2, keys, pads: 240 shows), and the
+// eight Twisted songs performed with MUTE over their clips (posed in full,
+// the whole show live, as it plays at speed 1), planned
 // by handplan.js and posed by handrig.js's driver, against a table of
 // touches built here from show.actions alone (never from the plan's own
 // touches or turns):
@@ -42,6 +44,8 @@ const T = globalThis.THREE;
 const HandRig = require(path.join(web, 'handrig.js'));
 const HandPlan = require(path.join(web, 'handplan.js'));
 const Artist = require(path.join(web, 'artist.js'));
+const MidiSongs = require(path.join(web, 'midi_songs.js'));
+const MidiClips = require(path.join(web, 'midi_clips.js'));
 const { PANEL } = HandPlan, MM = PANEL.UNITS_PER_MM;
 
 const SCORES = [['base', {}], ['fw2', { fw2: true }], ['keys', { fw2: true, keys: true }], ['pads', { fw2: true, pads: true }]];
@@ -446,6 +450,40 @@ Artist.SONGS.forEach((song, si) => {
     }
   });
 });
+// The eight Twisted songs laid out as clips and performed with MUTE
+// ("Клипы на падах · артист играет MUTE"): every check on each, the whole
+// show live (it plays at speed 1, its loading too), the live set sampled
+// every 20 000.
+const LIBRARY = path.join(web, 'songs', 'twisted', 'Midi Files');
+for (const file of require('fs').readdirSync(LIBRARY).filter(f => f.endsWith('.mid')).sort()) {
+  const song = MidiSongs.read(new Uint8Array(require('fs').readFileSync(path.join(LIBRARY, file))), file);
+  const clips = MidiClips.plan(song), live = MidiClips.mutes(clips);
+  const run = MidiClips.show(clips, 600000, { moves: live.moves, bars: live.setEnd });
+  const show = { actions: run.actions, prepEnd: run.actions[0].t - 1, end: run.end };
+  where = { song: song.title, form: 'clips', score: 'MUTE' };
+  const before = failures.length;
+  if (run.moves.length !== live.moves.length) {
+    fail(0, '-', '(1) ' + (live.moves.length - run.moves.length) + ' of the script\'s moves do not fit the show');
+  }
+  const plan = HandPlan.build(show.actions), tab = table(show.actions);
+  assigned(plan, tab);
+  sums.intervals += tab.intervals.length;
+  sums.runs += tab.runs.length;
+  sums.groups += tab.groups.length;
+  sums.nearPairs += tab.pairs.filter(p => p.apart <= NEAR_TRACKS).length;
+  sums.farPairs += tab.pairs.filter(p => p.apart > NEAR_TRACKS).length;
+  sums.copies += tab.copies.length;
+  sums.holds += tab.holds.length;
+  sums.inner += tab.holds.reduce((n, h) => n + h.inner.filter(x => !x.edges).length, 0);
+  sums.innerRuns += tab.holds.reduce((n, h) => n + h.inner.filter(x => x.edges).length, 0);
+  for (const k of ['nested', 'farInHold', 'secondCopy', 'bigGroup']) sums[k] += tab[k];
+  const line = song.title + ' clips MUTE: ' + tab.intervals.length + ' touches, ' + tab.runs.length + ' turns, posed and travelled: ' +
+    posed(show, plan, tab, stats, true);
+  stats.posed++;
+  stats.shows++;
+  console.log(line + ', ' + (failures.length > before ? 'FAILED (' + (failures.length - before) + ')' : 'ok'));
+}
+
 const secs = ((Date.now() - started) / 1000).toFixed(1);
 console.log('table: ' + sums.intervals + ' intervals, ' + sums.runs + ' runs, ' + sums.copies + ' copies, ' + sums.groups + ' groups, ' +
   sums.nearPairs + ' one-hand and ' + sums.farPairs + ' two-hand MUTE pairs, ' + sums.holds + ' holds with ' + sums.inner +

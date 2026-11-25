@@ -198,7 +198,7 @@ so every part sits on the pads to launch and MUTE by hand afterwards:
 - The bars in their order are the Song-mode chain, consecutive equal bars one
   row with repeats. The chain holds 256 rows; a longer song plays up to the
   bar where its 257th row would begin, and the log says how far (five of the
-  eight Twisted songs stop 4–79 bars before their end).
+  eight Twisted songs stop 6–99 bars before their end; Sham at bar 262 of 361).
 - MIDI channels: the drums on 10, the Midi Gate part on 16, every other part
   on 1–9 or 11–15. The busiest parts get a channel each while there are
   channels left, a part with its own TAL preset too; the others share one
@@ -232,6 +232,44 @@ as the plan has it and as the MIDI file has it, read apart: some note of
 each part at each of its steps, and no note the file does not start there.
 It also launches another clip from a part's pad after the chain and hears
 one bar of it.
+
+### Clips performed with MUTE
+
+**Клипы на падах · артист играет MUTE** (offered when the firmware's MUTE
+waits for the bar line) loads the song the same way and then performs it:
+while the device plays the chain in Song mode, the artist takes tracks out
+with MUTE and brings them back on a downbeat, as a live act works a
+finished track. The moves come from the layout (`MidiClips.mutes`, spec
+`docs/superpowers/specs/2026-11-25-sham-live-mutes-design.md`):
+
+- Phrase lines: every 8 bars, on the offset where most tracks start or stop
+  at once, per stretch of 4/4 bars (the file's time signatures; Are You
+  Sponged's two 6/4 bars get no move around them).
+- A **kick roll** (the kick out for the bar before a section line), a
+  **drop** (kick and bass out for the two bars before a big one, at most one
+  every 64 bars), a **hats cut** (four bars) or the **snare out** (two bars)
+  inside a steady groove, taken in turn.
+- A move mutes every track of its group (by role or drum note, a `+2`
+  continuation too) that plays from the bar the key is pressed in to the
+  return, and each of them must play in all of those bars and sit on pages
+  1–2; no section change inside it, no tied note at its edges; returns at
+  least 8 bars apart (16 before a hats or snare move), none in the last 8.
+  A time signature that makes no bar counts as 4/4.
+- The keys are pressed on beat 4 of the bar before (beat 2 for a page turn,
+  or for the return of a one-bar move) with a little jitter; the quantised
+  MUTE lands them on the downbeat. The bass is on page 2: a drop turns TRACK
+  by 8 tracks and back.
+- A chain cut short at 256 rows is cut further at its last phrase line (if
+  that line is in its last 8 bars), so the device stops itself on a phrase
+  (Sham: after bar 257). The plain mode keeps its 256 rows.
+
+Sham gets 10 moves (26 MUTE presses, 4 page turns), the eight songs 7–15.
+The hands play this mode, loading included. `sim/test/midi_live_check.js`
+checks the time signatures, Sham's moves against the spec's table and the
+rules on all eight songs, that the plain mode's show and save are
+unchanged, and on the core that every change lands on its downbeat, the
+mutes of every bar, every note start of the plan less the muted bars and
+nothing else, and the stop; it also reads `app.js` for the mode's wiring.
 
 ### Part sounds by ear
 
@@ -475,7 +513,8 @@ the firmware sees the press and leaves when it sees the release; between
 gestures the hands lift and leave the panel. They only watch the score:
 nothing they do reaches the device. They do not play the synths' knobs, the
 MIDI keyboard card, or the user's own presses. They play the artist's sets
-only: not a MIDI Song, nor its loading as the device's clips ("Клипы на
+and a song performed with MUTE over its clips ("Клипы на падах · артист
+играет MUTE"), but not a MIDI Song, nor the plain clips mode ("Клипы на
 падах", which presses the panel: the ring marks those presses even with the
 box ticked, and the hands are not built while it loads), nor the PAD phrases
 of the four SH-101 songs (MIDI the score sends straight to the synth, with no
@@ -497,7 +536,10 @@ skipped, the ring stays until the set ends or is stopped, and the hands are
 there from the next show on. Once built, unticking and ticking the box hides
 and shows them at once. The build also waits while a MIDI Song loads or
 plays (its task would stall the device's tick beyond the 60 ms look-ahead):
-ticked then, the hands are built when the song ends or is stopped. It may
+ticked then, the hands are built when the song ends or is stopped. A song
+performed with MUTE may build them while it loads, before anything is
+scheduled (the device stopped, silent), for up to 4 s; if they are not
+ready by then, that show gets the ring. It may
 run in a preparation (silent, as it is played faster than real time) and on
 an idle page, and so also while the device sounds there, after a click on
 the panel has taken a set over (the artist stops, the sequencer plays on)
@@ -526,8 +568,11 @@ hand rules and the order of a hand's fingers across held keys, the grip
 turning with the knob, nothing of the hand's mesh through a control or the
 plate, the hands' speed), 4 of them also every 20 ms of the live set;
 `HANDS_FULL=1` poses every show, and `QMUTE=1` builds the scores with
-`quantMutes`, so a MUTE group is held as the page plays it. `sim/check.sh`
-runs both, passing `QMUTE` as for the artist check.
+`quantMutes`, so a MUTE group is held as the page plays it. It also poses
+the eight Twisted songs performed with MUTE, each in full and every 20 ms,
+the whole show held to the live set's limits (it plays at speed 1); that
+adds about 35 s. `sim/check.sh` runs both, passing `QMUTE` as for the
+artist check.
 
 The frame cost was measured on an Apple M1 (headless Chrome 157, WebGL
 through ANGLE on Metal), the page at 1500 × 1000 and a pixel ratio of 2, the

@@ -32,6 +32,12 @@
   // the SH-101 voices its MIDI channels play, kept until the next start or a
   // reboot, so the pads still sound the song's parts after it has played.
   let padsRun = null;
+  // A performed clips song ('live') may build the hands while it loads: the
+  // launch serial of that start, 0 otherwise (buildable).
+  let buildDuringLoad = 0;
+  // The channel voices of a clips song while its start still waits (the
+  // hands' build): endShow stops them if the start is abandoned there.
+  let loadingPlayer = null;
   // The part that plays alone in the full arrangement (its track), or null:
   // set by a part panel's solo box, dropped when that panel's part or parts
   // change and when the song ends.
@@ -1682,6 +1688,9 @@
     const can = device.features();
     const fits = { base: !can.lastNote, fw2: can.lastNote, keys: can.lastNote && can.midiIn, pads: can.lastNote && can.padKeys };
     for (const option of variants.options) option.disabled = !fits[option.value];
+    // The MUTE part needs MUTE to wait for the bar line.
+    const liveOption = $('midi-song-mode').querySelector('option[value="live"]');
+    if (liveOption) liveOption.disabled = !can.quantMutes;
     variants.value = fits.pads ? 'pads' : fits.keys ? 'keys' : fits.fw2 ? 'fw2' : 'base';
     const box = $('kbd-keys');
     const glide = e => {
@@ -1832,7 +1841,8 @@
   async function startMidiSong(song) {
     const request = ++launchSerial;
     const firmware = $('midi-song-mode').value === 'firmware';
-    const pads = $('midi-song-mode').value === 'pads';
+    const performed = $('midi-song-mode').value === 'live';
+    const pads = $('midi-song-mode').value === 'pads' || performed;
     stopPads();
     $('show-start').disabled = true;
     $('show-stop').disabled = false;
@@ -1852,26 +1862,51 @@
       if (pads) {
         if (!rig) throw Error('Нет звукового движка.');
         const plan = MidiClips.plan(song);
-        device.writeStore(MidiClips.store(plan));
+        // Performed: the MUTE part derived from the layout, and the chain cut
+        // at the set's last phrase line, so the device stops there itself.
+        const live = performed ? MidiClips.mutes(plan) : null;
+        device.writeStore(MidiClips.store(plan, live ? { bars: live.setEnd } : undefined));
         phase = 'midi-loading';
+        // While a performed song loads the device is stopped and nothing is
+        // scheduled: the hands' build (0.2-0.3 s) may run now, up to 4 s,
+        // else this show gets the ring.
+        if (performed) buildDuringLoad = request;
         const player = await rig.midiParts(channelSong(plan));
-        if (request !== launchSerial) { player.stop(ctx.currentTime); return; }
-        const run = MidiClips.show(plan, device.now() + 300000);
+        loadingPlayer = player;
+        if (performed && handsWanted() && !handLayer && request === launchSerial) {
+          await Promise.race([loadHands(), new Promise(resolve => setTimeout(resolve, 4000))]);
+        }
+        // Only this start's window: a later start may have opened its own.
+        if (buildDuringLoad === request) buildDuringLoad = 0;
+        if (request !== launchSerial) {
+          player.stop(ctx.currentTime);
+          if (loadingPlayer === player) loadingPlayer = null;
+          return;
+        }
+        const run = MidiClips.show(plan, device.now() + 300000, live ? { moves: live.moves, bars: live.setEnd } : undefined);
         const barUs = Math.floor(60000000 / (plan.bpm * 96)) * 24 * 16;
-        show = { actions: run.actions, prepEnd: run.playAt - 200000, t0: run.playAt, barUs,
-                 end: run.playAt + plan.played * barUs + 1500000 };
+        show = { actions: run.actions, prepEnd: run.playAt - 200000, t0: run.t0 ?? run.playAt, barUs,
+                 end: run.end ?? run.playAt + plan.played * barUs + 1500000 };
         Artist.schedule(show, device, hands, io);
-        padsRun = { plan, player, held: new Set(),
+        padsRun = { plan, player, held: new Set(), performed,
                     channels: new Set([...plan.channels.map(c => c.channel), plan.gateChannel]) };
+        loadingPlayer = null;
+        const bars = live ? Math.min(live.setEnd, plan.played) : plan.played;
         say('info', '«' + plan.title + '»: ' + plan.tracks.length + ' треков, ' + plan.channels.length +
             ' MIDI-каналов синтов + барабаны на 10-м; вне сетки 1/16 сдвинуто нот: ' + plan.lost.offGrid +
             ', слито на одном шаге: ' + plan.lost.merged + ', CC и Pitch Bend не перенесены: ' + plan.lost.controllers +
             (plan.lost.entries ? '. В цепочку прибора вошли 256 строк из ' + plan.entries.length +
-             ': песня играет до такта ' + plan.played + ' из ' + plan.bars : '') +
+             ': песня играет до такта ' + bars + ' из ' + plan.bars : '') +
+            (live ? (bars < plan.played ? ', артист обрезал цепочку по последней фразе' : '') + '. Партия MUTE: ' +
+             (run.moves.length ? run.moves.length + ' приёмов' : 'нет (' + noMoves(live) + ')') : '') +
             '. После песни пады играют партии в режиме Pattern: VALUE долго, TRACK долго, кнопка 3.');
         phase = 'prep';
         speed = 1;                // the artist loads it at a hand's pace
         refreshMidiParts();       // the part panels edit the full arrangement only
+        if (performed) {
+          generation++;           // a show of its own for the hands, planned now that the phase is 'prep'
+          planHands();
+        }
       } else if (firmware) {
         if (!device.openMidiSong(firmwareMidiImage(song))) throw Error('Прошивка отклонила образ MIDI Song.');
         midiRun = { song, firmware, start: device.now() };
@@ -1900,8 +1935,16 @@
         refreshMidiParts();
       }
     } catch (error) {
+      if (buildDuringLoad === request) buildDuringLoad = 0;
       if (request === launchSerial) endShow(error.message);
     }
+  }
+  // Why a performed song has no MUTE part, for the log.
+  function noMoves(live) {
+    if (!live.groups.kick.some(t => t < 16)) return 'нет бочки на страницах 1–2';
+    if (!live.stretches.length) return 'нет тактов 4/4';
+    if (!live.moves.length) return 'ни один приём не прошёл правила: партии не звучат ровно, смена части или связанная нота';
+    return 'ни один приём не успевается в темпе песни';
   }
   // One SH-101 voice per MIDI channel of the laid-out song, with the preset,
   // knobs and level of the busiest part on that channel; the gate channel
@@ -1933,6 +1976,7 @@
     launchSerial++;
     clearSolo();
     if (phase === 'prep') stopPads();   // stopped before the song was loaded
+    if (loadingPlayer) { loadingPlayer.stop(ctx.currentTime); loadingPlayer = null; }   // ... or while it waits
     midiRun?.player?.stop(ctx.currentTime);
     midiRun = null;
     hands.clear();
@@ -2063,10 +2107,11 @@
   const handsWanted = () => $('show-hands').checked;
   // Shown: wanted, loaded, able to draw (its WebGL context not lost), not
   // failed on this show, not in a preparation faster than x16, and not with
-  // a MIDI song laid out as clips (padsRun: its loading presses the panel,
-  // but the hands play the artist's sets only); there the ring.
+  // a MIDI song laid out as clips unless performed (padsRun: the plain
+  // mode's loading presses the panel, but the hands play the artist's sets
+  // and the performed mode only); there the ring.
   const handsShown = () => handsWanted() && !!handLayer && handLayer.available && handsFailed !== generation &&
-    !(phase === 'prep' && (speed > 16 || speed === Infinity)) && !padsRun;
+    !(phase === 'prep' && (speed > 16 || speed === Infinity)) && !(padsRun && !padsRun.performed);
 
   // The hands' scripts, one after another, then the layer: once, memoised;
   // null without WebGL2 (or with WebGL drawn in software) or when anything
@@ -2076,11 +2121,14 @@
   // layer and its warm-up are one task of 0.2–0.3 s (sim/README.md, "The
   // hands"), so they wait while the set sounds (the ring until then) or a
   // MIDI Song loads or plays (longer than the look-ahead: the tick would
-  // stall), and while the hands are not wanted: they build on an idle page
-  // or in an artist's preparation only (a MIDI song laid out as clips loads
-  // in a 'prep' of its own, at real speed: not there).
+  // stall), and while the hands are not wanted: they build on an idle page,
+  // in an artist's preparation, or while a performed clips song loads (the
+  // device stopped, nothing scheduled: buildDuringLoad); never in a clips
+  // song's own 'prep', which runs at real speed.
   const buildable = () => new Promise(resolve => {
-    const check = () => ((phase === 'idle' || (phase === 'prep' && !padsRun)) && handsWanted() ? resolve() : setTimeout(check, 250));
+    const check = () => ((phase === 'idle' || (phase === 'prep' && !padsRun) ||
+                          (phase === 'midi-loading' && buildDuringLoad === launchSerial)) && handsWanted()
+      ? resolve() : setTimeout(check, 250));
     check();
   });
   function loadHands() {
@@ -2111,13 +2159,13 @@
     return handsLoad;
   }
   // The running show's plan for the hands: now if they are loaded, else
-  // once they are, if the show is still the same one. Only the artist's
-  // set has one: an idle page and a MIDI Song (no artist, show null; laid
-  // out as clips, padsRun) have none.
+  // once they are, if the show is still the same one. The artist's set and
+  // a performed clips song have one: an idle page and a MIDI Song (no
+  // artist, show null; laid out as clips but not performed) have none.
   function planHands() {
     const gen = generation;
     const plan = () => {
-      if (gen !== generation || (phase !== 'prep' && phase !== 'live') || padsRun) return;
+      if (gen !== generation || (phase !== 'prep' && phase !== 'live') || (padsRun && !padsRun.performed)) return;
       try {
         handLayer.setShow(show, gen);
       } catch (e) {
