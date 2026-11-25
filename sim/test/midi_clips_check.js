@@ -72,6 +72,8 @@ const store = core => core.HEAPU8.slice(core._sim_flash_store(), core._sim_flash
     assert.equal(plan.played, plan.bars, plan.title + ': every bar plays');
   });
   assert.equal(plans[5].bpm, 147, 'Snarled Up: the tempo it keeps longest, not its first');
+  songs.forEach((song, i) => assert.equal(Math.round(song.bpm), Math.round(plans[i].bpm),
+    song.title + ': the song list shows the tempo the set plays'));
   assert.equal(plans[0].bars, 235, 'Contains LSD: 235 bars, its file ending on a bar line');
   {
     const image = MidiClips.store(plans[0]), iv = new DataView(image.buffer);
