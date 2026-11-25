@@ -16,7 +16,7 @@ Built for the Raspberry Pi Pico (RP2040) — make full tracks without a computer
   MUTE row and a PLAY button; the 16 step buttons edit the focused clip
 - **Launch quantization** — pad and scene launches and MUTE changes land on the
   next bar (default), beat, step, or at the end of the track's loop
-- **Song mode** — chain patterns with repeat counts, loop or stop at end
+- **Song mode** — chain up to 384 rows of patterns with repeat counts, loop or stop at end
 - **Pattern queue** — schedule the next pattern during playback
 - **Track mutes** — MUTE changes at the launch point and flashes white while it
   waits; hold one MUTE key and press others to change several tracks together
@@ -340,8 +340,10 @@ buttons edit it.
 - Step editor: encoder 1 short toggles accent, long toggles slide; encoder 2
   long toggles tie. Accent can combine with either connection type.
 
-Projects use format 7 and a CRC32. Loading an eight-track project (versions
-4–6) restores T1–T8 and starts the higher tracks empty. Version 6 preserves
+Projects use format 8 and a CRC32. A format 7 project (a song of up to 256
+rows) still loads, as `LOADED OK`; the next save writes it as format 8. Loading
+an eight-track project (versions 4–6) restores T1–T8 and starts the higher
+tracks empty. Version 6 preserves
 its kit lanes and settings. The 64-track project occupies one flash slot,
 so losing power during a save can lose that save. When flash holds no valid
 64-track project (none was saved yet, or a save was cut short), LOAD gives the
@@ -495,7 +497,7 @@ test/
 - [x] Jitter measurement — GPIO probe + on-device ISR timing stats
 - [x] USB MIDI removed by design
 - [x] Kit track: 909 over DIN MIDI, 12 lanes, velocity levels, flams (bench items
-      in [HARDWARE_STATUS.md](HARDWARE_STATUS.md)), save format v7
+      in [HARDWARE_STATUS.md](HARDWARE_STATUS.md)), save format v7 (now v8, a 384-row song chain)
 - [x] Note entry from a MIDI keyboard: step + key, pass-through otherwise (host
       tests only; the input circuit is a bench item in [HARDWARE_STATUS.md](HARDWARE_STATUS.md))
 - [x] External MIDI clock: INT / EXT / AUTO, Start, Stop, Continue, SPP (host

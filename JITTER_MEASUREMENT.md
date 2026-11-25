@@ -157,7 +157,7 @@ location):
 | `seq_set_kit_config()` | seq | the track's kit settings (about 15 bytes) in one section; then one refresh per location |
 | `seq_clear_stored_mutes()`, after a MUTE change to audible | seq | one location's stored mutes per section, 32 sections; then one refresh per location for each track that had one |
 | `seq_set_track_mute()`, `seq_get_track_mutes()`, `sequencer_clip_mask()`, `song_clear()`, `song_set_end_mode()`, `song_append*()` | seq | a few bytes |
-| `song_insert*()`, `song_remove()`, `song_move()` | seq | `memmove` of the entries after the edit point: up to 255 x 9 = 2,295 bytes (see below) |
+| `song_insert*()`, `song_remove()`, `song_move()` | seq | `song_move_rows()` of the rows after the edit point: up to 383 x 68 = 26,044 bytes (see below) |
 | UI (`ui.c`): step toggles, step editor, length -/+, track config read, focus, pattern select, Song editor reads | seq | one location's steps or config, one song entry, or a few bytes |
 | UART0 TX interrupt | TX | a byte or two (the FIFO is off) |
 | `midi_send_*()`, `midi_output_overflowed()`, `midi_clear_output_queue()` | TX | one message or one batch copied in, then the drain as above |
@@ -165,15 +165,18 @@ location):
 `flash_storage_load()` refuses while playing; the flash save and
 `midi_wait_output_idle()` run only when stopped. Stopped, the save and the load
 wait for MIDI output to go idle and then copy one location per `seq_lock()`
-section (972 bytes; the song and the kit settings, about 2.4 KB, in one more),
-never the 31 KB of patterns in one section.
+section (4,108 bytes), never the 128 KB of patterns in one section; the song
+and the kit settings follow without `seq_lock`.
 
-Song list edits are the exception: `memmove` copies byte by byte (7-9 cycles a
-byte in the firmware's newlib), so an insert, remove or move near the start of a
-long song keeps Core 0's interrupts off for about 130-165 us at 125 MHz with 256
-entries, and under 100 us below about 150 entries. This is an estimate from the
-instruction count, not a measurement. The same section can also hold back
-Core 1's timer ISR, which takes `seq_lock` every step.
+Song list edits are the exception. A song row is 17 words, and
+`song_move_rows()` (in RAM) copies each as 17 word loads and stores: about 75
+cycles a row in the RP2040 Release build. An insert, remove or move at the front
+of a full 384-row song keeps Core 0's interrupts off for about 0.23 ms at 125
+MHz (the C library's `memmove`, byte by byte at 7-9 cycles a byte, took
+0.93-1.19 ms for a full 256-row song of 65-byte rows). This is an estimate from
+the instruction count, not a measurement; instruction fetches from SRAM can
+add bus waits. The same section can also hold back Core 1's timer ISR, which
+takes `seq_lock` every pulse.
 
 ## Current Bench Status
 

@@ -274,8 +274,9 @@ input circuit is the MIDI keyboard's (above).
 ## Known Follow-Ups
 
 - Song list edits (`song_insert*()`, `song_remove()`, `song_move()`) near the
-  front of a 256-entry song keep Core 0's interrupts off for an estimated
-  130-165 us (a `memmove` under `seq_lock`; JITTER_MEASUREMENT.md).
+  front of a full 384-row song keep Core 0's interrupts off for an estimated
+  0.23 ms (a word copy under `seq_lock`; JITTER_MEASUREMENT.md): not measured
+  on a board.
 
 ## Not Implemented Yet
 
